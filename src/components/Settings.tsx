@@ -1,7 +1,18 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import Icon from "./Icon";
 import { AiConfig } from "../types";
+import { TOOLBAR_FEATURES, getEnabledFeatures, setEnabledFeatures } from "../constants/toolbarFeatures";
+import {
+  getDedupMode,
+  setDedupMode,
+  DEDUP_GRANULARITY_OPTIONS,
+  DEDUP_CHAR_SUBMODE_OPTIONS,
+  type DedupMode,
+  type DedupGranularity,
+  type CharSubMode,
+} from "../constants/dedupConfig";
 import "./Settings.css";
 
 function Settings() {
@@ -20,10 +31,43 @@ function Settings() {
   const [showApiKey, setShowApiKey] = useState(false);
   const [aiSaveStatus, setAiSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
+  // 工具栏功能配置
+  const [enabledFeatures, setEnabledFeaturesState] = useState<string[]>(getEnabledFeatures);
+
+  // 去重粒度配置
+  const [dedupMode, setDedupModeState] = useState<DedupMode>(getDedupMode);
+
+  const handleChangeDedupMode = (next: DedupMode) => {
+    setDedupModeState(next);
+    setDedupMode(next);
+    // 广播去重配置变更事件，通知工具栏窗口同步
+    emit("floast-dedup-mode-changed", next);
+  };
+
+  const handleToggleFeature = (id: string) => {
+    setEnabledFeaturesState((prev) => {
+      const next = prev.includes(id)
+        ? prev.filter((f) => f !== id)
+        : [...prev, id];
+      setEnabledFeatures(next);
+      // 广播功能配置变更事件，通知其他窗口同步
+      emit("floast-features-changed", next);
+      return next;
+    });
+  };
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("floast-theme", theme);
+    // 广播主题变更事件，通知其他窗口同步
+    emit("floast-theme-changed", theme);
   }, [theme]);
+
+  // 设置窗口：允许内容滚动
+  useEffect(() => {
+    document.body.classList.add("settings-window");
+    return () => { document.body.classList.remove("settings-window"); };
+  }, []);
 
   // 加载自启动状态
   useEffect(() => {
@@ -59,7 +103,7 @@ function Settings() {
       <fieldset className="settings-section">
         <legend className="settings-section-heading">通用设置</legend>
 
-        <div className="settings-item">
+        <div className="settings-item settings-row">
           <label className="settings-checkbox-label">
             <input
               type="checkbox"
@@ -75,19 +119,74 @@ function Settings() {
             />
             <span>开机自启动</span>
           </label>
+
+          <div className="settings-inline-group">
+            <label className="settings-label" htmlFor="settings-theme">主题</label>
+            <select
+              id="settings-theme"
+              value={theme}
+              onChange={(e) => setTheme(e.target.value as "light" | "dark")}
+              className="settings-select"
+            >
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset className="settings-section">
+        <legend className="settings-section-heading">悬浮工具栏</legend>
+        <p className="settings-hint">选中文字后显示的功能按钮</p>
+        <div className="settings-features-grid">
+          {TOOLBAR_FEATURES.map((feature) => (
+            <label key={feature.id} className="settings-feature-chip">
+              <input
+                type="checkbox"
+                checked={enabledFeatures.includes(feature.id)}
+                onChange={() => handleToggleFeature(feature.id)}
+              />
+              <Icon name={feature.icon} size={14} />
+              <span>{feature.label}</span>
+            </label>
+          ))}
         </div>
 
-        <div className="settings-item">
-          <label className="settings-label" htmlFor="settings-theme">主题</label>
-          <select
-            id="settings-theme"
-            value={theme}
-            onChange={(e) => setTheme(e.target.value as "light" | "dark")}
-            className="settings-select"
-          >
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
-          </select>
+        <div className="settings-item settings-row">
+          <div className="settings-inline-group">
+            <label className="settings-label" htmlFor="settings-dedup-granularity">去重粒度</label>
+            <select
+              id="settings-dedup-granularity"
+              value={dedupMode.granularity}
+              onChange={(e) => handleChangeDedupMode({
+                ...dedupMode,
+                granularity: e.target.value as DedupGranularity,
+              })}
+              className="settings-select"
+            >
+              {DEDUP_GRANULARITY_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          {dedupMode.granularity === "char" && (
+            <div className="settings-inline-group">
+              <label className="settings-label" htmlFor="settings-dedup-char-submode">字符去重方式</label>
+              <select
+                id="settings-dedup-char-submode"
+                value={dedupMode.charSubMode}
+                onChange={(e) => handleChangeDedupMode({
+                  ...dedupMode,
+                  charSubMode: e.target.value as CharSubMode,
+                })}
+                className="settings-select"
+              >
+                {DEDUP_CHAR_SUBMODE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </fieldset>
 

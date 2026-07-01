@@ -21,6 +21,8 @@ struct HookState {
     toolbar_hwnd: AtomicPtr<std::ffi::c_void>,
     orb_hwnd: AtomicPtr<std::ffi::c_void>,
     toolbar_visible: AtomicBool,
+    /// 二维码预览模式：为 true 时点击工具栏外部不隐藏窗口
+    qrcode_preview: AtomicBool,
     // 鼠标按下位置（用于拖拽检测）
     mouse_down_x: AtomicI32,
     mouse_down_y: AtomicI32,
@@ -35,7 +37,7 @@ struct HookState {
     hook_thread_id: AtomicU64,
 }
 
-const COOLDOWN_MS: u64 = 500;
+const COOLDOWN_MS: u64 = 300;
 
 static STATE: HookState = HookState {
     sender: OnceLock::new(),
@@ -43,6 +45,7 @@ static STATE: HookState = HookState {
     toolbar_hwnd: AtomicPtr::new(std::ptr::null_mut()),
     orb_hwnd: AtomicPtr::new(std::ptr::null_mut()),
     toolbar_visible: AtomicBool::new(false),
+    qrcode_preview: AtomicBool::new(false),
     mouse_down_x: AtomicI32::new(0),
     mouse_down_y: AtomicI32::new(0),
     mouse_down_valid: AtomicBool::new(false),
@@ -144,7 +147,7 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
 
                     let has_drag = if down_valid {
                         let dist = ((cur.x - down_x).abs() + (cur.y - down_y).abs()) as u64;
-                        dist > 5
+                        dist > 2
                     } else {
                         false
                     };
@@ -164,6 +167,12 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     }
 
                     if !has_drag {
+                        if down_valid {
+                            let dist = ((cur.x - down_x).abs() + (cur.y - down_y).abs()) as u64;
+                            if dist > 0 {
+                                crate::utils::logger::log("mouse", &format!("Drag too short ({}px), skipping", dist));
+                            }
+                        }
                         continue;
                     }
 
@@ -184,7 +193,7 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     );
 
                     match crate::automation::get_current_selection() {
-                        Ok(Some(info)) if !info.text.is_empty() => {
+                        Ok(Some(info)) if !info.text.is_empty() || info.has_image => {
                             crate::utils::logger::log("mouse", &format!("Selection found: {} chars", info.text.len()));
                             let _ = app.emit("selection-found", &info);
                             if let Some(win) = app.get_webview_window("toolbar") {
@@ -225,9 +234,15 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
 
                     let toolbar_ptr = STATE.toolbar_hwnd.load(Ordering::SeqCst);
                     if !is_point_in_window_rect(toolbar_ptr, x, y) {
+                        // 二维码预览模式下点击外部不隐藏
+                        if STATE.qrcode_preview.load(Ordering::SeqCst) {
+                            crate::utils::logger::log("mouse", "QR code preview active, ignoring outside click");
+                            continue;
+                        }
                         crate::utils::logger::log("mouse", &format!("Click outside toolbar ({}, {}), hiding", x, y));
                         if let Some(win) = app.get_webview_window("toolbar") {
                             let _ = win.hide();
+                            let _ = app.emit("toolbar-hidden", ());
                             STATE.toolbar_visible.store(false, Ordering::SeqCst);
                         }
                     }
@@ -291,6 +306,17 @@ pub fn set_toolbar_visible(visible: bool) {
     STATE.toolbar_visible.store(visible, Ordering::SeqCst);
 }
 
+/// 供外部模块调用，更新工具栏窗口句柄缓存
+pub fn update_toolbar_hwnd(hwnd: *mut std::ffi::c_void) {
+    STATE.toolbar_hwnd.store(hwnd, Ordering::SeqCst);
+}
+
+/// 供前端调用，设置二维码预览模式
+/// 为 true 时点击工具栏外部不会隐藏窗口
+pub fn set_qrcode_preview(active: bool) {
+    STATE.qrcode_preview.store(active, Ordering::SeqCst);
+}
+
 // ─── 钩子回调 ──────────────────────────────────────────────────
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -321,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_cooldown_constant() {
-        assert_eq!(COOLDOWN_MS, 500);
+        assert_eq!(COOLDOWN_MS, 300);
     }
 
     #[test]
@@ -368,14 +394,15 @@ mod tests {
     #[test]
     fn test_drag_distance_manhattan() {
         // 验证拖拽检测的曼哈顿距离逻辑
-        // 距离 > 5 视为拖拽
+        // 距离 > 2 视为拖拽
         let has_drag = |dx: i32, dy: i32| -> bool {
-            (dx.abs() + dy.abs()) as u64 > 5
+            (dx.abs() + dy.abs()) as u64 > 2
         };
         assert!(!has_drag(0, 0));  // 无移动
-        assert!(!has_drag(2, 2));  // 距离 = 4，不算拖拽
-        assert!(has_drag(3, 3));   // 距离 = 6，算拖拽
+        assert!(!has_drag(1, 0));  // 距离 = 1，不算拖拽
+        assert!(!has_drag(1, 1));  // 距离 = 2，刚好不算拖拽
+        assert!(has_drag(1, 2));   // 距离 = 3，算拖拽
         assert!(has_drag(6, 0));   // 距离 = 6，算拖拽
-        assert!(has_drag(-3, -3)); // 负方向也算
+        assert!(has_drag(-2, -2)); // 负方向也算
     }
 }

@@ -10,6 +10,13 @@ use std::sync::OnceLock;
 pub struct SelectionInfo {
     pub text: String,
     pub rect: Rect,
+    /// 选区中是否包含图片（如浏览器选中纯图片），默认为 true
+    #[serde(default = "default_has_image", rename = "has-image")]
+    pub has_image: bool,
+}
+
+fn default_has_image() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,7 +102,7 @@ pub fn replace_selection_text(new_text: &str) -> Result<(), String> {
 
     crate::utils::logger::log("automation", &format!("replace_selection_text: {} chars -> {} chars", ctx.text.len(), new_text.len()));
 
-    match ctx.method {
+    let result = match ctx.method {
         SelectionMethod::Uia => selection::replace_text_via_uia(&ctx, new_text),
         SelectionMethod::Win32 => selection::replace_text_via_win32(&ctx, new_text),
         SelectionMethod::Clipboard => clipboard_selection::replace_text_via_clipboard(&ctx, new_text),
@@ -103,11 +110,72 @@ pub fn replace_selection_text(new_text: &str) -> Result<(), String> {
             // OCR 无法定位替换，走剪贴板模拟粘贴
             clipboard_selection::replace_text_via_clipboard(&ctx, new_text)
         }
+    };
+
+    // 替换成功后更新暂存上下文，使连续替换能正确定位
+    // 优先读取控件实际选区位置（避免换行符 \n vs \r\n 导致的计算偏差），
+    // 读取失败时回退到计算值
+    if result.is_ok() {
+        let (new_sel_start, new_sel_end) = unsafe {
+            clipboard_selection::read_actual_selection(ctx.focus_hwnd, &ctx.focus_class)
+                .unwrap_or((ctx.sel_start, ctx.sel_start.saturating_add(new_text.len() as u32)))
+        };
+        let new_ctx = SelectionContext {
+            text: new_text.to_string(),
+            rect: ctx.rect.clone(),
+            method: ctx.method.clone(),
+            foreground_hwnd: ctx.foreground_hwnd,
+            focus_hwnd: ctx.focus_hwnd,
+            focus_class: ctx.focus_class.clone(),
+            sel_start: new_sel_start,
+            sel_end: new_sel_end,
+            occurrence_index: ctx.occurrence_index,
+        };
+        store_selection_context(
+            &SelectionInfo {
+                text: new_text.to_string(),
+                rect: ctx.rect.clone(),
+                has_image: false,
+            },
+            new_ctx,
+        );
     }
+
+    result
 }
 
 pub fn get_current_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Error>> {
     selection::get_selection()
+}
+
+/// 通过恢复焦点 + 模拟 Ctrl+C 复制选区内容
+/// 适用于所有选区类型（UIA/Win32/Clipboard/Ocr），保留富文本和图片格式
+pub fn copy_selection_via_simulation() -> Result<(), String> {
+    let ctx = get_stored_selection_context()
+        .ok_or("没有暂存的选区上下文，请重新选中文本")?;
+
+    crate::utils::logger::log("automation", &format!(
+        "copy_selection_via_simulation: method={:?}, foreground_hwnd={}",
+        ctx.method, ctx.foreground_hwnd
+    ));
+
+    // 恢复前台窗口焦点
+    if ctx.foreground_hwnd != 0 {
+        unsafe {
+            let hwnd = windows::Win32::Foundation::HWND(ctx.foreground_hwnd as *mut std::ffi::c_void);
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // 仅模拟 Ctrl+C，不处理剪贴板的保存/恢复
+    // 让用户的应用程序自行完成复制，保留完整的富文本和图片格式
+    unsafe {
+        clipboard_selection::simulate_copy();
+    }
+
+    crate::utils::logger::log("automation", "copy_selection_via_simulation: Ctrl+C simulated");
+    Ok(())
 }
 
 pub fn get_mouse_position() -> Result<Point, Box<dyn std::error::Error>> {
@@ -125,6 +193,7 @@ mod tests {
         let info = SelectionInfo {
             text: "hello world".to_string(),
             rect: Rect { x: 10, y: 20, width: 100, height: 30 },
+            has_image: false,
         };
         let cloned = info.clone();
         assert_eq!(info.text, cloned.text);
@@ -137,10 +206,12 @@ mod tests {
         let a = SelectionInfo {
             text: "same".to_string(),
             rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_image: false,
         };
         let b = SelectionInfo {
             text: "same".to_string(),
             rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_image: false,
         };
         assert_eq!(a, b);
     }
@@ -150,10 +221,12 @@ mod tests {
         let a = SelectionInfo {
             text: "hello".to_string(),
             rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_image: false,
         };
         let b = SelectionInfo {
             text: "world".to_string(),
             rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_image: false,
         };
         assert_ne!(a, b);
     }
@@ -163,6 +236,7 @@ mod tests {
         let info = SelectionInfo {
             text: "test selection".to_string(),
             rect: Rect { x: 100, y: 200, width: 300, height: 40 },
+            has_image: false,
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: SelectionInfo = serde_json::from_str(&json).unwrap();
@@ -174,6 +248,7 @@ mod tests {
         let info = SelectionInfo {
             text: String::new(),
             rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_image: false,
         };
         assert!(info.text.is_empty());
     }
@@ -247,6 +322,7 @@ mod tests {
         let info = SelectionInfo {
             text: "test context".to_string(),
             rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_image: false,
         };
         let ctx = SelectionContext {
             text: "test context".to_string(),
@@ -287,6 +363,7 @@ mod tests {
         let info = SelectionInfo {
             text: "overwrite test".to_string(),
             rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_image: false,
         };
         let ctx1 = SelectionContext {
             text: "overwrite test".to_string(),

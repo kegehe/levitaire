@@ -12,6 +12,15 @@ import {
   GraduationCap,
   Scissors,
   Globe,
+  Search,
+  GripVertical,
+  CaseUpper,
+  CaseLower,
+  Image,
+  ListFilter,
+  Binary,
+  QrCode,
+  Download,
 } from "lucide-react";
 import type { LucideProps } from "lucide-react";
 
@@ -29,6 +38,15 @@ const ICON_MAP = {
   GraduationCap,
   Scissors,
   Globe,
+  Search,
+  GripVertical,
+  CaseUpper,
+  CaseLower,
+  Image,
+  ListFilter,
+  Binary,
+  QrCode,
+  Download,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;

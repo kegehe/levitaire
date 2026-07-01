@@ -2,6 +2,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Media::Ocr::OcrEngine;
 use windows::Graphics::Imaging::*;
 use windows::core::Interface;
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
 use super::{SelectionInfo, Rect};
 
@@ -29,8 +30,35 @@ pub fn get_selection_via_ocr() -> Result<Option<SelectionInfo>, Box<dyn std::err
         return Ok(None);
     }
 
-    let pixels = unsafe { capture_screen_region(left, top, width, height)? };
-    let text = unsafe { ocr_from_bgra_pixels(&pixels, width, height)? };
+    let pixels_width = width;
+    let pixels_height = height;
+
+    // OCR 必须在 MTA 线程执行：
+    // RecognizeAsync().get() 在 STA 上会阻塞消息循环，导致 WinRT async 完成回调
+    // 无法分发，operation 持有的 SoftwareBitmap 读锁不释放，触发 READER_LOCK_BUSY (0x88982F0D)，
+    // 且首次失败后永久卡死。MTA 上 .get() 不依赖消息循环，回调能正常完成。
+    let ocr_result = std::thread::spawn(move || {
+        // 子线程内初始化为 MTA
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        // 子线程返回 String（Send），避免 Box<dyn Error> 跨线程不满足 Send
+        let res: Result<String, String> = (|| {
+            let pixels = unsafe { capture_screen_region(left, top, pixels_width, pixels_height) }
+                .map_err(|e| format!("{:?}", e))?;
+            let text = unsafe { ocr_from_bgra_pixels(&pixels, pixels_width, pixels_height) }
+                .map_err(|e| format!("{:?}", e))?;
+            Ok(text)
+        })();
+        unsafe { CoUninitialize(); }
+        res
+    }).join();
+
+    let text = match ocr_result {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(e) => return Err(format!("OCR 线程 panic: {:?}", e).into()),
+    };
 
     if text.is_empty() {
         crate::utils::logger::log("ocr", "OCR returned empty text");
@@ -42,6 +70,7 @@ pub fn get_selection_via_ocr() -> Result<Option<SelectionInfo>, Box<dyn std::err
     let info = SelectionInfo {
         text,
         rect: Rect { x: left, y: top, width: width as i32, height: height as i32 },
+        has_image: false,
     };
     Ok(Some(info))
 }

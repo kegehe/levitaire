@@ -1,4 +1,5 @@
 use crate::config::AiConfig;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -107,6 +108,60 @@ fn extract_content_and_thinking(parsed: &serde_json::Value, api_type: &str) -> (
     }
 }
 
+/// 解析 SSE 数据中的文本增量
+fn parse_sse_data(data: &str, api_type: &str) -> Result<Option<String>, String> {
+    let parsed: serde_json::Value = serde_json::from_str(data)
+        .map_err(|e| format!("JSON 解析失败: {}", e))?;
+
+    match api_type {
+        "openai" => {
+            // OpenAI 流式错误事件
+            if let Some(error) = parsed.get("error") {
+                let error_msg = error
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("未知流式错误");
+                return Err(error_msg.to_string());
+            }
+            // OpenAI: choices[0].delta.content
+            let delta_content = parsed
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|choice| choice.get("delta"))
+                .and_then(|delta| delta.get("content"))
+                .and_then(|c| c.as_str());
+
+            Ok(delta_content.map(|s| s.to_string()))
+        }
+        _ => {
+            // Anthropic: content_block_delta -> delta.text
+            let event_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match event_type {
+                "content_block_delta" => {
+                    let delta = parsed.get("delta").and_then(|d| d.get("text"));
+                    Ok(delta.and_then(|t| t.as_str()).map(|s| s.to_string()))
+                }
+                "error" => {
+                    // Anthropic 流式错误事件
+                    let error_msg = parsed
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("未知流式错误");
+                    Err(error_msg.to_string())
+                }
+                "message_stop" | "message_start" | "content_block_start" | "content_block_stop" | "ping" => {
+                    Ok(None)
+                }
+                _ => {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
 // ─── AiService 实现 ──────────────────────────────────────────
 
 impl AiService {
@@ -206,6 +261,103 @@ impl AiService {
 
         Ok((status, body_text))
     }
+
+    /// 流式调用 AI 接口，通过回调逐块推送文本
+    pub async fn call_stream<F>(
+        &self,
+        prompt: &str,
+        system_prompt: Option<&str>,
+        on_chunk: F,
+    ) -> Result<String, String>
+    where
+        F: Fn(&str) + Send + 'static,
+    {
+        crate::utils::logger::log("ai", &format!("流式调用 AI, prompt 长度: {} 字节", prompt.len()));
+
+        let (url, api_key, model, api_type, http_client) = {
+            let inner = self.inner.lock().map_err(|e| format!("获取 AI 服务锁失败: {}", e))?;
+            let api_type = inner.config.api_type.clone();
+            let base_url = inner.config.base_url.trim_end_matches('/').replace("://0.0.0.0", "://127.0.0.1");
+            let url = match api_type.as_str() {
+                "openai" => format!("{}/v1/chat/completions", base_url),
+                _ => format!("{}/v1/messages", base_url),
+            };
+            (url, inner.config.api_key.clone(), inner.config.model.clone(), api_type, inner.http_client.clone())
+        };
+
+        crate::utils::logger::log("ai", &format!("流式请求 URL: {}, api_type: {}", url, api_type));
+
+        // 构建流式请求体（添加 stream: true）
+        let mut request_body = build_request_body(&api_type, &model, prompt, system_prompt);
+        request_body["stream"] = serde_json::Value::Bool(true);
+
+        let headers = build_headers(&api_type, &api_key);
+
+        // 发送请求
+        let mut req = http_client.post(&url).header("Content-Type", "application/json");
+        for (key, value) in &headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+
+        let response = req.json(&request_body).send().await.map_err(|e| {
+            crate::utils::logger::log("ai", &format!("流式 HTTP 请求失败: {}", e));
+            format!("AI 请求失败: {}", e)
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            crate::utils::logger::log("ai", &format!("流式请求错误, 状态码: {}, 响应: {}", status, body_text));
+            return Err(format!("AI 请求错误 ({}): {}", status, body_text));
+        }
+
+        crate::utils::logger::log("ai", &format!("流式响应状态码: {}", status));
+
+        // 逐块读取 SSE 流
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut full_content = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| format!("读取流数据失败: {}", e))?;
+            let text = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&text);
+
+            // SSE 按行解析
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() {
+                    continue;
+                }
+
+                // 处理 data 行（SSE 规范：字段名后跟冒号，可选空格）
+                if let Some(rest) = line.strip_prefix("data:") {
+                    let data = rest.trim();
+                    if data == "[DONE]" {
+                        continue;
+                    }
+
+                    // 解析 SSE 数据
+                    match parse_sse_data(data, &api_type) {
+                        Ok(Some(delta_text)) => {
+                            full_content.push_str(&delta_text);
+                            on_chunk(&delta_text);
+                        }
+                        Ok(None) => {} // 非文本内容（如 thinking），跳过
+                        Err(e) => {
+                            crate::utils::logger::log("ai", &format!("流式 API 错误: {}", e));
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        crate::utils::logger::log("ai", &format!("流式响应完成, 内容长度: {} 字节", full_content.len()));
+        Ok(full_content)
+    }
 }
 
 #[cfg(test)]
@@ -298,6 +450,92 @@ mod tests {
         let parsed = serde_json::json!({ "choices": [] });
         let (content, _) = extract_content_and_thinking(&parsed, "openai");
         assert!(content.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_data_anthropic_content_block_delta() {
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你好"}}"#;
+        let result = parse_sse_data(data, "anthropic").unwrap();
+        assert_eq!(result, Some("你好".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sse_data_anthropic_empty_text() {
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}"#;
+        let result = parse_sse_data(data, "anthropic").unwrap();
+        assert_eq!(result, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sse_data_anthropic_message_start() {
+        let data = r#"{"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet"}}"#;
+        let result = parse_sse_data(data, "anthropic").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sse_data_anthropic_ping() {
+        let data = r#"{"type":"ping"}"#;
+        let result = parse_sse_data(data, "anthropic").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sse_data_anthropic_error() {
+        let data = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let result = parse_sse_data(data, "anthropic");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Overloaded"));
+    }
+
+    #[test]
+    fn test_parse_sse_data_openai_delta_content() {
+        let data = r#"{"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
+        let result = parse_sse_data(data, "openai").unwrap();
+        assert_eq!(result, Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sse_data_openai_role_only() {
+        // 首个 chunk 通常只含 role，不含 content
+        let data = r#"{"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
+        let result = parse_sse_data(data, "openai").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sse_data_openai_finish() {
+        let data = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let result = parse_sse_data(data, "openai").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sse_data_openai_error() {
+        let data = r#"{"error":{"message":"Rate limit exceeded","type":"rate_limit_error"}}"#;
+        let result = parse_sse_data(data, "openai");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_parse_sse_data_invalid_json() {
+        let result = parse_sse_data("not valid json", "openai");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_sse_data_anthropic_multi_char_unicode() {
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"🎉你好世界🌍"}}"#;
+        let result = parse_sse_data(data, "anthropic").unwrap();
+        assert_eq!(result, Some("🎉你好世界🌍".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sse_data_openai_empty_choices() {
+        let data = r#"{"choices":[]}"#;
+        let result = parse_sse_data(data, "openai").unwrap();
+        assert_eq!(result, None);
     }
 
     #[tokio::test]

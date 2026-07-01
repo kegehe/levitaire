@@ -1,5 +1,6 @@
 use tauri::State;
 use tauri::Manager;
+use tauri::Emitter;
 
 use crate::clipboard::ClipboardManager;
 use crate::automation::SelectionInfo;
@@ -17,6 +18,16 @@ pub fn get_selection() -> Result<Option<SelectionInfo>, String> {
 #[tauri::command]
 pub fn copy_text(text: String, clipboard: State<'_, ClipboardManager>) -> Result<(), String> {
     clipboard.copy(&text).map_err(|e| e.to_string())
+}
+
+/// 通过恢复原始窗口焦点 + 模拟 Ctrl+C 来复制选区内容
+/// 这样可以保留富文本、图片等完整格式
+#[tauri::command]
+pub async fn copy_selection() -> Result<(), String> {
+    crate::utils::logger::log("commands", "copy_selection called (simulate Ctrl+C)");
+    tokio::task::spawn_blocking(|| {
+        crate::automation::copy_selection_via_simulation()
+    }).await.map_err(|e| format!("copy_selection task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -37,6 +48,17 @@ pub fn show_toolbar(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn hide_toolbar(app: tauri::AppHandle) -> Result<(), String> {
+    // 隐藏窗口前，先恢复前台窗口焦点
+    // 工具栏按钮点击后焦点可能在工具栏上，直接隐藏会导致 Windows 重新分配焦点，
+    // 可能清除目标应用中刚恢复的文本选区
+    if let Some(ctx) = crate::automation::get_stored_selection_context() {
+        if ctx.foreground_hwnd != 0 {
+            unsafe {
+                let hwnd = windows::Win32::Foundation::HWND(ctx.foreground_hwnd as *mut std::ffi::c_void);
+                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+            }
+        }
+    }
     if let Some(window) = app.get_webview_window("toolbar") {
         window.hide().map_err(|e| e.to_string())?;
     }
@@ -90,6 +112,41 @@ pub async fn call_ai(
     ai_service.call(&prompt, system_prompt.as_deref()).await
 }
 
+/// 流式调用 AI 接口，通过事件推送文本片段
+#[tauri::command]
+pub async fn call_ai_stream(
+    app: tauri::AppHandle,
+    prompt: String,
+    system_prompt: Option<String>,
+    ai_service: State<'_, crate::ai::AiService>,
+) -> Result<(), String> {
+    crate::utils::logger::log("commands", &format!("call_ai_stream 命令被调用, prompt 长度: {} 字节", prompt.len()));
+    if prompt.len() > MAX_PROMPT_LENGTH {
+        let _ = app.emit("ai-stream", serde_json::json!({ "type": "error", "data": format!("prompt 长度超过限制（最大 {} 字节）", MAX_PROMPT_LENGTH) }));
+        return Err(format!("prompt 长度超过限制（最大 {} 字节）", MAX_PROMPT_LENGTH));
+    }
+    if prompt.is_empty() {
+        let _ = app.emit("ai-stream", serde_json::json!({ "type": "error", "data": "prompt 不能为空" }));
+        return Err("prompt 不能为空".to_string());
+    }
+
+    let app_handle = app.clone();
+    let result = ai_service.call_stream(&prompt, system_prompt.as_deref(), move |chunk| {
+        let _ = app_handle.emit("ai-stream", serde_json::json!({ "type": "chunk", "data": chunk }));
+    }).await;
+
+    match result {
+        Ok(_) => {
+            let _ = app.emit("ai-stream", serde_json::json!({ "type": "done" }));
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("ai-stream", serde_json::json!({ "type": "error", "data": &e }));
+            Err(e)
+        }
+    }
+}
+
 /// 获取当前 AI 配置
 #[tauri::command]
 pub fn get_ai_config(
@@ -126,6 +183,20 @@ pub async fn replace_selection(text: String) -> Result<(), String> {
     }).await.map_err(|e| format!("替换任务执行失败: {}", e))?
 }
 
+/// 打开 URL（用默认浏览器）
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    crate::utils::logger::log("commands", &format!("open_url: {}", url));
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {}", e))?;
+    }
+    Ok(())
+}
+
 /// 获取开机自启动状态
 #[tauri::command]
 pub fn get_auto_start() -> bool {
@@ -136,4 +207,55 @@ pub fn get_auto_start() -> bool {
 #[tauri::command]
 pub fn set_auto_start(enable: bool) -> Result<(), String> {
     crate::config::set_auto_start(enable)
+}
+
+/// 设置二维码预览模式
+/// 为 true 时鼠标点击工具栏外部不会隐藏窗口
+#[tauri::command]
+pub fn set_qrcode_preview(active: bool) {
+    crate::hooks::mouse::set_qrcode_preview(active);
+}
+
+/// 弹出系统保存对话框，将 base64 编码的 PNG 数据保存为文件
+#[tauri::command]
+pub async fn save_image(app: tauri::AppHandle, base64_data: String, filename: String) -> Result<bool, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    // 去除 data:image/png;base64, 前缀
+    let raw = if let Some(idx) = base64_data.find(',') {
+        &base64_data[idx + 1..]
+    } else {
+        &base64_data
+    };
+
+    let bytes = STANDARD.decode(raw)
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+    // 临时移除 toolbar 的 always-on-top，防止对话框被遮挡
+    if let Some(win) = app.get_webview_window("toolbar") {
+        let _ = win.set_always_on_top(false);
+    }
+
+    let result = tokio::task::spawn_blocking(move || {
+        let path = rfd::FileDialog::new()
+            .set_file_name(&filename)
+            .add_filter("PNG 图片", &["png"])
+            .save_file();
+
+        match path {
+            Some(path) => {
+                std::fs::write(&path, &bytes)
+                    .map_err(|e| format!("写入文件失败: {}", e))?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }).await.map_err(|e| format!("任务执行失败: {}", e))?;
+
+    // 恢复 toolbar 的 always-on-top
+    if let Some(win) = app.get_webview_window("toolbar") {
+        let _ = win.set_always_on_top(true);
+    }
+
+    result
 }

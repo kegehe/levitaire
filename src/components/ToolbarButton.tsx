@@ -50,7 +50,7 @@ function ToolbarButton({
     <button
       className={className}
       onClick={onClick}
-      title={label}
+      data-tooltip={label}
       aria-label={label}
       aria-busy={loading || undefined}
       disabled={disabled || loading}

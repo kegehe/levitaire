@@ -139,11 +139,48 @@ fn main() {
                 hooks::start_keyboard_hook(app_handle_kb);
             });
 
+            // 将浮球（orb）窗口定位到主屏右下角
+            // 覆盖 tauri.conf.json 中默认的左上角 (100, 100) 位置
+            if let Some(orb) = app.get_webview_window("orb") {
+                let margin = 20.0f64;
+                // 窗口逻辑尺寸（tauri.conf.json 中配置的 width/height）
+                // 乘以 scale_factor 得到物理像素，与物理坐标的 workarea 单位一致
+                let scale = orb.scale_factor().unwrap_or(1.0);
+                let inner = orb.inner_size().unwrap_or_default();
+                let win_w = inner.width as f64 * scale;
+                let win_h = inner.height as f64 * scale;
+
+                // 取主屏工作区（已排除任务栏），避免浮球被任务栏遮挡
+                // SPI_GETWORKAREA 在 DPI-aware 进程下返回物理像素，与 PhysicalPosition 单位一致
+                #[cfg(target_os = "windows")]
+                {
+                    use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
+                    use windows::Win32::Foundation::RECT;
+                    let mut rc = RECT::default();
+                    let ok = unsafe {
+                        SystemParametersInfoW(
+                            SPI_GETWORKAREA,
+                            0,
+                            Some(&mut rc as *mut _ as *mut std::ffi::c_void),
+                            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                        ).is_ok()
+                    };
+                    if ok {
+                        let x = rc.right as f64 - win_w - margin;
+                        let y = rc.bottom as f64 - win_h - margin;
+                        let _ = orb.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                            x as i32, y as i32,
+                        )));
+                    }
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_selection,
             commands::copy_text,
+            commands::copy_selection,
             commands::get_toolbar_position,
             commands::show_toolbar,
             commands::hide_toolbar,
@@ -151,11 +188,15 @@ fn main() {
             commands::hide_orb,
             commands::show_settings,
             commands::call_ai,
+            commands::call_ai_stream,
             commands::get_ai_config,
             commands::update_ai_config,
             commands::replace_selection,
             commands::get_auto_start,
             commands::set_auto_start,
+            commands::open_url,
+            commands::save_image,
+            commands::set_qrcode_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

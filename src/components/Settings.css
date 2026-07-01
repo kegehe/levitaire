@@ -4,7 +4,6 @@
   max-width: 600px;
   margin: 0 auto;
   background: var(--settings-bg);
-  min-height: 100vh;
 }
 
 .settings-title {
@@ -50,6 +49,19 @@ fieldset.settings-section {
   margin-bottom: 0;
 }
 
+/* ── Row layout (inline items) ───────────────────────────── */
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-inline-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 /* ── Checkbox label ──────────────────────────────────────── */
 .settings-checkbox-label {
   display: inline-flex;
@@ -82,6 +94,11 @@ fieldset.settings-section {
   font-weight: 500;
   margin-bottom: var(--space-1);
   color: var(--settings-subheading-color);
+}
+
+.settings-inline-group .settings-label {
+  display: inline;
+  margin-bottom: 0;
 }
 
 /* ── Select ──────────────────────────────────────────────── */
@@ -199,5 +216,49 @@ fieldset.settings-section {
 
 .settings-save-spinner {
   animation: spin 0.8s linear infinite;
+}
+
+/* ── Hint text ───────────────────────────────────────────── */
+.settings-hint {
+  font-size: var(--text-sm);
+  color: var(--color-fg-subtle);
+  margin-bottom: var(--space-3);
+}
+
+/* ── Features grid ───────────────────────────────────────── */
+.settings-features-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.settings-feature-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: var(--space-1-5) var(--space-3);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-sm);
+  background: var(--settings-input-bg);
+  font-size: var(--text-sm);
+  color: var(--settings-heading-color);
+  cursor: pointer;
+  transition: background-color var(--transition-fast),
+    border-color var(--transition-fast);
+  user-select: none;
+}
+
+.settings-feature-chip:hover {
+  background: var(--button-hover-bg);
+}
+
+.settings-feature-chip:has(input:checked) {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-fg-on-accent);
+}
+
+.settings-feature-chip input[type="checkbox"] {
+  display: none;
 }
 

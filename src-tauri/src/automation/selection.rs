@@ -45,23 +45,15 @@ pub fn get_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Erro
     let foreground_hwnd = unsafe { GetForegroundWindow() };
 
     // 方法1: UI Automation（浏览器、Office、Electron 等）
-    let mut skip_clipboard = false;
     match get_selection_via_uia() {
         Ok(SelectionResult::Found(info)) => {
             crate::utils::logger::log("selection", &format!("UIA success: {} chars", info.text.len()));
             return Ok(Some(info));
         }
         Ok(SelectionResult::EmptySelection) => {
-            crate::utils::logger::log("selection", "UIA applicable but no selection");
-            // #10: 只有焦点控件确实是标准 Edit/RichEdit 时才跳过 clipboard fallback
-            // Scintilla 等非标准控件虽能被 UIA 感知焦点，但 UIA 选区支持不完整，
-            // 需要继续尝试 Win32 + clipboard fallback
-            if unsafe { is_uia_focus_standard_edit(foreground_hwnd) } {
-                crate::utils::logger::log("selection", "UIA focus is standard Edit/RichEdit, skipping clipboard");
-                skip_clipboard = true;
-            } else {
-                crate::utils::logger::log("selection", "UIA focus is non-standard control, will try clipboard fallback");
-            }
+            crate::utils::logger::log("selection", "UIA applicable but no selection, continuing to Win32");
+            // UIA EmptySelection 不再跳过 fallback — UIA 有时暂时读不到选区，
+            // 让 Win32 和 clipboard 继续尝试以确保不遗漏
         }
         Ok(SelectionResult::NotApplicable) => {
             crate::utils::logger::log("selection", "UIA not applicable, trying Win32 fallback");
@@ -76,8 +68,9 @@ pub fn get_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Erro
             return Ok(Some(info));
         }
         Ok(SelectionResult::EmptySelection) => {
-            crate::utils::logger::log("selection", "Win32 applicable but no selection");
-            skip_clipboard = true; // #10: Win32 适用但无选区
+            crate::utils::logger::log("selection", "Win32 applicable but no selection, skipping clipboard/OCR");
+            // Win32 找到 EDIT 控件但无选区，说明用户确实没有选中文本，跳过 clipboard/OCR
+            return Ok(None);
         }
         Ok(SelectionResult::NotApplicable) => {
             crate::utils::logger::log("selection", "Win32 not applicable");
@@ -85,27 +78,14 @@ pub fn get_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Erro
         Err(e) => crate::utils::logger::log("selection", &format!("Win32 error: {}", e)),
     }
 
-    // #10: 如果 UIA 或 Win32 能定位到焦点控件但无选区，跳过 clipboard/OCR fallback
-    if skip_clipboard {
-        crate::utils::logger::log("selection", "Skipping clipboard/OCR fallback (focus detected but no selection)");
-        return Ok(None);
-    }
-
     // 方法3: 模拟 Ctrl+C + 剪贴板读取（万能 fallback）
     match super::clipboard_selection::get_selection_via_clipboard() {
         Ok(Some((info, fg_hwnd))) => {
             crate::utils::logger::log("selection", &format!("Clipboard success: {} chars", info.text.len()));
-            super::store_selection_context(&info, super::SelectionContext {
-                text: info.text.clone(),
-                rect: info.rect.clone(),
-                method: super::SelectionMethod::Clipboard,
-                foreground_hwnd: fg_hwnd,
-                focus_hwnd: 0,
-                focus_class: String::new(),
-                sel_start: 0,
-                sel_end: 0,
-                occurrence_index: 0,
-            });
+            // clipboard_selection::get_selection_via_clipboard 内部已暂存了含焦点控件
+            // HWND 和选区位置的完整上下文（focus_hwnd/sel_start/sel_end），
+            // 此处无需覆盖，避免丢失精确定位信息
+            let _ = fg_hwnd;
             return Ok(Some(info));
         }
         Ok(None) => crate::utils::logger::log("selection", "Clipboard returned None"),
@@ -135,44 +115,6 @@ pub fn get_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Erro
     }
 
     Ok(None)
-}
-
-/// 检查当前焦点控件是否为标准 Edit/RichEdit 类
-/// 用于 UIA EmptySelection 时判断是否跳过 clipboard fallback：
-/// - 标准 Edit/RichEdit：UIA 可靠，选区为空说明确实没选中，跳过 clipboard
-/// - 非标准控件（Scintilla、CEF 等）：UIA 支持不完整，应继续 clipboard fallback
-///
-/// # Safety
-/// 调用 Windows GUI API，需在主线程或有消息循环的线程上调用
-unsafe fn is_uia_focus_standard_edit(foreground_hwnd: HWND) -> bool {
-    if foreground_hwnd.is_invalid() {
-        return false;
-    }
-
-    let thread_id = GetWindowThreadProcessId(foreground_hwnd, None);
-    if thread_id == 0 {
-        return false;
-    }
-
-    let mut gui_info = GUITHREADINFO {
-        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-        ..Default::default()
-    };
-    if GetGUIThreadInfo(thread_id, &mut gui_info).is_err() {
-        return false;
-    }
-
-    let hwnd_focus = gui_info.hwndFocus;
-    if hwnd_focus.is_invalid() {
-        return false;
-    }
-
-    let class_name = match get_class_name(hwnd_focus) {
-        Some(name) => name,
-        None => return false,
-    };
-
-    EDIT_CLASS_NAMES.iter().any(|n| n.eq_ignore_ascii_case(&class_name))
 }
 
 // ─── UI Automation ───────────────────────────────────────────────
@@ -216,7 +158,7 @@ fn get_selection_via_uia() -> Result<SelectionResult, Box<dyn std::error::Error>
                         }
                     };
 
-                    let info = SelectionInfo { text: text.to_string(), rect: rect.clone() };
+                    let info = SelectionInfo { text: text.to_string(), rect: rect.clone(), has_image: false };
 
                     super::store_selection_context(&info, super::SelectionContext {
                         text: info.text.clone(),
@@ -427,7 +369,7 @@ fn get_selection_via_win32() -> Result<SelectionResult, Box<dyn std::error::Erro
             }
         };
 
-        let info = SelectionInfo { text: text.clone(), rect: rect.clone() };
+        let info = SelectionInfo { text: text.clone(), rect: rect.clone(), has_image: false };
 
         super::store_selection_context(&info, super::SelectionContext {
             text: info.text.clone(),
@@ -686,6 +628,7 @@ unsafe fn try_legacy_accessible(
     Some(super::SelectionInfo {
         text: value,
         rect: super::Rect { x: pos.x, y: pos.y, width: 0, height: 0 },
+        has_image: false,
     })
 }
 
@@ -755,7 +698,7 @@ unsafe fn find_value_pattern_for_replace(
 ) -> Result<(), String> {
     // Step 1: 尝试焦点元素本身的 ValuePattern
     if let Ok(vp) = element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
-        if try_replace_with_value_pattern(&vp, ctx, new_text, "focus element").is_ok() {
+        if try_replace_with_value_pattern(element, &vp, ctx, new_text, "focus element").is_ok() {
             return Ok(());
         }
     }
@@ -769,7 +712,7 @@ unsafe fn find_value_pattern_for_replace(
 
     loop {
         if let Ok(vp) = child.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
-            if try_replace_with_value_pattern(&vp, ctx, new_text, "child element").is_ok() {
+            if try_replace_with_value_pattern(&child, &vp, ctx, new_text, "child element").is_ok() {
                 return Ok(());
             }
         }
@@ -785,6 +728,7 @@ unsafe fn find_value_pattern_for_replace(
 /// 使用 ValuePattern 尝试替换文本
 /// 安全检查：选中文本在文档中必须唯一出现
 unsafe fn try_replace_with_value_pattern(
+    element: &IUIAutomationElement,
     vp: &IUIAutomationValuePattern,
     ctx: &super::SelectionContext,
     new_text: &str,
@@ -799,6 +743,7 @@ unsafe fn try_replace_with_value_pattern(
         vp.SetValue(&windows::core::BSTR::from(new_text))
             .map_err(|e| format!("SetValue 失败: {}", e))?;
         crate::utils::logger::log("selection", &format!("UIA ValuePattern 整文替换成功 ({})", label));
+        reselect_replaced_text(element, new_text);
         return Ok(());
     }
 
@@ -828,10 +773,49 @@ unsafe fn try_replace_with_value_pattern(
         vp.SetValue(&windows::core::BSTR::from(&new_value))
             .map_err(|e| format!("SetValue 失败: {}", e))?;
         crate::utils::logger::log("selection", &format!("UIA ValuePattern 替换成功 ({})", label));
+        reselect_replaced_text(element, new_text);
         return Ok(());
     }
 
     Err("无法在当前文本中定位选中内容，请重新选中文本".to_string())
+}
+
+/// 替换后通过 TextPattern 重新选中替换的文本
+/// 使用 FindText 定位替换后的文本并选中
+unsafe fn reselect_replaced_text(
+    element: &IUIAutomationElement,
+    new_text: &str,
+) {
+    let Ok(tp) = element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) else {
+        crate::utils::logger::log("selection", "UIA: 无 TextPattern，无法重新选中");
+        return;
+    };
+
+    let Ok(document_range) = tp.DocumentRange() else {
+        crate::utils::logger::log("selection", "UIA: 无法获取文档范围");
+        return;
+    };
+
+    // SetValue 后控件可能需要时间更新内部文档模型，
+    // 重试 FindText 以应对控件尚未刷新的情况
+    let search_text = windows::core::BSTR::from(new_text);
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if let Ok(found_range) = document_range.FindText(&search_text, false, false) {
+            let found_text = found_range.GetText(-1).unwrap_or_default().to_string();
+            if found_text == new_text {
+                let _ = found_range.Select();
+                crate::utils::logger::log("selection", &format!(
+                    "UIA: 已通过 FindText 重新选中替换文本 (attempt {})", attempt + 1
+                ));
+                return;
+            }
+        }
+    }
+
+    crate::utils::logger::log("selection", "UIA: FindText 未找到替换文本，选区未恢复");
 }
 
 /// 统计 substring 在 s 中出现的次数
@@ -883,7 +867,17 @@ pub fn replace_text_via_win32(ctx: &super::SelectionContext, new_text: &str) -> 
             Some(LPARAM(new_text_wide.as_ptr() as isize)),
         );
 
-        crate::utils::logger::log("selection", "Win32 EM_REPLACESEL 已发送");
+        // 替换后重新选中替换的文本（光标此时在替换文本末尾）
+        let new_text_len = new_text.encode_utf16().count() as u32; // UTF-16 码元数，不含 null
+        let new_end = ctx.sel_start + new_text_len;
+        let _ = SendMessageW(
+            hwnd,
+            EM_SETSEL,
+            Some(WPARAM(ctx.sel_start as usize)),
+            Some(LPARAM(new_end as isize)),
+        );
+
+        crate::utils::logger::log("selection", "Win32 EM_REPLACESEL 已发送，已重新选中替换文本");
         Ok(())
     }
 }
@@ -999,6 +993,7 @@ mod tests {
         let r = SelectionResult::Found(SelectionInfo {
             text: "hello".into(),
             rect: super::super::Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_image: false,
         });
         assert!(format!("{:?}", r).contains("Found"));
 
@@ -1014,6 +1009,7 @@ mod tests {
         let info = SelectionInfo {
             text: "test".into(),
             rect: super::super::Rect { x: 10, y: 20, width: 100, height: 20 },
+            has_image: false,
         };
         assert_eq!(SelectionResult::Found(info.clone()), SelectionResult::Found(info));
         assert_eq!(SelectionResult::EmptySelection, SelectionResult::EmptySelection);

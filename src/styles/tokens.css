@@ -261,6 +261,11 @@
   --settings-focus-shadow: oklch(0.50 0.19 250 / 0.15);
   --settings-save-btn-bg: var(--color-accent);
   --settings-save-btn-text: var(--color-accent-fg);
+
+  /* Tooltip */
+  --tooltip-bg: var(--neutral-800);
+  --tooltip-text: var(--neutral-0);
+  --tooltip-border: var(--neutral-700);
 }
 
 /* ── Dark Mode ───────────────────────────────────────────── */
@@ -346,5 +351,8 @@
   --settings-focus-shadow: oklch(0.58 0.19 250 / 0.15);
   --settings-save-btn-bg: var(--color-accent);
   --settings-save-btn-text: var(--color-accent-fg);
-}
 
+  --tooltip-bg: var(--neutral-200);
+  --tooltip-text: var(--neutral-900);
+  --tooltip-border: var(--neutral-300);
+}

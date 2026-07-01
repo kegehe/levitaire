@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
+import { listen } from "@tauri-apps/api/event";
 import "./FloatingOrb.css";
 
 function FloatingOrb() {
@@ -12,6 +13,17 @@ function FloatingOrb() {
   useLayoutEffect(() => {
     const theme = localStorage.getItem("floast-theme") || "light";
     document.documentElement.setAttribute("data-theme", theme);
+  }, []);
+
+  // 监听设置窗口的主题变更事件
+  useEffect(() => {
+    const unlistenTheme = listen<string>("floast-theme-changed", (event) => {
+      document.documentElement.setAttribute("data-theme", event.payload);
+      localStorage.setItem("floast-theme", event.payload);
+    });
+    return () => {
+      unlistenTheme.then((fn) => fn());
+    };
   }, []);
 
   // Make the orb window non-focusable so it never steals focus from other apps

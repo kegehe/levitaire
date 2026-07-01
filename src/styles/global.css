@@ -20,6 +20,17 @@ body {
   padding: 0;
 }
 
+/* 工具栏窗口：上方预留 tooltip 空间（body 背景透明，不会露白） */
+body.toolbar-window {
+  overflow: visible;
+  padding-top: 24px;
+}
+
+/* 设置窗口：允许内容滚动 */
+body.settings-window {
+  overflow-y: auto;
+}
+
 #root {
   background: transparent;
   height: 100%;
