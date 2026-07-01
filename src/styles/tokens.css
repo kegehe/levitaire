@@ -1,0 +1,350 @@
+@import "tailwindcss";
+
+@theme {
+  --color-blue-*: initial;
+  --color-blue-50: oklch(0.97 0.01 250);
+  --color-blue-100: oklch(0.93 0.03 250);
+  --color-blue-200: oklch(0.87 0.06 250);
+  --color-blue-300: oklch(0.78 0.10 250);
+  --color-blue-400: oklch(0.68 0.15 250);
+  --color-blue-500: oklch(0.58 0.19 250);
+  --color-blue-600: oklch(0.50 0.19 250);
+  --color-blue-700: oklch(0.43 0.17 250);
+  --color-blue-800: oklch(0.36 0.14 250);
+  --color-blue-900: oklch(0.28 0.10 250);
+  --color-blue-950: oklch(0.22 0.07 250);
+
+  --color-red-*: initial;
+  --color-red-50: oklch(0.97 0.01 25);
+  --color-red-100: oklch(0.93 0.03 25);
+  --color-red-200: oklch(0.87 0.07 25);
+  --color-red-300: oklch(0.78 0.12 25);
+  --color-red-400: oklch(0.68 0.17 25);
+  --color-red-500: oklch(0.58 0.20 25);
+  --color-red-600: oklch(0.50 0.19 25);
+  --color-red-700: oklch(0.43 0.16 25);
+  --color-red-800: oklch(0.36 0.13 25);
+  --color-red-900: oklch(0.28 0.10 25);
+  --color-red-950: oklch(0.22 0.07 25);
+
+  --color-green-*: initial;
+  --color-green-50: oklch(0.97 0.02 155);
+  --color-green-100: oklch(0.93 0.04 155);
+  --color-green-200: oklch(0.87 0.08 155);
+  --color-green-300: oklch(0.78 0.12 155);
+  --color-green-400: oklch(0.68 0.15 155);
+  --color-green-500: oklch(0.58 0.16 155);
+  --color-green-600: oklch(0.50 0.14 155);
+  --color-green-700: oklch(0.43 0.12 155);
+  --color-green-800: oklch(0.36 0.10 155);
+  --color-green-900: oklch(0.28 0.07 155);
+
+  --color-neutral-*: initial;
+  --color-neutral-0: oklch(1.00 0 0);
+  --color-neutral-50: oklch(0.98 0 0);
+  --color-neutral-100: oklch(0.96 0 0);
+  --color-neutral-200: oklch(0.92 0 0);
+  --color-neutral-300: oklch(0.87 0 0);
+  --color-neutral-400: oklch(0.74 0 0);
+  --color-neutral-500: oklch(0.62 0 0);
+  --color-neutral-600: oklch(0.50 0 0);
+  --color-neutral-700: oklch(0.38 0 0);
+  --color-neutral-800: oklch(0.27 0 0);
+  --color-neutral-850: oklch(0.22 0 0);
+  --color-neutral-900: oklch(0.17 0 0);
+  --color-neutral-950: oklch(0.13 0 0);
+}
+
+/* ============================================================
+   Design Tokens — Floast Service
+   Three-layer system: Primitive → Semantic → Component
+   Color space: oklch
+   ============================================================ */
+
+/* ── Primitive Layer: Raw palette ────────────────────────── */
+:root {
+  /* Blue (brand color) */
+  --blue-50: oklch(0.97 0.01 250);
+  --blue-100: oklch(0.93 0.03 250);
+  --blue-200: oklch(0.87 0.06 250);
+  --blue-300: oklch(0.78 0.10 250);
+  --blue-400: oklch(0.68 0.15 250);
+  --blue-500: oklch(0.58 0.19 250);
+  --blue-600: oklch(0.50 0.19 250);
+  --blue-700: oklch(0.43 0.17 250);
+  --blue-800: oklch(0.36 0.14 250);
+  --blue-900: oklch(0.28 0.10 250);
+  --blue-950: oklch(0.22 0.07 250);
+
+  /* Red (danger) */
+  --red-50: oklch(0.97 0.01 25);
+  --red-100: oklch(0.93 0.03 25);
+  --red-200: oklch(0.87 0.07 25);
+  --red-300: oklch(0.78 0.12 25);
+  --red-400: oklch(0.68 0.17 25);
+  --red-500: oklch(0.58 0.20 25);
+  --red-600: oklch(0.50 0.19 25);
+  --red-700: oklch(0.43 0.16 25);
+  --red-800: oklch(0.36 0.13 25);
+  --red-900: oklch(0.28 0.10 25);
+  --red-950: oklch(0.22 0.07 25);
+
+  /* Green (success) */
+  --green-50: oklch(0.97 0.02 155);
+  --green-100: oklch(0.93 0.04 155);
+  --green-200: oklch(0.87 0.08 155);
+  --green-300: oklch(0.78 0.12 155);
+  --green-400: oklch(0.68 0.15 155);
+  --green-500: oklch(0.58 0.16 155);
+  --green-600: oklch(0.50 0.14 155);
+  --green-700: oklch(0.43 0.12 155);
+  --green-800: oklch(0.36 0.10 155);
+  --green-900: oklch(0.28 0.07 155);
+
+  /* Neutral */
+  --neutral-0: oklch(1.00 0 0);
+  --neutral-50: oklch(0.98 0 0);
+  --neutral-100: oklch(0.96 0 0);
+  --neutral-200: oklch(0.92 0 0);
+  --neutral-300: oklch(0.87 0 0);
+  --neutral-400: oklch(0.74 0 0);
+  --neutral-500: oklch(0.62 0 0);
+  --neutral-600: oklch(0.50 0 0);
+  --neutral-700: oklch(0.38 0 0);
+  --neutral-800: oklch(0.27 0 0);
+  --neutral-850: oklch(0.22 0 0);
+  --neutral-900: oklch(0.17 0 0);
+  --neutral-950: oklch(0.13 0 0);
+
+  /* Spacing (4px grid) */
+  --space-0: 0;
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-2-5: 10px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Border radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* Typography */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  /* Shadows (light mode base) */
+  --shadow-sm: 0 1px 3px oklch(0.20 0 0 / 0.08);
+  --shadow-md: 0 4px 12px oklch(0.20 0 0 / 0.10);
+  --shadow-lg: 0 8px 24px oklch(0.20 0 0 / 0.14);
+  --shadow-xl: 0 12px 40px oklch(0.20 0 0 / 0.18);
+
+  /* Transitions */
+  --transition-fast: 120ms ease;
+  --transition-normal: 200ms ease;
+  --transition-slow: 300ms ease;
+  --transition-bounce: 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ── Semantic Layer: Functional roles ────────────────────── */
+:root {
+  /* Background */
+  --color-bg: var(--neutral-0);
+  --color-bg-elevated: var(--neutral-50);
+  --color-bg-overlay: oklch(1.00 0 0 / 0.80);
+  --color-bg-sunken: var(--neutral-100);
+
+  /* Foreground */
+  --color-fg: var(--neutral-900);
+  --color-fg-muted: var(--neutral-600);
+  --color-fg-subtle: var(--neutral-500);
+  --color-fg-on-accent: var(--neutral-0);
+
+  /* Border */
+  --color-border: var(--neutral-200);
+  --color-border-hover: var(--neutral-300);
+  --color-border-strong: var(--neutral-400);
+
+  /* Accent */
+  --color-accent: var(--blue-600);
+  --color-accent-hover: var(--blue-700);
+  --color-accent-subtle: var(--blue-50);
+  --color-accent-fg: var(--neutral-0);
+
+  /* Danger */
+  --color-danger: var(--red-600);
+  --color-danger-hover: var(--red-700);
+  --color-danger-subtle: var(--red-50);
+  --color-danger-fg: var(--red-600);
+
+  /* Success */
+  --color-success: var(--green-600);
+  --color-success-subtle: var(--green-50);
+  --color-success-fg: var(--green-600);
+
+  /* Focus ring */
+  --color-focus-ring: var(--blue-500);
+}
+
+/* ── Component Layer: Per-component variables ────────────── */
+:root {
+  /* Toolbar */
+  --toolbar-bg: oklch(0.98 0 0);
+  --toolbar-border: var(--color-border);
+  --toolbar-shadow: var(--shadow-md);
+  --toolbar-radius: var(--radius-md);
+  --toolbar-padding-x: var(--space-2);
+  --toolbar-padding-y: var(--space-1-5);
+  --toolbar-gap: var(--space-1);
+
+  /* Button */
+  --button-text: var(--color-fg);
+  --button-hover-bg: var(--color-bg-sunken);
+  --button-active-bg: var(--neutral-200);
+  --button-radius: var(--radius-md);
+  --button-size-md: 32px;
+  --button-size-sm: 28px;
+
+  /* Button — ghost */
+  --button-ghost-hover-bg: var(--neutral-100);
+  --button-ghost-active-bg: var(--neutral-200);
+
+  /* Button — primary */
+  --button-primary-text: var(--color-accent);
+  --button-primary-hover-bg: var(--color-accent-subtle);
+  --button-primary-active-bg: var(--blue-100);
+
+  /* Button — danger */
+  --button-danger-text: var(--color-danger-fg);
+  --button-danger-hover-bg: var(--color-danger-subtle);
+  --button-danger-active-bg: var(--red-100);
+
+  /* Orb */
+  --orb-bg: var(--blue-500);
+  --orb-border: var(--blue-600);
+  --orb-size: 40px;
+  --orb-shadow: 0 2px 8px oklch(0.20 0 0 / 0.20);
+  --orb-shadow-hover: 0 4px 16px oklch(0.20 0 0 / 0.28);
+  --orb-glow: 0 0 16px oklch(0.58 0.19 250 / 0.30);
+
+  /* Preview */
+  --preview-text-color: var(--color-fg);
+  --preview-bg: var(--color-bg-elevated);
+  --preview-border: var(--color-border);
+  --preview-radius: var(--radius-sm);
+
+  /* Error */
+  --error-text-color: var(--color-danger-fg);
+  --error-bg: var(--color-danger-subtle);
+
+  /* Settings */
+  --settings-bg: var(--color-bg);
+  --settings-section-bg: var(--color-bg-elevated);
+  --settings-heading-color: var(--color-fg);
+  --settings-subheading-color: var(--color-fg-muted);
+  --settings-border: var(--color-border);
+  --settings-input-bg: var(--color-bg);
+  --settings-focus-border: var(--color-accent);
+  --settings-focus-shadow: oklch(0.50 0.19 250 / 0.15);
+  --settings-save-btn-bg: var(--color-accent);
+  --settings-save-btn-text: var(--color-accent-fg);
+}
+
+/* ── Dark Mode ───────────────────────────────────────────── */
+[data-theme="dark"],
+:root.dark {
+  /* Primitive overrides */
+  --shadow-sm: 0 1px 3px oklch(0.00 0 0 / 0.20);
+  --shadow-md: 0 4px 12px oklch(0.00 0 0 / 0.30);
+  --shadow-lg: 0 8px 24px oklch(0.00 0 0 / 0.40);
+  --shadow-xl: 0 12px 40px oklch(0.00 0 0 / 0.50);
+
+  /* Semantic */
+  --color-bg: var(--neutral-900);
+  --color-bg-elevated: var(--neutral-850);
+  --color-bg-overlay: oklch(0.17 0 0 / 0.85);
+  --color-bg-sunken: var(--neutral-950);
+
+  --color-fg: var(--neutral-100);
+  --color-fg-muted: var(--neutral-400);
+  --color-fg-subtle: var(--neutral-500);
+  --color-fg-on-accent: var(--neutral-0);
+
+  --color-border: var(--neutral-800);
+  --color-border-hover: var(--neutral-700);
+  --color-border-strong: var(--neutral-600);
+
+  --color-accent: var(--blue-400);
+  --color-accent-hover: var(--blue-300);
+  --color-accent-subtle: var(--blue-950);
+  --color-accent-fg: var(--neutral-950);
+
+  --color-danger: var(--red-400);
+  --color-danger-hover: var(--red-300);
+  --color-danger-subtle: var(--red-950);
+  --color-danger-fg: var(--red-400);
+
+  --color-success: var(--green-400);
+  --color-success-subtle: var(--green-900);
+  --color-success-fg: var(--green-400);
+
+  --color-focus-ring: var(--blue-400);
+
+  /* Component overrides */
+  --toolbar-bg: oklch(0.17 0 0);
+  --toolbar-border: var(--color-border);
+  --toolbar-shadow: var(--shadow-md);
+
+  --button-text: var(--color-fg);
+  --button-hover-bg: var(--neutral-800);
+  --button-active-bg: var(--neutral-700);
+
+  --button-ghost-hover-bg: var(--neutral-800);
+  --button-ghost-active-bg: var(--neutral-700);
+
+  --button-primary-text: var(--blue-400);
+  --button-primary-hover-bg: var(--blue-950);
+  --button-primary-active-bg: var(--blue-900);
+
+  --button-danger-text: var(--red-400);
+  --button-danger-hover-bg: var(--red-950);
+  --button-danger-active-bg: var(--red-900);
+
+  --orb-bg: var(--blue-500);
+  --orb-border: var(--blue-400);
+  --orb-shadow: 0 2px 8px oklch(0.00 0 0 / 0.35);
+  --orb-shadow-hover: 0 4px 16px oklch(0.00 0 0 / 0.45);
+  --orb-glow: 0 0 20px oklch(0.58 0.19 250 / 0.25);
+
+  --preview-text-color: var(--color-fg);
+  --preview-bg: var(--neutral-900);
+  --preview-border: var(--color-border);
+
+  --error-text-color: var(--color-danger-fg);
+  --error-bg: var(--color-danger-subtle);
+
+  --settings-bg: var(--color-bg);
+  --settings-section-bg: var(--color-bg-elevated);
+  --settings-heading-color: var(--color-fg);
+  --settings-subheading-color: var(--color-fg-muted);
+  --settings-border: var(--color-border);
+  --settings-input-bg: var(--neutral-850);
+  --settings-focus-border: var(--color-accent);
+  --settings-focus-shadow: oklch(0.58 0.19 250 / 0.15);
+  --settings-save-btn-bg: var(--color-accent);
+  --settings-save-btn-text: var(--color-accent-fg);
+}
+

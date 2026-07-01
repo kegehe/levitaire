@@ -1,0 +1,203 @@
+/* ── Container ───────────────────────────────────────────── */
+.settings-container {
+  padding: var(--space-6);
+  max-width: 600px;
+  margin: 0 auto;
+  background: var(--settings-bg);
+  min-height: 100vh;
+}
+
+.settings-title {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  margin-bottom: var(--space-6);
+  color: var(--settings-heading-color);
+  letter-spacing: -0.01em;
+}
+
+/* ── Section (fieldset/section) ──────────────────────────── */
+.settings-section {
+  margin-bottom: var(--space-6);
+  padding: var(--space-4);
+  background: var(--settings-section-bg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--settings-border);
+  transition: background-color var(--transition-normal),
+    border-color var(--transition-normal);
+  min-width: 0; /* fieldset 元素默认 min-width: min-content，防止宽度溢出 */
+}
+
+fieldset.settings-section {
+  margin: 0 0 var(--space-6) 0; /* 覆盖 fieldset 默认 margin */
+}
+
+.settings-section-heading {
+  font-size: var(--text-lg);
+  font-weight: 500;
+  margin-bottom: var(--space-4);
+  color: var(--settings-subheading-color);
+  padding: 0;
+  display: block;
+  width: fit-content;
+}
+
+/* ── Item ────────────────────────────────────────────────── */
+.settings-item {
+  margin-bottom: var(--space-3);
+}
+
+.settings-item:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Checkbox label ──────────────────────────────────────── */
+.settings-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  font-size: var(--text-md);
+  color: var(--settings-heading-color);
+  border-radius: var(--radius-sm);
+  padding: var(--space-0-5) var(--space-1);
+  margin-left: calc(-1 * var(--space-1));
+  transition: background-color var(--transition-fast);
+}
+
+.settings-checkbox-label:hover {
+  background: var(--button-hover-bg);
+}
+
+.settings-checkbox-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+/* ── Label ───────────────────────────────────────────────── */
+.settings-label {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  margin-bottom: var(--space-1);
+  color: var(--settings-subheading-color);
+}
+
+/* ── Select ──────────────────────────────────────────────── */
+.settings-select {
+  padding: var(--space-1-5) var(--space-2-5);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-md);
+  background: var(--settings-input-bg);
+  color: var(--settings-heading-color);
+  cursor: pointer;
+  transition: border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.settings-select:focus-visible {
+  outline: none;
+  border-color: var(--settings-focus-border);
+  box-shadow: 0 0 0 3px var(--settings-focus-shadow);
+}
+
+/* ── Input ───────────────────────────────────────────────── */
+.settings-input {
+  width: 100%;
+  padding: var(--space-2) var(--space-2-5);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-md);
+  background: var(--settings-input-bg);
+  color: var(--settings-heading-color);
+  font-family: inherit;
+  transition: border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.settings-input::placeholder {
+  color: var(--color-fg-subtle);
+}
+
+.settings-input:focus {
+  outline: none;
+  border-color: var(--settings-focus-border);
+  box-shadow: 0 0 0 3px var(--settings-focus-shadow);
+}
+
+.settings-input-group {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.settings-input-group .settings-input {
+  flex: 1;
+}
+
+/* ── Toggle button (eye icon) ────────────────────────────── */
+.settings-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-sm);
+  background: var(--settings-input-bg);
+  cursor: pointer;
+  color: var(--color-fg-muted);
+  transition: background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.settings-toggle-btn:hover {
+  background: var(--button-hover-bg);
+  color: var(--color-fg);
+}
+
+.settings-toggle-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* ── Save button ─────────────────────────────────────────── */
+.settings-save-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: var(--space-2) var(--space-5);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--settings-save-btn-bg);
+  color: var(--settings-save-btn-text);
+  font-size: var(--text-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.settings-save-btn:hover {
+  opacity: 0.9;
+}
+
+.settings-save-btn:active {
+  transform: scale(0.97);
+}
+
+.settings-save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.settings-save-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.settings-save-spinner {
+  animation: spin 0.8s linear infinite;
+}
+

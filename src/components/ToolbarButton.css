@@ -1,0 +1,105 @@
+/* ── Base ─────────────────────────────────────────────────── */
+.toolbar-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  border-radius: var(--button-radius);
+  cursor: pointer;
+  color: var(--button-text);
+  transition: background-color var(--transition-fast),
+    color var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+/* ── Sizes ───────────────────────────────────────────────── */
+.toolbar-button--md {
+  width: var(--button-size-md);
+  height: var(--button-size-md);
+}
+
+.toolbar-button--sm {
+  width: var(--button-size-sm);
+  height: var(--button-size-sm);
+}
+
+/* ── Icon ────────────────────────────────────────────────── */
+.toolbar-button-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition: transform var(--transition-fast);
+}
+
+/* ── States ──────────────────────────────────────────────── */
+.toolbar-button:hover {
+  background: var(--button-hover-bg);
+}
+
+.toolbar-button:active {
+  background: var(--button-active-bg);
+  transform: scale(0.95);
+}
+
+.toolbar-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.toolbar-button:disabled:hover {
+  background: transparent;
+}
+
+/* Focus visible */
+.toolbar-button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* ── Ghost variant (default) ─────────────────────────────── */
+.toolbar-button--ghost:hover {
+  background: var(--button-ghost-hover-bg);
+}
+
+.toolbar-button--ghost:active {
+  background: var(--button-ghost-active-bg);
+}
+
+/* ── Primary variant ─────────────────────────────────────── */
+.toolbar-button--primary {
+  color: var(--button-primary-text);
+}
+
+.toolbar-button--primary:hover {
+  background: var(--button-primary-hover-bg);
+}
+
+.toolbar-button--primary:active {
+  background: var(--button-primary-active-bg);
+}
+
+/* ── Danger variant ──────────────────────────────────────── */
+.toolbar-button--danger {
+  color: var(--button-danger-text);
+}
+
+.toolbar-button--danger:hover {
+  background: var(--button-danger-hover-bg);
+}
+
+.toolbar-button--danger:active {
+  background: var(--button-danger-active-bg);
+}
+
+/* ── Loading animation ───────────────────────────────────── */
+.toolbar-button--loading .toolbar-button-icon {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

@@ -1,0 +1,235 @@
+## Visual Studio temporary files, build results
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# Claude Code / Agent skills (installed at runtime, not source)
+.claude/
+.agents/
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio cache
+.vs/
+Generated\ Files/
+
+# Test results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.VisualState.xml
+TestResult.xml
+nunit-*.xml
+
+# Build artifacts
+[Dd]ebugPS/
+[Rr]eleasePS/
+dlldata.c
+BenchmarkDotNet.Artifacts/
+
+# .NET Core
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Files built by Visual Studio
+*_i.c
+*_p.c
+*_h.h
+*.ilk
+*.meta
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*_wpftmp.csproj
+*.log
+*.vspscc
+*.vssscc
+.builds
+*.pidb
+*.svclog
+*.scc
+
+# Visual C++ cache
+ipch/
+*.aps
+*.ncb
+*.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+
+# Profiler
+*.psess
+*.vsp
+*.vspx
+*.sap
+*.e2e
+
+# TFS
+$tf/
+
+# ReSharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# TeamCity
+_TeamCity*
+
+# Coverage
+*.dotCover
+*.coverage
+*.coveragexml
+.axoCover/*
+!.axoCover/settings.json
+
+# NCrunch
+_NCrunch_*
+.*crunch*.local.xml
+nCrunchTemp_*
+
+# NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+
+# Azure
+csx/
+*.build.csdef
+ecf/
+rcf/
+PublishScripts/
+
+# Windows Store
+AppPackages/
+BundleArtifacts/
+Package.StoreAssociation.xml
+_pkginfo.txt
+*.appx
+*.appxbundle
+*.appxupload
+
+# Others
+ClientBin/
+~$*
+*~
+*.dbmdl
+*.dbproj.schemaview
+*.jfm
+*.pfx
+*.publishsettings
+orleans.codegen.cs
+*.gpState
+*.mm.*
+AutoTest.Net/
+.sass-cache/
+[Ee]xpress/
+publish/
+*.[Pp]ublish.xml
+*.azurePubxml
+*.pubxml
+*.publishproj
+Generated_Code/
+_UpgradeReport_Files/
+Backup*/
+UpgradeLog*.XML
+UpgradeLog*.htm
+ServiceFabricBackup/
+*.rptproj.bak
+*.mdf
+*.ldf
+*.ndf
+*.rdl.data
+*.bim.layout
+*.bim_*.settings
+*.rptproj.rsuser
+*- [Bb]ackup.rdl
+*- [Bb]ackup ([0-9]).rdl
+FakesAssemblies/
+*.GhostDoc.xml
+*.tss
+*.jmconfig
+*.btp.cs
+*.btm.cs
+*.odx.cs
+*.xsd.cs
+OpenCover/
+ASALocalRun/
+*.binlog
+*.ncuser
+.mfractor/
+.localhistory/
+health/
+MigrationBackup/
+.ionide/
+.mono_crash.*
+
+# IDE
+.idea/
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+
+# Node.js
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Environment variables (may contain secrets)
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Rust
+src-tauri/target/
+
+# Tauri
+src-tauri/binaries/
+src-tauri/gen/
+
+# Debug log (written by app at runtime)
+floast-debug.log
+
+# Screenshots (不应入库)
+screenshot.png
+screenshot.ps1
