@@ -1,16 +1,18 @@
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, TRUE, FALSE, WPARAM};
+use super::{Point, SelectionInfo};
 use windows::core::BOOL;
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{FALSE, HWND, LPARAM, POINT, TRUE, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX, COINIT_APARTMENTTHREADED,
+};
 use windows::Win32::System::Ole::{SafeArrayAccessData, SafeArrayDestroy, SafeArrayUnaccessData};
 use windows::Win32::UI::Accessibility::*;
-use windows::Win32::UI::Controls::{EM_GETSEL, EM_SETSEL, EM_REPLACESEL};
-use windows::Win32::UI::Controls::EM_POSFROMCHAR;
 use windows::Win32::UI::Controls::RichEdit::{CHARRANGE, EM_GETTEXTRANGE, TEXTRANGEW};
-use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::Controls::EM_POSFROMCHAR;
+use windows::Win32::UI::Controls::{EM_GETSEL, EM_REPLACESEL, EM_SETSEL};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-use windows::core::PWSTR;
-use super::{SelectionInfo, Point};
+use windows::Win32::UI::WindowsAndMessaging::*;
 
 // UIA TreeWalker 遍历深度上限（防止 Electron 等深树结构遍历过深）
 const TREE_WALKER_MAX_DEPTH: u32 = 3;
@@ -33,9 +35,9 @@ const EDIT_CLASS_NAMES: &[&str] = &[
     "RichEdit",
     "RichEdit20W",
     "RichEdit20A",
-    "RICHEDIT50W",      // 通用 RichEdit 5.0
-    "RichEditD2DPT",   // Windows 11 Notepad
-    "MSFTEDIT_CLASS",   // RichEdit 4.1+
+    "RICHEDIT50W",    // 通用 RichEdit 5.0
+    "RichEditD2DPT",  // Windows 11 Notepad
+    "MSFTEDIT_CLASS", // RichEdit 4.1+
 ];
 
 pub fn get_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Error>> {
@@ -47,28 +49,43 @@ pub fn get_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Erro
     // 方法1: UI Automation（浏览器、Office、Electron 等）
     match get_selection_via_uia() {
         Ok(SelectionResult::Found(info)) => {
-            crate::utils::logger::log("selection", &format!("UIA success: {} chars", info.text.len()));
+            crate::utils::logger::log(
+                "selection",
+                &format!("UIA success: {} chars", info.text.len()),
+            );
             return Ok(Some(info));
         }
         Ok(SelectionResult::EmptySelection) => {
-            crate::utils::logger::log("selection", "UIA applicable but no selection, continuing to Win32");
+            crate::utils::logger::log(
+                "selection",
+                "UIA applicable but no selection, continuing to Win32",
+            );
             // UIA EmptySelection 不再跳过 fallback — UIA 有时暂时读不到选区，
             // 让 Win32 和 clipboard 继续尝试以确保不遗漏
         }
         Ok(SelectionResult::NotApplicable) => {
             crate::utils::logger::log("selection", "UIA not applicable, trying Win32 fallback");
         }
-        Err(e) => crate::utils::logger::log("selection", &format!("UIA error: {}, trying Win32 fallback", e)),
+        Err(e) => crate::utils::logger::log(
+            "selection",
+            &format!("UIA error: {}, trying Win32 fallback", e),
+        ),
     }
 
     // 方法2: Win32 消息（记事本、Win32 编辑框等）
     match get_selection_via_win32() {
         Ok(SelectionResult::Found(info)) => {
-            crate::utils::logger::log("selection", &format!("Win32 success: {} chars", info.text.len()));
+            crate::utils::logger::log(
+                "selection",
+                &format!("Win32 success: {} chars", info.text.len()),
+            );
             return Ok(Some(info));
         }
         Ok(SelectionResult::EmptySelection) => {
-            crate::utils::logger::log("selection", "Win32 applicable but no selection, skipping clipboard/OCR");
+            crate::utils::logger::log(
+                "selection",
+                "Win32 applicable but no selection, skipping clipboard/OCR",
+            );
             // Win32 找到 EDIT 控件但无选区，说明用户确实没有选中文本，跳过 clipboard/OCR
             return Ok(None);
         }
@@ -81,7 +98,10 @@ pub fn get_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Erro
     // 方法3: 模拟 Ctrl+C + 剪贴板读取（万能 fallback）
     match super::clipboard_selection::get_selection_via_clipboard() {
         Ok(Some((info, fg_hwnd))) => {
-            crate::utils::logger::log("selection", &format!("Clipboard success: {} chars", info.text.len()));
+            crate::utils::logger::log(
+                "selection",
+                &format!("Clipboard success: {} chars", info.text.len()),
+            );
             // clipboard_selection::get_selection_via_clipboard 内部已暂存了含焦点控件
             // HWND 和选区位置的完整上下文（focus_hwnd/sel_start/sel_end），
             // 此处无需覆盖，避免丢失精确定位信息
@@ -96,18 +116,24 @@ pub fn get_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Erro
     // #5: 使用入口处捕获的前台窗口，避免 fallback 链改变前台窗口状态
     match super::ocr_selection::get_selection_via_ocr() {
         Ok(Some(info)) => {
-            crate::utils::logger::log("selection", &format!("OCR success: {} chars", info.text.len()));
-            super::store_selection_context(&info, super::SelectionContext {
-                text: info.text.clone(),
-                rect: info.rect.clone(),
-                method: super::SelectionMethod::Ocr,
-                foreground_hwnd: foreground_hwnd.0 as isize,
-                focus_hwnd: 0,
-                focus_class: String::new(),
-                sel_start: 0,
-                sel_end: 0,
-                occurrence_index: 0,
-            });
+            crate::utils::logger::log(
+                "selection",
+                &format!("OCR success: {} chars", info.text.len()),
+            );
+            super::store_selection_context(
+                &info,
+                super::SelectionContext {
+                    text: info.text.clone(),
+                    rect: info.rect.clone(),
+                    method: super::SelectionMethod::Ocr,
+                    foreground_hwnd: foreground_hwnd.0 as isize,
+                    focus_hwnd: 0,
+                    focus_class: String::new(),
+                    sel_start: 0,
+                    sel_end: 0,
+                    occurrence_index: 0,
+                },
+            );
             return Ok(Some(info));
         }
         Ok(None) => crate::utils::logger::log("selection", "OCR returned None"),
@@ -154,31 +180,24 @@ fn get_selection_via_uia() -> Result<SelectionResult, Box<dyn std::error::Error>
                         Some(r) => r,
                         None => {
                             let pos = get_cursor_pos();
-                            super::Rect { x: pos.x, y: pos.y, width: 0, height: 0 }
+                            super::Rect {
+                                x: pos.x,
+                                y: pos.y,
+                                width: 0,
+                                height: 0,
+                            }
                         }
                     };
 
-                    let info = SelectionInfo { text: text.to_string(), rect: rect.clone(), has_image: false };
+                    let info = SelectionInfo {
+                        text: text.to_string(),
+                        rect: rect.clone(),
+                        has_image: false,
+                    };
 
-                    super::store_selection_context(&info, super::SelectionContext {
-                        text: info.text.clone(),
-                        rect: info.rect.clone(),
-                        method: super::SelectionMethod::Uia,
-                        foreground_hwnd: foreground.0 as isize,
-                        focus_hwnd: 0,
-                        focus_class: String::new(),
-                        sel_start: 0,
-                        sel_end: 0,
-                        occurrence_index: 0,
-                    });
-
-                    Ok(SelectionResult::Found(info))
-                }
-                None => {
-                    // TreeWalker 也失败，尝试 LegacyIAccessible
-                    crate::utils::logger::log("selection", "All TextPattern attempts failed, trying LegacyIAccessible");
-                    if let Some(info) = try_legacy_accessible(&element) {
-                        super::store_selection_context(&info, super::SelectionContext {
+                    super::store_selection_context(
+                        &info,
+                        super::SelectionContext {
                             text: info.text.clone(),
                             rect: info.rect.clone(),
                             method: super::SelectionMethod::Uia,
@@ -188,7 +207,32 @@ fn get_selection_via_uia() -> Result<SelectionResult, Box<dyn std::error::Error>
                             sel_start: 0,
                             sel_end: 0,
                             occurrence_index: 0,
-                        });
+                        },
+                    );
+
+                    Ok(SelectionResult::Found(info))
+                }
+                None => {
+                    // TreeWalker 也失败，尝试 LegacyIAccessible
+                    crate::utils::logger::log(
+                        "selection",
+                        "All TextPattern attempts failed, trying LegacyIAccessible",
+                    );
+                    if let Some(info) = try_legacy_accessible(&element) {
+                        super::store_selection_context(
+                            &info,
+                            super::SelectionContext {
+                                text: info.text.clone(),
+                                rect: info.rect.clone(),
+                                method: super::SelectionMethod::Uia,
+                                foreground_hwnd: foreground.0 as isize,
+                                focus_hwnd: 0,
+                                focus_class: String::new(),
+                                sel_start: 0,
+                                sel_end: 0,
+                                occurrence_index: 0,
+                            },
+                        );
                         return Ok(SelectionResult::Found(info));
                     }
                     // #10: GetFocusedElement 成功（UIA 适用），但找不到任何文本 → 跳过 clipboard
@@ -211,7 +255,11 @@ fn get_selection_via_uia() -> Result<SelectionResult, Box<dyn std::error::Error>
 unsafe fn resolve_text_pattern_and_selection(
     automation: &IUIAutomation,
     element: &IUIAutomationElement,
-) -> Option<(IUIAutomationTextPattern, IUIAutomationTextRange, IUIAutomationElement)> {
+) -> Option<(
+    IUIAutomationTextPattern,
+    IUIAutomationTextRange,
+    IUIAutomationElement,
+)> {
     // --- Step 1: 焦点元素的 TextPattern ---
     if let Ok(tp) = element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
         if let Ok(ranges) = tp.GetSelection() {
@@ -225,7 +273,10 @@ unsafe fn resolve_text_pattern_and_selection(
                 }
             }
         }
-        crate::utils::logger::log("selection", "TextPattern selection empty/invalid, trying TextPattern2 caret");
+        crate::utils::logger::log(
+            "selection",
+            "TextPattern selection empty/invalid, trying TextPattern2 caret",
+        );
     } else {
         crate::utils::logger::log("selection", "Focused element has no TextPattern");
     }
@@ -236,7 +287,10 @@ unsafe fn resolve_text_pattern_and_selection(
     }
 
     // --- Step 3: TreeWalker 遍历子元素 ---
-    crate::utils::logger::log("selection", "TextPattern2 failed, trying TreeWalker traversal");
+    crate::utils::logger::log(
+        "selection",
+        "TextPattern2 failed, trying TreeWalker traversal",
+    );
     find_selection_via_tree_walker(automation, element, TREE_WALKER_MAX_DEPTH)
 }
 
@@ -266,7 +320,12 @@ unsafe fn get_range_rect(range: &IUIAutomationTextRange) -> Option<super::Rect> 
     let _ = SafeArrayUnaccessData(sa);
     let _ = SafeArrayDestroy(sa);
 
-    Some(super::Rect { x, y, width, height })
+    Some(super::Rect {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 // ─── Win32 Messages (EDIT/RICHEDIT) ─────────────────────────────
@@ -310,14 +369,22 @@ fn get_selection_via_win32() -> Result<SelectionResult, Box<dyn std::error::Erro
         };
 
         // 确定目标 EDIT 控件 HWND
-        let is_edit = EDIT_CLASS_NAMES.iter().any(|n| n.eq_ignore_ascii_case(&class_name));
+        let is_edit = EDIT_CLASS_NAMES
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&class_name));
         let (target_hwnd, target_class) = if is_edit {
             (hwnd_focus, class_name)
         } else {
             match find_edit_child(hwnd_focus) {
                 Some((h, c)) => (h, c),
                 None => {
-                    crate::utils::logger::log("selection", &format!("Win32: class '{}' is not EDIT and no EDIT child found", class_name));
+                    crate::utils::logger::log(
+                        "selection",
+                        &format!(
+                            "Win32: class '{}' is not EDIT and no EDIT child found",
+                            class_name
+                        ),
+                    );
                     return Ok(SelectionResult::NotApplicable);
                 }
             }
@@ -344,7 +411,10 @@ fn get_selection_via_win32() -> Result<SelectionResult, Box<dyn std::error::Erro
             return Ok(SelectionResult::EmptySelection);
         }
 
-        crate::utils::logger::log("selection", &format!("Win32: selection range {}..{}", sel_start, sel_end));
+        crate::utils::logger::log(
+            "selection",
+            &format!("Win32: selection range {}..{}", sel_start, sel_end),
+        );
 
         // 5. 获取选中文字
         let is_richedit = is_richedit_class(&target_class);
@@ -365,23 +435,35 @@ fn get_selection_via_win32() -> Result<SelectionResult, Box<dyn std::error::Erro
             Some(r) => r,
             None => {
                 let pos = get_cursor_pos();
-                super::Rect { x: pos.x, y: pos.y, width: 0, height: 0 }
+                super::Rect {
+                    x: pos.x,
+                    y: pos.y,
+                    width: 0,
+                    height: 0,
+                }
             }
         };
 
-        let info = SelectionInfo { text: text.clone(), rect: rect.clone(), has_image: false };
+        let info = SelectionInfo {
+            text: text.clone(),
+            rect: rect.clone(),
+            has_image: false,
+        };
 
-        super::store_selection_context(&info, super::SelectionContext {
-            text: info.text.clone(),
-            rect: info.rect.clone(),
-            method: super::SelectionMethod::Win32,
-            foreground_hwnd: foreground.0 as isize,
-            focus_hwnd: target_hwnd.0 as isize,
-            focus_class: target_class,
-            sel_start,
-            sel_end,
-            occurrence_index: 0,
-        });
+        super::store_selection_context(
+            &info,
+            super::SelectionContext {
+                text: info.text.clone(),
+                rect: info.rect.clone(),
+                method: super::SelectionMethod::Win32,
+                foreground_hwnd: foreground.0 as isize,
+                focus_hwnd: target_hwnd.0 as isize,
+                focus_class: target_class,
+                sel_start,
+                sel_end,
+                occurrence_index: 0,
+            },
+        );
 
         Ok(SelectionResult::Found(info))
     }
@@ -402,7 +484,11 @@ unsafe fn get_class_name(hwnd: HWND) -> Option<String> {
 unsafe fn find_edit_child(parent: HWND) -> Option<(HWND, String)> {
     let mut result: Option<(HWND, String)> = None;
 
-    let _ = EnumChildWindows(Some(parent), Some(enum_child_proc), LPARAM(&mut result as *mut _ as isize));
+    let _ = EnumChildWindows(
+        Some(parent),
+        Some(enum_child_proc),
+        LPARAM(&mut result as *mut _ as isize),
+    );
 
     result
 }
@@ -415,7 +501,10 @@ unsafe extern "system" fn enum_child_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let len = GetClassNameW(hwnd, &mut buf);
     if len > 0 {
         let class_name = String::from_utf16_lossy(&buf[..len as usize]);
-        if EDIT_CLASS_NAMES.iter().any(|n| n.eq_ignore_ascii_case(&class_name)) {
+        if EDIT_CLASS_NAMES
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&class_name))
+        {
             *result = Some((hwnd, class_name));
             return FALSE; // 找到了，停止枚举
         }
@@ -427,13 +516,19 @@ unsafe extern "system" fn enum_child_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 /// 判断是否为 RichEdit 控件（非标准 Edit）
 fn is_richedit_class(class_name: &str) -> bool {
     !class_name.eq_ignore_ascii_case("Edit")
-        && EDIT_CLASS_NAMES.iter().any(|n| n.eq_ignore_ascii_case(class_name))
+        && EDIT_CLASS_NAMES
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(class_name))
 }
 
 /// 从标准 EDIT 控件获取选中文字：WM_GETTEXT 拿全文 UTF-16，按选区索引截取
 /// 注意：EM_GETSEL 返回的索引对应 UTF-16 码元（Windows 内部编码），
 /// 所以在 UTF-16 buffer 上切片后再转 String，避免 char 索引偏移问题
-unsafe fn get_edit_text(hwnd: HWND, sel_start: u32, sel_end: u32) -> Result<String, Box<dyn std::error::Error>> {
+unsafe fn get_edit_text(
+    hwnd: HWND,
+    sel_start: u32,
+    sel_end: u32,
+) -> Result<String, Box<dyn std::error::Error>> {
     // 获取全文长度（UTF-16 码元数，不含 null）
     let text_len = SendMessageW(hwnd, WM_GETTEXTLENGTH, None, None).0 as usize;
     if text_len == 0 {
@@ -464,7 +559,11 @@ unsafe fn get_edit_text(hwnd: HWND, sel_start: u32, sel_end: u32) -> Result<Stri
 }
 
 /// 从 RICHEDIT 控件获取选中文字：EM_GETTEXTRANGE 直接获取
-unsafe fn get_richedit_text(hwnd: HWND, cp_min: i32, cp_max: i32) -> Result<String, Box<dyn std::error::Error>> {
+unsafe fn get_richedit_text(
+    hwnd: HWND,
+    cp_min: i32,
+    cp_max: i32,
+) -> Result<String, Box<dyn std::error::Error>> {
     let char_count = (cp_max - cp_min) as usize;
     if char_count == 0 {
         return Ok(String::new());
@@ -516,7 +615,10 @@ unsafe fn get_edit_position(hwnd: HWND, sel_start: i32, is_richedit: bool) -> Op
     let client_y = ((result.0 >> 32) & 0xFFFFFFFF) as i32;
 
     // 转换为屏幕坐标
-    let mut point = POINT { x: client_x, y: client_y };
+    let mut point = POINT {
+        x: client_x,
+        y: client_y,
+    };
     if ClientToScreen(hwnd, &mut point).as_bool() {
         Some(super::Rect {
             x: point.x,
@@ -538,7 +640,11 @@ unsafe fn find_selection_via_tree_walker(
     automation: &IUIAutomation,
     element: &IUIAutomationElement,
     depth: u32,
-) -> Option<(IUIAutomationTextPattern, IUIAutomationTextRange, IUIAutomationElement)> {
+) -> Option<(
+    IUIAutomationTextPattern,
+    IUIAutomationTextRange,
+    IUIAutomationElement,
+)> {
     // 尝试当前元素的 TextPattern
     if let Ok(tp) = element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
         if let Ok(ranges) = tp.GetSelection() {
@@ -546,9 +652,13 @@ unsafe fn find_selection_via_tree_walker(
                 if let Ok(range) = ranges.GetElement(0) {
                     if let Ok(text) = range.GetText(-1) {
                         if !text.is_empty() {
-                            crate::utils::logger::log("selection", &format!(
-                                "TreeWalker: found TextPattern with selection at depth {}", depth
-                            ));
+                            crate::utils::logger::log(
+                                "selection",
+                                &format!(
+                                    "TreeWalker: found TextPattern with selection at depth {}",
+                                    depth
+                                ),
+                            );
                             return Some((tp, range, element.clone()));
                         }
                     }
@@ -589,9 +699,12 @@ unsafe fn find_selection_via_tree_walker(
 /// 适用于 GetSelection() 返回空但应用实际有焦点文本的场景
 unsafe fn try_text_pattern2_caret(
     element: &IUIAutomationElement,
-) -> Option<(IUIAutomationTextPattern, IUIAutomationTextRange, IUIAutomationElement)> {
-    let tp2: IUIAutomationTextPattern2 =
-        element.GetCurrentPatternAs(UIA_TextPattern2Id).ok()?;
+) -> Option<(
+    IUIAutomationTextPattern,
+    IUIAutomationTextRange,
+    IUIAutomationElement,
+)> {
+    let tp2: IUIAutomationTextPattern2 = element.GetCurrentPatternAs(UIA_TextPattern2Id).ok()?;
 
     let mut is_active = FALSE;
     let range = tp2.GetCaretRange(&mut is_active).ok()?;
@@ -609,25 +722,30 @@ unsafe fn try_text_pattern2_caret(
 
 /// 使用 LegacyIAccessiblePattern 获取控件的 accValue 全文
 /// 这是最后的 UIA fallback，无法获取精确选区范围，返回全文
-unsafe fn try_legacy_accessible(
-    element: &IUIAutomationElement,
-) -> Option<super::SelectionInfo> {
-    let la: IUIAutomationLegacyIAccessiblePattern =
-        element.GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId).ok()?;
+unsafe fn try_legacy_accessible(element: &IUIAutomationElement) -> Option<super::SelectionInfo> {
+    let la: IUIAutomationLegacyIAccessiblePattern = element
+        .GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId)
+        .ok()?;
 
     let value = la.CurrentValue().ok()?.to_string();
     if value.is_empty() {
         return None;
     }
 
-    crate::utils::logger::log("selection", &format!(
-        "LegacyIAccessible: got value, {} chars", value.len()
-    ));
+    crate::utils::logger::log(
+        "selection",
+        &format!("LegacyIAccessible: got value, {} chars", value.len()),
+    );
 
     let pos = get_cursor_pos();
     Some(super::SelectionInfo {
         text: value,
-        rect: super::Rect { x: pos.x, y: pos.y, width: 0, height: 0 },
+        rect: super::Rect {
+            x: pos.x,
+            y: pos.y,
+            width: 0,
+            height: 0,
+        },
         has_image: false,
     })
 }
@@ -660,7 +778,8 @@ pub fn replace_text_via_uia(ctx: &super::SelectionContext, new_text: &str) -> Re
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
             .map_err(|e| format!("COM 初始化失败: {}", e))?;
 
         let result = (|| -> Result<(), String> {
@@ -669,7 +788,8 @@ pub fn replace_text_via_uia(ctx: &super::SelectionContext, new_text: &str) -> Re
                 .or_else(|_| CoCreateInstance(&CUIAutomation8, None, clsctx))
                 .map_err(|e| format!("创建 IUIAutomation 失败: {}", e))?;
 
-            let element = automation.GetFocusedElement()
+            let element = automation
+                .GetFocusedElement()
                 .map_err(|e| format!("获取焦点元素失败: {}", e))?;
 
             // 尝试 ValuePattern（适用于大多数可编辑控件）
@@ -704,10 +824,12 @@ unsafe fn find_value_pattern_for_replace(
     }
 
     // Step 2: TreeWalker 遍历子元素寻找 ValuePattern
-    let walker = automation.ControlViewWalker()
+    let walker = automation
+        .ControlViewWalker()
         .map_err(|e| format!("获取 ControlViewWalker 失败: {}", e))?;
 
-    let mut child = walker.GetFirstChildElement(element)
+    let mut child = walker
+        .GetFirstChildElement(element)
         .map_err(|_| "焦点元素无子控件，无法定位可编辑文本区域".to_string())?;
 
     loop {
@@ -734,15 +856,16 @@ unsafe fn try_replace_with_value_pattern(
     new_text: &str,
     label: &str,
 ) -> Result<(), String> {
-    let current_value = vp.CurrentValue()
-        .unwrap_or_default()
-        .to_string();
+    let current_value = vp.CurrentValue().unwrap_or_default().to_string();
 
     // 如果选区就是整个文本，直接替换
     if current_value == ctx.text {
         vp.SetValue(&windows::core::BSTR::from(new_text))
             .map_err(|e| format!("SetValue 失败: {}", e))?;
-        crate::utils::logger::log("selection", &format!("UIA ValuePattern 整文替换成功 ({})", label));
+        crate::utils::logger::log(
+            "selection",
+            &format!("UIA ValuePattern 整文替换成功 ({})", label),
+        );
         reselect_replaced_text(element, new_text);
         return Ok(());
     }
@@ -757,22 +880,27 @@ unsafe fn try_replace_with_value_pattern(
             return Err("无法在当前文本中定位选中内容，请重新选中文本".to_string());
         }
         if occurrence_count > 1 {
-            return Err(
-                format!("选中文本在文档中出现 {} 次，无法确定替换位置，请重新选中更长的文本片段", occurrence_count)
-            );
+            return Err(format!(
+                "选中文本在文档中出现 {} 次，无法确定替换位置，请重新选中更长的文本片段",
+                occurrence_count
+            ));
         }
     }
 
     // 选中文本唯一出现，安全替换
     if let Some(pos) = current_value.find(&ctx.text) {
-        let new_value = format!("{}{}{}",
+        let new_value = format!(
+            "{}{}{}",
             &current_value[..pos],
             new_text,
             &current_value[pos + ctx.text.len()..]
         );
         vp.SetValue(&windows::core::BSTR::from(&new_value))
             .map_err(|e| format!("SetValue 失败: {}", e))?;
-        crate::utils::logger::log("selection", &format!("UIA ValuePattern 替换成功 ({})", label));
+        crate::utils::logger::log(
+            "selection",
+            &format!("UIA ValuePattern 替换成功 ({})", label),
+        );
         reselect_replaced_text(element, new_text);
         return Ok(());
     }
@@ -782,10 +910,7 @@ unsafe fn try_replace_with_value_pattern(
 
 /// 替换后通过 TextPattern 重新选中替换的文本
 /// 使用 FindText 定位替换后的文本并选中
-unsafe fn reselect_replaced_text(
-    element: &IUIAutomationElement,
-    new_text: &str,
-) {
+unsafe fn reselect_replaced_text(element: &IUIAutomationElement, new_text: &str) {
     let Ok(tp) = element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) else {
         crate::utils::logger::log("selection", "UIA: 无 TextPattern，无法重新选中");
         return;
@@ -807,9 +932,13 @@ unsafe fn reselect_replaced_text(
             let found_text = found_range.GetText(-1).unwrap_or_default().to_string();
             if found_text == new_text {
                 let _ = found_range.Select();
-                crate::utils::logger::log("selection", &format!(
-                    "UIA: 已通过 FindText 重新选中替换文本 (attempt {})", attempt + 1
-                ));
+                crate::utils::logger::log(
+                    "selection",
+                    &format!(
+                        "UIA: 已通过 FindText 重新选中替换文本 (attempt {})",
+                        attempt + 1
+                    ),
+                );
                 return;
             }
         }
@@ -859,7 +988,10 @@ pub fn replace_text_via_win32(ctx: &super::SelectionContext, new_text: &str) -> 
         );
 
         // 用 EM_REPLACESEL 替换选中内容
-        let new_text_wide: Vec<u16> = new_text.encode_utf16().chain(std::iter::once(0u16)).collect();
+        let new_text_wide: Vec<u16> = new_text
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .collect();
         let _replace_result = SendMessageW(
             hwnd,
             EM_REPLACESEL,
@@ -877,7 +1009,10 @@ pub fn replace_text_via_win32(ctx: &super::SelectionContext, new_text: &str) -> 
             Some(LPARAM(new_end as isize)),
         );
 
-        crate::utils::logger::log("selection", "Win32 EM_REPLACESEL 已发送，已重新选中替换文本");
+        crate::utils::logger::log(
+            "selection",
+            "Win32 EM_REPLACESEL 已发送，已重新选中替换文本",
+        );
         Ok(())
     }
 }
@@ -992,7 +1127,12 @@ mod tests {
     fn test_selection_result_debug() {
         let r = SelectionResult::Found(SelectionInfo {
             text: "hello".into(),
-            rect: super::super::Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: super::super::Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             has_image: false,
         });
         assert!(format!("{:?}", r).contains("Found"));
@@ -1008,12 +1148,26 @@ mod tests {
     fn test_selection_result_partial_eq() {
         let info = SelectionInfo {
             text: "test".into(),
-            rect: super::super::Rect { x: 10, y: 20, width: 100, height: 20 },
+            rect: super::super::Rect {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 20,
+            },
             has_image: false,
         };
-        assert_eq!(SelectionResult::Found(info.clone()), SelectionResult::Found(info));
-        assert_eq!(SelectionResult::EmptySelection, SelectionResult::EmptySelection);
-        assert_eq!(SelectionResult::NotApplicable, SelectionResult::NotApplicable);
+        assert_eq!(
+            SelectionResult::Found(info.clone()),
+            SelectionResult::Found(info)
+        );
+        assert_eq!(
+            SelectionResult::EmptySelection,
+            SelectionResult::EmptySelection
+        );
+        assert_eq!(
+            SelectionResult::NotApplicable,
+            SelectionResult::NotApplicable
+        );
         assert_ne!(
             SelectionResult::EmptySelection,
             SelectionResult::NotApplicable
@@ -1029,8 +1183,8 @@ mod tests {
 
     #[test]
     fn test_edit_class_names_contains_standard() {
-        assert!(EDIT_CLASS_NAMES.iter().any(|n| *n == "Edit"));
-        assert!(EDIT_CLASS_NAMES.iter().any(|n| *n == "RichEdit20W"));
+        assert!(EDIT_CLASS_NAMES.contains(&"Edit"));
+        assert!(EDIT_CLASS_NAMES.contains(&"RichEdit20W"));
     }
 
     // ─── TREE_WALKER_MAX_DEPTH ────────────────────────────────────

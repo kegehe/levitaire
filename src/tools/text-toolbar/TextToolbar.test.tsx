@@ -1,18 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act, fireEvent } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
-import FloatingToolbar from "../components/FloatingToolbar";
-import { emitMockEvent, clearMockListeners, mockHide } from "../test/tauri-mock";
-import type { SelectionInfo } from "../types";
+import FloatingToolbar from "./TextToolbar";
+import { emitMockEvent, clearMockListeners, mockHide } from "../../test/tauri-mock";
+import type { SelectionInfo } from "../../types";
 
-// Mock qrcode 库
+// Mock qrcode 库（命名导出，匹配生产代码的动态 import("qrcode") 方式）
 vi.mock("qrcode", () => ({
-  default: {
-    toDataURL: vi.fn(),
-  },
+  toDataURL: vi.fn(),
 }));
-import QRCode from "qrcode";
-const mockToDataURL = vi.mocked(QRCode.toDataURL) as unknown as ReturnType<typeof vi.fn>;
+import { toDataURL as qrToDataURL } from "qrcode";
+const mockToDataURL = vi.mocked(qrToDataURL) as unknown as ReturnType<typeof vi.fn>;
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -720,7 +718,9 @@ describe("FloatingToolbar 去重功能", () => {
   // ── 可配置粒度：按词 / 按字符 ──────────────────────────────
 
   // 通过 emit 模拟设置窗口广播去重配置变更
+  // 先 flush 等待挂载时的 fetchDedupMode（默认按行）resolve，避免其异步 setState 覆盖事件设置的值
   const setDedupMode = async (mode: { granularity: string; charSubMode: string }) => {
+    await flush();
     await act(async () => {
       emitMockEvent("floast-dedup-mode-changed", mode);
     });
@@ -1500,7 +1500,7 @@ describe("FloatingToolbar 二维码功能", () => {
 
   // ── 生成行为 ──────────────────────────────────────────────
 
-  it("点击二维码按钮调用 QRCode.toDataURL", async () => {
+  it("点击二维码按钮调用 toDataURL", async () => {
     render(<FloatingToolbar />);
     await showToolbar("hello world");
 
@@ -1759,7 +1759,7 @@ describe("FloatingToolbar 二维码功能", () => {
 
   // ── 生成失败 ──────────────────────────────────────────────
 
-  it("QRCode.toDataURL 失败时显示错误信息", async () => {
+  it("toDataURL 失败时显示错误信息", async () => {
     mockToDataURL.mockRejectedValue(new Error("生成失败"));
 
     render(<FloatingToolbar />);
@@ -1799,7 +1799,7 @@ describe("FloatingToolbar 二维码功能", () => {
     vi.useRealTimers();
   });
 
-  // ── QRCode.toDataURL 参数验证 ──────────────────────────────────
+  // ── toDataURL 参数验证 ──────────────────────────────────
 
   it("使用默认深色前景和浅色背景", async () => {
     render(<FloatingToolbar />);
@@ -2084,5 +2084,958 @@ describe("FloatingToolbar 二维码功能", () => {
     });
 
     expect(document.querySelector(".toolbar-drag-handle")).toBeInTheDocument();
+  });
+});
+
+describe("FloatingToolbar MD5 加密功能", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+      }
+      if (cmd === "replace_selection") {
+        return Promise.resolve();
+      }
+      // get_md5_length / get_dedup_mode / get_toolbar_features 返回 undefined → 前端取默认值
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("默认状态下显示 MD5 按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    expect(screen.getByRole("button", { name: "MD5" })).toBeInTheDocument();
+  });
+
+  it("空文本时不显示 MD5 按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("   ");
+
+    expect(screen.queryByRole("button", { name: "MD5" })).not.toBeInTheDocument();
+  });
+
+  it("默认 32 位：点击 MD5 调用 replace_selection 并写入 32 位 hex", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    const btn = screen.getByRole("button", { name: "MD5" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    const calls = mockInvoke.mock.calls.filter(([cmd]) => cmd === "replace_selection");
+    expect(calls).toHaveLength(1);
+    const text = calls[0][1] as { text: string };
+    expect(text.text).toHaveLength(32);
+    expect(text.text).toMatch(/^[a-f0-9]{32}$/);
+  });
+
+  it("32 位结果与标准 md5(hello) 一致", async () => {
+    // 标准值：md5("hello") = 5d41402abc4b2a76b9719d911017c592
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "MD5" }));
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "5d41402abc4b2a76b9719d911017c592",
+    });
+  });
+
+  it("16 位：切换位数后输出 32 位结果的第 9~24 位", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    // 广播 16 位配置变更
+    await act(async () => {
+      emitMockEvent("floast-md5-length-changed", "16");
+    });
+    await flush();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "MD5" }));
+    });
+
+    // 5d41402abc4b2a76b9719d911017c592 的 substring(8,24) = bc4b2a76b9719d91
+    // 与 PHP substr(md5(s),8,16) 一致
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "bc4b2a76b9719d91",
+    });
+  });
+
+  it("16 位结果长度为 16", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("中文测试");
+
+    await act(async () => {
+      emitMockEvent("floast-md5-length-changed", "16");
+    });
+    await flush();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "MD5" }));
+    });
+
+    const calls = mockInvoke.mock.calls.filter(([cmd]) => cmd === "replace_selection");
+    const text = calls[0][1] as { text: string };
+    expect(text.text).toHaveLength(16);
+    expect(text.text).toMatch(/^[a-f0-9]{16}$/);
+  });
+
+  it("MD5 按钮在解码按钮之后", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    const buttons = screen.getAllByRole("button");
+    const labels = buttons.map((b) => b.getAttribute("aria-label"));
+    // base64-decode 仅在 isBase64 时显示，此处用 base64-encode("编码") 定位顺序
+    const encodeIdx = labels.indexOf("编码");
+    const md5Idx = labels.indexOf("MD5");
+
+    expect(encodeIdx).toBeLessThan(md5Idx);
+  });
+});
+
+describe("FloatingToolbar Unicode 功能", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+      }
+      if (cmd === "replace_selection") {
+        return Promise.resolve();
+      }
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  // ── 基础渲染 ──────────────────────────────────────────────
+
+  it("普通文本时显示转Unicode按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    expect(screen.getByRole("button", { name: "转Unicode" })).toBeInTheDocument();
+  });
+
+  it("空文本时不显示转Unicode按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("   ");
+
+    expect(screen.queryByRole("button", { name: "转Unicode" })).not.toBeInTheDocument();
+  });
+
+  it("普通文本时不显示转中文按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    expect(screen.queryByRole("button", { name: "转中文" })).not.toBeInTheDocument();
+  });
+
+  it("含 \\uXXXX 转义时显示转中文按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4e2d\\u6587");
+
+    expect(screen.getByRole("button", { name: "转中文" })).toBeInTheDocument();
+  });
+
+  it("含 \\u{XXXXX} 转义时显示转中文按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u{1F600}");
+
+    expect(screen.getByRole("button", { name: "转中文" })).toBeInTheDocument();
+  });
+
+  it("含 U+XXXX 形式时显示转中文按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("U+4E2D U+1F600");
+
+    expect(screen.getByRole("button", { name: "转中文" })).toBeInTheDocument();
+  });
+
+  it("转中文按钮在转Unicode按钮之后", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4e2d\\u6587");
+
+    const buttons = screen.getAllByRole("button");
+    const labels = buttons.map((b) => b.getAttribute("aria-label"));
+    const encodeIdx = labels.indexOf("转Unicode");
+    const decodeIdx = labels.indexOf("转中文");
+
+    expect(encodeIdx).toBeLessThan(decodeIdx);
+  });
+
+  it("转Unicode按钮在Base64解码按钮之后", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4e2d\\u6587");
+
+    const buttons = screen.getAllByRole("button");
+    const labels = buttons.map((b) => b.getAttribute("aria-label"));
+    const b64DecodeIdx = labels.indexOf("解码");
+    const uniEncodeIdx = labels.indexOf("转Unicode");
+
+    expect(b64DecodeIdx).toBeLessThan(uniEncodeIdx);
+  });
+
+  it("MD5按钮在转中文按钮之后", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4e2d\\u6587");
+
+    const buttons = screen.getAllByRole("button");
+    const labels = buttons.map((b) => b.getAttribute("aria-label"));
+    const uniDecodeIdx = labels.indexOf("转中文");
+    const md5Idx = labels.indexOf("MD5");
+
+    expect(uniDecodeIdx).toBeLessThan(md5Idx);
+  });
+
+  // ── 编码：基础 ──────────────────────────────────────────────
+
+  it("编码中文 '你好' → \\u4F60\\u597D", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("你好");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "\\u4F60\\u597D",
+    });
+  });
+
+  it("编码 ASCII 'abc' → \\u0061\\u0062\\u0063（全字符都转）", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("abc");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "\\u0061\\u0062\\u0063",
+    });
+  });
+
+  it("编码 emoji '😀' → \\u{1F600}（BMP 外用 \\u{} 形式）", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("😀");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "\\u{1F600}",
+    });
+  });
+
+  it("编码混合文本 '中A😀'", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("中A😀");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "\\u4E2D\\u0041\\u{1F600}",
+    });
+  });
+
+  it("编码前对文本进行 trim", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("  你好  ");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "\\u4F60\\u597D",
+    });
+  });
+
+  // ── 解码：基础 ──────────────────────────────────────────────
+
+  it("解码 \\u4F60\\u597D → 你好", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4F60\\u597D");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "你好",
+    });
+  });
+
+  it("解码 \\u{1F600} → 😀", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u{1F600}");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "😀",
+    });
+  });
+
+  it("解码 U+4E2D 形式 → 中", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("U+4E2D");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "中",
+    });
+  });
+
+  it("解码混合形式 \\u4E2D\\u{1F600}U+0041", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4E2D\\u{1F600}U+0041");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "中😀A",
+    });
+  });
+
+  it("解码前对文本进行 trim", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("  \\u4F60\\u597D  ");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "你好",
+    });
+  });
+
+  it("解码 U+ 不误匹配 CPU+4E2D（词边界）", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("CPU+4E2D");
+
+    // CPU+4E2D 中 U+4E2D 前是 P（单词字符），不应被识别为转义
+    expect(screen.queryByRole("button", { name: "转中文" })).not.toBeInTheDocument();
+  });
+
+  it("解码 独立 U+4E2D 仍能识别（词边界不阻断独立形式）", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("值 U+4E2D 结束");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    // U+ 前是空格（非单词字符），词边界成立，被解码；其余字符原样保留
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "值 中 结束",
+    });
+  });
+
+  it("编码多行文本 '你好\\n世界'", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("你好\n世界");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "\\u4F60\\u597D\\u000A\\u4E16\\u754C",
+    });
+  });
+
+  it("解码含换行的多行 Unicode 转义", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4F60\\u597D\\u000A\\u4E16\\u754C");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "你好\n世界",
+    });
+  });
+
+  it("长中文文本往返一致性", async () => {
+    const original = "这是一段用于测试往返一致性的较长中文文本，包含标点符号。";
+    render(<FloatingToolbar />);
+    await showToolbar(original);
+
+    const encBtn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(encBtn);
+    });
+
+    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as { text: string };
+    expect(encoded.text).toMatch(/^(\\u[0-9A-F]{4})+$/);
+
+    mockInvoke.mockClear();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+      }
+      return Promise.resolve();
+    });
+
+    await showToolbar(encoded.text);
+    const decBtn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(decBtn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: original,
+    });
+  });
+
+  it("选中合法 base64 文本时同时显示编码和解码按钮，但不显示转中文按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("aGVsbG8=");
+
+    expect(screen.getByRole("button", { name: "编码" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "解码" })).toBeInTheDocument();
+    // 合法 base64 不含 Unicode 转义，不应显示转中文
+    expect(screen.queryByRole("button", { name: "转中文" })).not.toBeInTheDocument();
+  });
+
+  it("选中 Unicode 转义文本时不显示 Base64 解码按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4E2D\\u6587");
+
+    // 含反斜杠，isBase64 字符类不接受，不显示解码
+    expect(screen.queryByRole("button", { name: "解码" })).not.toBeInTheDocument();
+    // 但显示转中文
+    expect(screen.getByRole("button", { name: "转中文" })).toBeInTheDocument();
+  });
+
+  it("非法码点 \\u{FFFFFF} 解码失败显示错误信息", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u{FFFFFF}");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    await flush();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Unicode 解码失败");
+  });
+
+  it("错误信息 3 秒后自动恢复", async () => {
+    vi.useFakeTimers();
+    render(<FloatingToolbar />);
+    await showToolbar("\\u{FFFFFF}");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "转Unicode" })).toBeInTheDocument();
+
+    vi.useRealTimers();
+  });
+
+  // ── 往返一致性 ──────────────────────────────────────────────
+
+  it("编码后再解码得到原始文本", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("你好世界");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as { text: string };
+    expect(encoded.text).toBe("\\u4F60\\u597D\\u4E16\\u754C");
+
+    mockInvoke.mockClear();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+      }
+      return Promise.resolve();
+    });
+
+    await showToolbar(encoded.text);
+    const btn2 = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn2);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "你好世界",
+    });
+  });
+
+  it("emoji 往返一致性", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("😀🍎");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as { text: string };
+
+    mockInvoke.mockClear();
+    await showToolbar(encoded.text);
+    const btn2 = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn2);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+      text: "😀🍎",
+    });
+  });
+
+  // ── 空文本守卫 ──────────────────────────────────────────────
+
+  it("空文本时不执行编码且不调用 replace_selection", async () => {
+    mockInvoke.mockClear();
+    render(<FloatingToolbar />);
+    await showToolbar("");
+
+    expect(screen.queryByRole("button", { name: "转Unicode" })).not.toBeInTheDocument();
+    const replaceCalls = mockInvoke.mock.calls.filter((c) => c[0] === "replace_selection");
+    expect(replaceCalls).toHaveLength(0);
+  });
+
+  // ── 操作完成后保持显示 ────────────────────────────────────
+
+  it("编码成功后保持工具栏显示", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("你好");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    await flush();
+
+    expect(mockInvoke).not.toHaveBeenCalledWith("hide_toolbar");
+  });
+
+  it("解码成功后保持工具栏显示", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4E2D\\u6587");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    await flush();
+
+    expect(mockInvoke).not.toHaveBeenCalledWith("hide_toolbar");
+  });
+
+  // ── replace_selection 失败错误处理 ──────────────────────────
+
+  it("编码 replace_selection 失败时显示错误信息", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "sk-test", base_url: "", model: "", api_type: "anthropic" });
+      }
+      if (cmd === "replace_selection") {
+        return Promise.reject("替换失败");
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    await showToolbar("你好");
+
+    const btn = screen.getByRole("button", { name: "转Unicode" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    await flush();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("替换失败");
+  });
+
+  it("解码 replace_selection 失败时显示错误信息", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "sk-test", base_url: "", model: "", api_type: "anthropic" });
+      }
+      if (cmd === "replace_selection") {
+        return Promise.reject(new Error("无法替换"));
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    await showToolbar("\\u4E2D\\u6587");
+
+    const btn = screen.getByRole("button", { name: "转中文" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    await flush();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("无法替换");
+  });
+
+  // ── 纯图片选区 ──────────────────────────────────────────────
+
+  it("纯图片选区时不显示转Unicode按钮", async () => {
+    render(<FloatingToolbar />);
+    await act(async () => {
+      emitMockEvent("selection-found", {
+        text: "",
+        rect: { x: 100, y: 200, width: 300, height: 20 },
+        "has-image": true,
+      });
+    });
+
+    expect(screen.queryByRole("button", { name: "转Unicode" })).not.toBeInTheDocument();
+  });
+
+  // ── 新选区后使用最新文本 ────────────────────────────────────
+
+  it("新选区触发后转中文按钮根据新文本条件显示", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+    expect(screen.queryByRole("button", { name: "转中文" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      emitMockEvent("selection-found", makeSelection("\\u4E2D\\u6587"));
+    });
+    expect(screen.getByRole("button", { name: "转中文" })).toBeInTheDocument();
+  });
+});
+
+describe("FloatingToolbar 字符统计功能", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+      }
+      // get_md5_length / get_dedup_mode / get_toolbar_features / get_clear_options 返回 undefined → 前端取默认值
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  // ── 按钮渲染 ──────────────────────────────────────────────
+
+  it("默认状态下显示统计按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello 世界");
+
+    expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
+  });
+
+  it("统计按钮位于 MD5 与清除之间", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    const buttons = screen.getAllByRole("button");
+    const labels = buttons.map((b) => b.getAttribute("aria-label"));
+    const md5Idx = labels.indexOf("MD5");
+    const countIdx = labels.indexOf("统计");
+    const clearIdx = labels.indexOf("清除");
+
+    expect(md5Idx).toBeLessThan(countIdx);
+    expect(countIdx).toBeLessThan(clearIdx);
+  });
+
+  it("空文本时不显示统计按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("   ");
+
+    expect(screen.queryByRole("button", { name: "统计" })).not.toBeInTheDocument();
+  });
+
+  it("纯图片选区时不显示统计按钮", async () => {
+    render(<FloatingToolbar />);
+    await act(async () => {
+      emitMockEvent("selection-found", {
+        text: "",
+        rect: { x: 100, y: 200, width: 300, height: 20 },
+        "has-image": true,
+      });
+    });
+
+    expect(screen.queryByRole("button", { name: "统计" })).not.toBeInTheDocument();
+  });
+
+  // ── 功能开关 ──────────────────────────────────────────────
+
+  it("功能开关禁用统计后不显示按钮", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_toolbar_features") {
+        // 禁用 char-count，其余取默认全量
+        return Promise.resolve([
+          "copy", "search", "translate", "optimize", "uppercase", "lowercase",
+          "dedup", "base64-encode", "base64-decode", "unicode-encode", "unicode-decode",
+          "md5-encrypt", "qrcode", "clear",
+        ]);
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    expect(screen.queryByRole("button", { name: "统计" })).not.toBeInTheDocument();
+  });
+
+  it("设置窗口广播 floast-features-changed 后实时隐藏统计按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+    expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
+
+    await act(async () => {
+      emitMockEvent("floast-features-changed", [
+        "copy", "search", "translate", "optimize", "uppercase", "lowercase",
+        "dedup", "base64-encode", "base64-decode", "unicode-encode", "unicode-decode",
+        "md5-encrypt", "qrcode", "clear",
+      ]);
+    });
+
+    expect(screen.queryByRole("button", { name: "统计" })).not.toBeInTheDocument();
+  });
+
+  // ── 预览面板 ──────────────────────────────────────────────
+
+  it("点击统计进入预览面板，展示统计项与数值", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello 世界 123");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "统计" }));
+    });
+
+    // 网格容器存在
+    expect(document.querySelector(".toolbar-charcount")).toBeInTheDocument();
+    // 各统计项标签存在
+    const labels = ["字符数(含空格)", "字符数(不含空格)", "字数", "行数", "非空行", "段落数", "句子数", "字节", "数字串", "标点", "字母"];
+    for (const label of labels) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    // 关闭按钮存在
+    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
+  });
+
+  it("统计数值正确：中英混排文本", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello 世界 123");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "统计" }));
+    });
+
+    // 字数：hello(1) + 世界(2) + 123(1) = 4
+    expect(screen.getByText("字数").nextElementSibling?.textContent).toBe("4");
+    // 字母：hello(5)
+    expect(screen.getByText("字母").nextElementSibling?.textContent).toBe("5");
+    // 数字串：123 共 1 串
+    expect(screen.getByText("数字串").nextElementSibling?.textContent).toBe("1");
+    // 行数：单行
+    expect(screen.getByText("行数").nextElementSibling?.textContent).toBe("1");
+    // 字节：UTF-8 字节数（hello=5 + 空格1 + 世界=6 + 空格1 + 123=3 = 16）
+    expect(screen.getByText("字节").nextElementSibling?.textContent).toBe("16 B");
+  });
+
+  it("点击关闭返回默认状态", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "统计" }));
+    });
+    expect(document.querySelector(".toolbar-charcount")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    });
+
+    expect(document.querySelector(".toolbar-charcount")).not.toBeInTheDocument();
+    // 默认按钮重新可见
+    expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
+  });
+
+  it("Escape 键返回默认状态而非隐藏工具栏", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "统计" }));
+    });
+    expect(document.querySelector(".toolbar-charcount")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: "Escape" });
+    });
+
+    // 预览面板关闭，但工具栏仍在（默认按钮可见）
+    expect(document.querySelector(".toolbar-charcount")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
+    expect(mockHide).not.toHaveBeenCalled();
+  });
+
+  it("新选区触发时自动退出预览面板", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "统计" }));
+    });
+    expect(document.querySelector(".toolbar-charcount")).toBeInTheDocument();
+
+    // 新选区
+    await act(async () => {
+      emitMockEvent("selection-found", makeSelection("new text"));
+    });
+
+    expect(document.querySelector(".toolbar-charcount")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
+  });
+});
+
+describe("FloatingToolbar 编号功能", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+      }
+      if (cmd === "replace_selection") {
+        return Promise.resolve();
+      }
+      // get_numbering_style 等返回 undefined → 前端取默认 number-dot
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("默认状态下显示编号按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    expect(screen.getByRole("button", { name: "编号" })).toBeInTheDocument();
+  });
+
+  it("空文本时编号按钮仍显示（与去重一致，无内容前置条件）", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("   ");
+
+    expect(screen.getByRole("button", { name: "编号" })).toBeInTheDocument();
+  });
+
+  it("纯图片选区不显示编号按钮", async () => {
+    render(<FloatingToolbar />);
+    await act(async () => {
+      emitMockEvent("selection-found", { text: "", rect: { x: 0, y: 0, width: 10, height: 10 }, "has-image": true });
+    });
+
+    expect(screen.queryByRole("button", { name: "编号" })).not.toBeInTheDocument();
+  });
+
+  it("默认 number-dot：单行点击编号后写回 1. 前缀", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("甲");
+
+    const btn = screen.getByRole("button", { name: "编号" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    const calls = mockInvoke.mock.calls.filter(([cmd]) => cmd === "replace_selection");
+    expect(calls).toHaveLength(1);
+    const arg = calls[0][1] as { text: string };
+    expect(arg.text).toBe("1. 甲");
+  });
+
+  it("多行点击编号后按行写回连续序号", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("甲\n乙\n丙");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "编号" }));
+    });
+
+    const calls = mockInvoke.mock.calls.filter(([cmd]) => cmd === "replace_selection");
+    expect(calls).toHaveLength(1);
+    const arg = calls[0][1] as { text: string };
+    expect(arg.text).toBe("1. 甲\n2. 乙\n3. 丙");
+  });
+
+  it("功能开关禁用时不显示编号按钮", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_toolbar_features") {
+        return Promise.resolve(["copy", "search"]); // 不含 numbering
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    expect(screen.queryByRole("button", { name: "编号" })).not.toBeInTheDocument();
   });
 });

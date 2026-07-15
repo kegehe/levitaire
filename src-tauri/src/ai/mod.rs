@@ -22,13 +22,35 @@ pub struct AiService {
 /// AI 服务内部实现
 struct AiServiceInner {
     config: AiConfig,
-    http_client: reqwest::Client,
+    /// 延迟初始化的 HTTP 客户端（首次调用时创建，避免启动时 TLS 初始化开销）
+    /// 外层 Mutex<AiServiceInner> 已提供互斥保护，无需再嵌套 Mutex
+    http_client: Option<reqwest::Client>,
+}
+
+impl AiServiceInner {
+    /// 获取或延迟创建 HTTP 客户端
+    fn get_client(&mut self) -> Result<reqwest::Client, String> {
+        if let Some(ref client) = self.http_client {
+            return Ok(client.clone());
+        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("无法创建 HTTP 客户端: {}", e))?;
+        self.http_client = Some(client.clone());
+        Ok(client)
+    }
 }
 
 // ─── 请求构建（纯函数）────────────────────────────────────────
 
 /// 根据 API 类型构建请求体
-fn build_request_body(api_type: &str, model: &str, prompt: &str, system_prompt: Option<&str>) -> serde_json::Value {
+fn build_request_body(
+    api_type: &str,
+    model: &str,
+    prompt: &str,
+    system_prompt: Option<&str>,
+) -> serde_json::Value {
     match api_type {
         "openai" => {
             let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -59,9 +81,7 @@ fn build_request_body(api_type: &str, model: &str, prompt: &str, system_prompt: 
 /// 根据 API 类型构建请求头
 fn build_headers(api_type: &str, api_key: &str) -> Vec<(String, String)> {
     match api_type {
-        "openai" => vec![
-            ("Authorization".to_string(), format!("Bearer {}", api_key)),
-        ],
+        "openai" => vec![("Authorization".to_string(), format!("Bearer {}", api_key))],
         _ => vec![
             ("x-api-key".to_string(), api_key.to_string()),
             ("anthropic-version".to_string(), "2023-06-01".to_string()),
@@ -70,7 +90,10 @@ fn build_headers(api_type: &str, api_key: &str) -> Vec<(String, String)> {
 }
 
 /// 根据 API 类型解析响应中的 content 和 thinking
-fn extract_content_and_thinking(parsed: &serde_json::Value, api_type: &str) -> (String, Option<String>) {
+fn extract_content_and_thinking(
+    parsed: &serde_json::Value,
+    api_type: &str,
+) -> (String, Option<String>) {
     match api_type {
         "openai" => {
             let content = parsed
@@ -110,8 +133,8 @@ fn extract_content_and_thinking(parsed: &serde_json::Value, api_type: &str) -> (
 
 /// 解析 SSE 数据中的文本增量
 fn parse_sse_data(data: &str, api_type: &str) -> Result<Option<String>, String> {
-    let parsed: serde_json::Value = serde_json::from_str(data)
-        .map_err(|e| format!("JSON 解析失败: {}", e))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(data).map_err(|e| format!("JSON 解析失败: {}", e))?;
 
     match api_type {
         "openai" => {
@@ -151,53 +174,108 @@ fn parse_sse_data(data: &str, api_type: &str) -> Result<Option<String>, String> 
                         .unwrap_or("未知流式错误");
                     Err(error_msg.to_string())
                 }
-                "message_stop" | "message_start" | "content_block_start" | "content_block_stop" | "ping" => {
-                    Ok(None)
-                }
-                _ => {
-                    Ok(None)
-                }
+                "message_stop"
+                | "message_start"
+                | "content_block_start"
+                | "content_block_stop"
+                | "ping" => Ok(None),
+                _ => Ok(None),
             }
         }
     }
+}
+
+fn process_sse_line<F>(
+    line: &str,
+    api_type: &str,
+    full_content: &mut String,
+    on_chunk: &F,
+) -> Result<(), String>
+where
+    F: Fn(&str),
+{
+    let line = line.trim_end_matches('\r');
+    let Some(rest) = line.strip_prefix("data:") else {
+        return Ok(());
+    };
+    let data = rest.trim();
+    if data == "[DONE]" || data.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(delta_text) = parse_sse_data(data, api_type)? {
+        full_content.push_str(&delta_text);
+        on_chunk(&delta_text);
+    }
+    Ok(())
 }
 
 // ─── AiService 实现 ──────────────────────────────────────────
 
 impl AiService {
     pub fn new(config: AiConfig) -> Self {
-        crate::utils::logger::log("ai", &format!("AI 服务初始化, base_url: {}, model: {}", config.base_url, config.model));
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .expect("无法创建 HTTP 客户端");
+        crate::utils::logger::log(
+            "ai",
+            &format!(
+                "AI 服务初始化, base_url: {}, model: {}",
+                config.base_url, config.model
+            ),
+        );
         Self {
-            inner: Mutex::new(AiServiceInner { config, http_client }),
+            inner: Mutex::new(AiServiceInner {
+                config,
+                http_client: None,
+            }),
         }
     }
 
     pub fn update_config(&self, config: AiConfig) -> Result<(), String> {
         crate::utils::logger::log("ai", "AI 服务配置已更新");
-        let mut inner = self.inner.lock().map_err(|e| format!("获取 AI 服务锁失败: {}", e))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| format!("获取 AI 服务锁失败: {}", e))?;
         inner.config = config;
+        // 重置 HTTP 客户端，确保新配置（如 base_url）生效
+        inner.http_client = None;
         Ok(())
     }
 
     /// 调用 AI 接口，发送 prompt 并获取回复
-    pub async fn call(&self, prompt: &str, system_prompt: Option<&str>) -> Result<AiResponse, String> {
-        crate::utils::logger::log("ai", &format!("调用 AI, prompt 长度: {} 字节", prompt.len()));
+    pub async fn call(
+        &self,
+        prompt: &str,
+        system_prompt: Option<&str>,
+    ) -> Result<AiResponse, String> {
+        crate::utils::logger::log(
+            "ai",
+            &format!("调用 AI, prompt 长度: {} 字节", prompt.len()),
+        );
 
         // 在锁内克隆所需数据，避免跨 await 持有锁
         let (url, api_key, model, api_type, http_client) = {
-            let inner = self.inner.lock().map_err(|e| format!("获取 AI 服务锁失败: {}", e))?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| format!("获取 AI 服务锁失败: {}", e))?;
             let api_type = inner.config.api_type.clone();
             // 将 0.0.0.0 替换为 127.0.0.1，因为 0.0.0.0 仅用于服务端绑定，不能作为客户端请求地址
-            let base_url = inner.config.base_url.trim_end_matches('/').replace("://0.0.0.0", "://127.0.0.1");
+            let base_url = inner
+                .config
+                .base_url
+                .trim_end_matches('/')
+                .replace("://0.0.0.0", "://127.0.0.1");
             let url = match api_type.as_str() {
                 "openai" => format!("{}/v1/chat/completions", base_url),
                 _ => format!("{}/v1/messages", base_url),
             };
-            (url, inner.config.api_key.clone(), inner.config.model.clone(), api_type, inner.http_client.clone())
+            (
+                url,
+                inner.config.api_key.clone(),
+                inner.config.model.clone(),
+                api_type,
+                inner.get_client()?,
+            )
         };
 
         crate::utils::logger::log("ai", &format!("请求 URL: {}, api_type: {}", url, api_type));
@@ -207,12 +285,14 @@ impl AiService {
         let headers = build_headers(&api_type, &api_key);
 
         // 发送请求
-        let (status, body_text) = self.send_request(&http_client, &url, &headers, &request_body).await?;
+        let (status, body_text) = self
+            .send_request(&http_client, &url, &headers, &request_body)
+            .await?;
         crate::utils::logger::log("ai", &format!("响应状态码: {}", status));
 
         // 解析响应
-        let parsed: serde_json::Value = serde_json::from_str(&body_text)
-            .map_err(|e| format!("解析 AI 响应失败: {}", e))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body_text).map_err(|e| format!("解析 AI 响应失败: {}", e))?;
 
         let (content, thinking) = extract_content_and_thinking(&parsed, &api_type);
 
@@ -224,10 +304,18 @@ impl AiService {
             crate::utils::logger::log("ai", &format!("AI 思考过程长度: {} 字节", t.len()));
         }
 
-        let response_model = parsed.get("model").and_then(|m| m.as_str()).unwrap_or(&model).to_string();
+        let response_model = parsed
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or(&model)
+            .to_string();
         crate::utils::logger::log("ai", &format!("响应成功, 内容长度: {} 字节", content.len()));
 
-        Ok(AiResponse { content, thinking, model: response_model })
+        Ok(AiResponse {
+            content,
+            thinking,
+            model: response_model,
+        })
     }
 
     /// 发送 POST 请求并获取响应文本，统一错误处理
@@ -255,7 +343,10 @@ impl AiService {
         })?;
 
         if !status.is_success() {
-            crate::utils::logger::log("ai", &format!("请求错误, 状态码: {}, 响应: {}", status, body_text));
+            crate::utils::logger::log(
+                "ai",
+                &format!("请求错误, 状态码: {}, 响应: {}", status, body_text),
+            );
             return Err(format!("AI 请求错误 ({}): {}", status, body_text));
         }
 
@@ -272,20 +363,39 @@ impl AiService {
     where
         F: Fn(&str) + Send + 'static,
     {
-        crate::utils::logger::log("ai", &format!("流式调用 AI, prompt 长度: {} 字节", prompt.len()));
+        crate::utils::logger::log(
+            "ai",
+            &format!("流式调用 AI, prompt 长度: {} 字节", prompt.len()),
+        );
 
         let (url, api_key, model, api_type, http_client) = {
-            let inner = self.inner.lock().map_err(|e| format!("获取 AI 服务锁失败: {}", e))?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| format!("获取 AI 服务锁失败: {}", e))?;
             let api_type = inner.config.api_type.clone();
-            let base_url = inner.config.base_url.trim_end_matches('/').replace("://0.0.0.0", "://127.0.0.1");
+            let base_url = inner
+                .config
+                .base_url
+                .trim_end_matches('/')
+                .replace("://0.0.0.0", "://127.0.0.1");
             let url = match api_type.as_str() {
                 "openai" => format!("{}/v1/chat/completions", base_url),
                 _ => format!("{}/v1/messages", base_url),
             };
-            (url, inner.config.api_key.clone(), inner.config.model.clone(), api_type, inner.http_client.clone())
+            (
+                url,
+                inner.config.api_key.clone(),
+                inner.config.model.clone(),
+                api_type,
+                inner.get_client()?,
+            )
         };
 
-        crate::utils::logger::log("ai", &format!("流式请求 URL: {}, api_type: {}", url, api_type));
+        crate::utils::logger::log(
+            "ai",
+            &format!("流式请求 URL: {}, api_type: {}", url, api_type),
+        );
 
         // 构建流式请求体（添加 stream: true）
         let mut request_body = build_request_body(&api_type, &model, prompt, system_prompt);
@@ -294,7 +404,9 @@ impl AiService {
         let headers = build_headers(&api_type, &api_key);
 
         // 发送请求
-        let mut req = http_client.post(&url).header("Content-Type", "application/json");
+        let mut req = http_client
+            .post(&url)
+            .header("Content-Type", "application/json");
         for (key, value) in &headers {
             req = req.header(key.as_str(), value.as_str());
         }
@@ -307,7 +419,10 @@ impl AiService {
         let status = response.status();
         if !status.is_success() {
             let body_text = response.text().await.unwrap_or_default();
-            crate::utils::logger::log("ai", &format!("流式请求错误, 状态码: {}, 响应: {}", status, body_text));
+            crate::utils::logger::log(
+                "ai",
+                &format!("流式请求错误, 状态码: {}, 响应: {}", status, body_text),
+            );
             return Err(format!("AI 请求错误 ({}): {}", status, body_text));
         }
 
@@ -315,47 +430,43 @@ impl AiService {
 
         // 逐块读取 SSE 流
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        // Buffer raw bytes until a full SSE line arrives. Decoding individual
+        // network chunks corrupts UTF-8 when a multi-byte character is split.
+        let mut buffer: Vec<u8> = Vec::new();
         let mut full_content = String::new();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| format!("读取流数据失败: {}", e))?;
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
+            buffer.extend_from_slice(&chunk);
 
             // SSE 按行解析
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                // 处理 data 行（SSE 规范：字段名后跟冒号，可选空格）
-                if let Some(rest) = line.strip_prefix("data:") {
-                    let data = rest.trim();
-                    if data == "[DONE]" {
-                        continue;
-                    }
-
-                    // 解析 SSE 数据
-                    match parse_sse_data(data, &api_type) {
-                        Ok(Some(delta_text)) => {
-                            full_content.push_str(&delta_text);
-                            on_chunk(&delta_text);
-                        }
-                        Ok(None) => {} // 非文本内容（如 thinking），跳过
-                        Err(e) => {
-                            crate::utils::logger::log("ai", &format!("流式 API 错误: {}", e));
-                            return Err(e);
-                        }
-                    }
+            while let Some(newline_pos) = buffer.iter().position(|&byte| byte == b'\n') {
+                let line_bytes: Vec<u8> = buffer.drain(..newline_pos).collect();
+                buffer.drain(..1);
+                let line = std::str::from_utf8(&line_bytes)
+                    .map_err(|e| format!("流式响应不是有效 UTF-8: {}", e))?;
+                if let Err(e) = process_sse_line(line, &api_type, &mut full_content, &on_chunk) {
+                    crate::utils::logger::log("ai", &format!("流式 API 错误: {}", e));
+                    return Err(e);
                 }
             }
         }
 
-        crate::utils::logger::log("ai", &format!("流式响应完成, 内容长度: {} 字节", full_content.len()));
+        // Providers normally terminate SSE lines with a newline, but preserving
+        // the final complete line makes the parser resilient to truncated framing.
+        if !buffer.is_empty() {
+            let line = std::str::from_utf8(&buffer)
+                .map_err(|e| format!("流式响应不是有效 UTF-8: {}", e))?;
+            if let Err(e) = process_sse_line(line, &api_type, &mut full_content, &on_chunk) {
+                crate::utils::logger::log("ai", &format!("流式 API 错误: {}", e));
+                return Err(e);
+            }
+        }
+
+        crate::utils::logger::log(
+            "ai",
+            &format!("流式响应完成, 内容长度: {} 字节", full_content.len()),
+        );
         Ok(full_content)
     }
 }
@@ -398,7 +509,10 @@ mod tests {
         let headers = build_headers("anthropic", "sk-123");
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0], ("x-api-key".into(), "sk-123".into()));
-        assert_eq!(headers[1], ("anthropic-version".into(), "2023-06-01".into()));
+        assert_eq!(
+            headers[1],
+            ("anthropic-version".into(), "2023-06-01".into())
+        );
     }
 
     #[test]
@@ -461,7 +575,8 @@ mod tests {
 
     #[test]
     fn test_parse_sse_data_anthropic_empty_text() {
-        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}"#;
+        let data =
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}"#;
         let result = parse_sse_data(data, "anthropic").unwrap();
         assert_eq!(result, Some("".to_string()));
     }
@@ -519,6 +634,21 @@ mod tests {
     }
 
     #[test]
+    fn test_process_sse_line_preserves_unicode_delta() {
+        let content = std::sync::Mutex::new(String::new());
+        let mut full_content = String::new();
+        process_sse_line(
+            r#"data: {"choices":[{"delta":{"content":"中文"}}]}"#,
+            "openai",
+            &mut full_content,
+            &|chunk| content.lock().unwrap().push_str(chunk),
+        )
+        .unwrap();
+        assert_eq!(full_content, "中文");
+        assert_eq!(*content.lock().unwrap(), "中文");
+    }
+
+    #[test]
     fn test_parse_sse_data_invalid_json() {
         let result = parse_sse_data("not valid json", "openai");
         assert!(result.is_err());
@@ -541,20 +671,27 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_ai_call() {
-        let api_key = std::env::var("FLOAST_AI_API_KEY")
-            .expect("请设置环境变量 FLOAST_AI_API_KEY");
+        let api_key = std::env::var("FLOAST_AI_API_KEY").expect("请设置环境变量 FLOAST_AI_API_KEY");
         let base_url = std::env::var("FLOAST_AI_BASE_URL")
             .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
         let model = std::env::var("FLOAST_AI_MODEL")
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
 
-        let config = AiConfig { api_key, base_url, model, api_type: "anthropic".to_string() };
+        let config = AiConfig {
+            api_key,
+            base_url,
+            model,
+            api_type: "anthropic".to_string(),
+        };
         let service = AiService::new(config);
         let result = service.call("请用一句话回答：1+1等于几？", None).await;
 
         match &result {
             Ok(response) => {
-                println!("AI 响应成功！模型: {}, 内容: {}", response.model, response.content);
+                println!(
+                    "AI 响应成功！模型: {}, 内容: {}",
+                    response.model, response.content
+                );
                 assert!(!response.content.is_empty(), "AI 响应内容不应为空");
             }
             Err(e) => panic!("AI 调用失败: {}", e),

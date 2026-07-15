@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 /** 去重粒度 */
 export type DedupGranularity = "line" | "word" | "char";
 
@@ -11,8 +13,6 @@ export interface DedupMode {
   /** 按字符去重的子模式（仅 granularity === "char" 时生效） */
   charSubMode: CharSubMode;
 }
-
-const STORAGE_KEY = "floast-dedup-mode";
 
 /** 默认去重配置：按行去重（保持历史行为） */
 export const DEFAULT_DEDUP_MODE: DedupMode = {
@@ -51,22 +51,25 @@ function normalize(raw: unknown): DedupMode {
   };
 }
 
-/** 读取去重配置（默认按行） */
-export function getDedupMode(): DedupMode {
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored) {
-    try {
+/**
+ * 从后端配置加载去重配置。
+ * 配置跨窗口共享（持久化于 config.json），克服各 WebView localStorage 隔离问题。
+ */
+export async function fetchDedupMode(): Promise<DedupMode> {
+  try {
+    const stored = await invoke<string>("get_dedup_mode");
+    if (stored) {
       return normalize(JSON.parse(stored));
-    } catch {
-      // fallthrough
     }
+  } catch {
+    // fallthrough
   }
   return { ...DEFAULT_DEDUP_MODE };
 }
 
-/** 保存去重配置 */
-export function setDedupMode(mode: DedupMode): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(mode));
+/** 保存去重配置到后端 */
+export async function saveDedupMode(mode: DedupMode): Promise<void> {
+  await invoke("set_dedup_mode", { mode: JSON.stringify(mode) });
 }
 
 /** 顶层粒度选项（供设置页下拉渲染） */

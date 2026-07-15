@@ -1,11 +1,15 @@
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
+use windows::Win32::System::DataExchange::*;
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::Win32::System::DataExchange::*;
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GlobalSize, GMEM_MOVEABLE};
-use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 
-use super::{SelectionInfo, Rect, SelectionContext};
+use super::{Rect, SelectionContext, SelectionInfo};
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
@@ -13,7 +17,8 @@ const CF_DIB: u32 = 8;
 const MAX_CLIPBOARD_U16: usize = 1024 * 1024;
 
 /// 全局暂存的选区图片数据（CF_DIB 格式）
-static DETECTED_IMAGE: std::sync::OnceLock<std::sync::Mutex<Option<Vec<u8>>>> = std::sync::OnceLock::new();
+static DETECTED_IMAGE: std::sync::OnceLock<std::sync::Mutex<Option<Vec<u8>>>> =
+    std::sync::OnceLock::new();
 
 fn get_image_store() -> &'static std::sync::Mutex<Option<Vec<u8>>> {
     DETECTED_IMAGE.get_or_init(|| std::sync::Mutex::new(None))
@@ -30,7 +35,8 @@ pub fn store_detected_image(data: Vec<u8>) {
 /// 通过模拟 Ctrl+C 从剪贴板获取选中文字
 /// 流程：保存原剪贴板 → 模拟 Ctrl+C → 读取 → 恢复原剪贴板
 /// 返回 (SelectionInfo, foreground_hwnd) — foreground_hwnd 用于后续替换时恢复焦点
-pub fn get_selection_via_clipboard() -> Result<Option<(SelectionInfo, isize)>, Box<dyn std::error::Error>> {
+pub fn get_selection_via_clipboard(
+) -> Result<Option<(SelectionInfo, isize)>, Box<dyn std::error::Error>> {
     unsafe {
         let foreground = GetForegroundWindow();
         if foreground.is_invalid() {
@@ -40,7 +46,10 @@ pub fn get_selection_via_clipboard() -> Result<Option<(SelectionInfo, isize)>, B
 
         // #11: 检测目标窗口是否为管理员权限（High IL），SendInput 无法注入
         if is_elevated_window(foreground) {
-            crate::utils::logger::log("clipboard_sel", "Target window is elevated (admin), skipping SendInput");
+            crate::utils::logger::log(
+                "clipboard_sel",
+                "Target window is elevated (admin), skipping SendInput",
+            );
             return Ok(None);
         }
 
@@ -72,7 +81,12 @@ pub fn get_selection_via_clipboard() -> Result<Option<(SelectionInfo, isize)>, B
         }
 
         let cursor_pos = crate::automation::selection::get_cursor_pos();
-        let rect = Rect { x: cursor_pos.x, y: cursor_pos.y, width: 0, height: 0 };
+        let rect = Rect {
+            x: cursor_pos.x,
+            y: cursor_pos.y,
+            width: 0,
+            height: 0,
+        };
 
         // 获取焦点控件 HWND 和选区位置（用于替换时精确定位）
         // Scintilla（Notepad++）等控件响应 EM_GETSEL/EM_SETSEL
@@ -80,8 +94,20 @@ pub fn get_selection_via_clipboard() -> Result<Option<(SelectionInfo, isize)>, B
 
         match text {
             Some(t) if !t.is_empty() => {
-                crate::utils::logger::log("clipboard_sel", &format!("Clipboard success: {} chars, has_image: {}, focus_class='{}', sel={}",
-                    t.len(), has_image, focus_class, if sel_start == sel_end { "none".to_string() } else { format!("{}..{}", sel_start, sel_end) }));
+                crate::utils::logger::log(
+                    "clipboard_sel",
+                    &format!(
+                        "Clipboard success: {} chars, has_image: {}, focus_class='{}', sel={}",
+                        t.len(),
+                        has_image,
+                        focus_class,
+                        if sel_start == sel_end {
+                            "none".to_string()
+                        } else {
+                            format!("{}..{}", sel_start, sel_end)
+                        }
+                    ),
+                );
 
                 // 如果有图片，暂存图片数据供复制操作使用
                 if let Some(img_data) = image_data {
@@ -89,19 +115,30 @@ pub fn get_selection_via_clipboard() -> Result<Option<(SelectionInfo, isize)>, B
                 }
 
                 // 暂存选区上下文（含焦点控件 HWND 和选区位置，供替换时精确定位）
-                super::store_selection_context(&SelectionInfo { text: t.clone(), rect: rect.clone(), has_image }, super::SelectionContext {
-                    text: t.clone(),
-                    rect: rect.clone(),
-                    method: super::SelectionMethod::Clipboard,
-                    foreground_hwnd: foreground.0 as isize,
-                    focus_hwnd,
-                    focus_class: focus_class.clone(),
-                    sel_start,
-                    sel_end,
-                    occurrence_index: 0,
-                });
+                super::store_selection_context(
+                    &SelectionInfo {
+                        text: t.clone(),
+                        rect: rect.clone(),
+                        has_image,
+                    },
+                    super::SelectionContext {
+                        text: t.clone(),
+                        rect: rect.clone(),
+                        method: super::SelectionMethod::Clipboard,
+                        foreground_hwnd: foreground.0 as isize,
+                        focus_hwnd,
+                        focus_class: focus_class.clone(),
+                        sel_start,
+                        sel_end,
+                        occurrence_index: 0,
+                    },
+                );
 
-                let info = SelectionInfo { text: t, rect, has_image };
+                let info = SelectionInfo {
+                    text: t,
+                    rect,
+                    has_image,
+                };
                 Ok(Some((info, foreground.0 as isize)))
             }
             _ if has_image => {
@@ -110,11 +147,18 @@ pub fn get_selection_via_clipboard() -> Result<Option<(SelectionInfo, isize)>, B
                 if let Some(img_data) = image_data {
                     store_detected_image(img_data);
                 }
-                let info = SelectionInfo { text: String::new(), rect, has_image: true };
+                let info = SelectionInfo {
+                    text: String::new(),
+                    rect,
+                    has_image: true,
+                };
                 Ok(Some((info, foreground.0 as isize)))
             }
             _ => {
-                crate::utils::logger::log("clipboard_sel", "No text or image in clipboard after Ctrl+C");
+                crate::utils::logger::log(
+                    "clipboard_sel",
+                    "No text or image in clipboard after Ctrl+C",
+                );
                 Ok(None)
             }
         }
@@ -151,8 +195,8 @@ unsafe fn get_focus_selection(foreground: HWND) -> (isize, String, u32, u32) {
     // 尝试 EM_GETSEL 读取选区位置
     let mut sel_start: u32 = 0;
     let mut sel_end: u32 = 0;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::Controls::EM_GETSEL;
-    use windows::Win32::Foundation::{WPARAM, LPARAM};
 
     // Scintilla 控件用 SCI 消息（字节位置），EM_GETSEL 返回的位置与
     // EM_SETSEL 接受的位置单位不一致，会导致去重等长度变化的替换定位错位
@@ -235,7 +279,13 @@ pub fn replace_text_via_clipboard(ctx: &SelectionContext, new_text: &str) -> Res
         if new_code_points > 0 && new_code_points <= MAX_RESELECT_CHARS {
             select_text_before_cursor(new_code_points);
             std::thread::sleep(std::time::Duration::from_millis(100));
-            crate::utils::logger::log("clipboard_sel", &format!("Re-selected via Shift+Left ({} code points)", new_code_points));
+            crate::utils::logger::log(
+                "clipboard_sel",
+                &format!(
+                    "Re-selected via Shift+Left ({} code points)",
+                    new_code_points
+                ),
+            );
         }
 
         // 恢复原始剪贴板
@@ -267,7 +317,11 @@ unsafe fn save_clipboard_text() -> Option<String> {
             return None;
         }
         let mem_size = GlobalSize(hmem);
-        let max_u16 = if mem_size > 0 { mem_size / 2 } else { MAX_CLIPBOARD_U16 };
+        let max_u16 = if mem_size > 0 {
+            mem_size / 2
+        } else {
+            MAX_CLIPBOARD_U16
+        };
         let text = read_u16_string(ptr, max_u16);
         let _ = GlobalUnlock(hmem);
         text
@@ -324,19 +378,23 @@ pub unsafe fn simulate_copy() -> bool {
 }
 
 /// 模拟 Ctrl+V 按键
-unsafe fn simulate_paste() -> bool {
+pub(crate) unsafe fn simulate_paste() -> bool {
     simulate_key_combo(VK_CONTROL, 0x56) // 0x56 = 'V'
 }
 
 /// 释放所有修饰键（Ctrl/Shift/Alt），防止按键卡住影响后续操作
-unsafe fn release_all_modifiers() {
+pub(crate) unsafe fn release_all_modifiers() {
     let modifiers = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN];
     let mut inputs = Vec::with_capacity(modifiers.len());
     for m in modifiers {
         inputs.push(INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: m, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                ki: KEYBDINPUT {
+                    wVk: m,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
             },
         });
     }
@@ -375,12 +433,10 @@ pub unsafe fn read_actual_selection(focus_hwnd: isize, focus_class: &str) -> Opt
     }
 }
 
-/// 通过 EM_SETSEL 消息直接设置选区
-
 /// 读取控件当前选区位置（EM_GETSEL），用于诊断
 unsafe fn read_sel(focus_hwnd: isize) -> (u32, u32) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::Controls::EM_GETSEL;
-    use windows::Win32::Foundation::{WPARAM, LPARAM};
     if focus_hwnd == 0 {
         return (0, 0);
     }
@@ -405,9 +461,13 @@ unsafe fn read_sel(focus_hwnd: isize) -> (u32, u32) {
 const MAX_RESELECT_CHARS: usize = 200;
 unsafe fn select_text_before_cursor(char_count: usize) {
     if char_count > MAX_RESELECT_CHARS {
-        crate::utils::logger::log("clipboard_sel", &format!(
-            "Skip re-select: {} chars exceeds max {}", char_count, MAX_RESELECT_CHARS
-        ));
+        crate::utils::logger::log(
+            "clipboard_sel",
+            &format!(
+                "Skip re-select: {} chars exceeds max {}",
+                char_count, MAX_RESELECT_CHARS
+            ),
+        );
         return;
     }
     // Shift down → N次 Left down/up → Shift up
@@ -416,7 +476,10 @@ unsafe fn select_text_before_cursor(char_count: usize) {
     inputs.push(INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
-            ki: KEYBDINPUT { wVk: VK_SHIFT, ..Default::default() },
+            ki: KEYBDINPUT {
+                wVk: VK_SHIFT,
+                ..Default::default()
+            },
         },
     });
     // N 次 Left
@@ -424,13 +487,20 @@ unsafe fn select_text_before_cursor(char_count: usize) {
         inputs.push(INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: VK_LEFT, ..Default::default() },
+                ki: KEYBDINPUT {
+                    wVk: VK_LEFT,
+                    ..Default::default()
+                },
             },
         });
         inputs.push(INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: VK_LEFT, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                ki: KEYBDINPUT {
+                    wVk: VK_LEFT,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
             },
         });
     }
@@ -438,7 +508,11 @@ unsafe fn select_text_before_cursor(char_count: usize) {
     inputs.push(INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
-            ki: KEYBDINPUT { wVk: VK_SHIFT, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+            ki: KEYBDINPUT {
+                wVk: VK_SHIFT,
+                dwFlags: KEYEVENTF_KEYUP,
+                ..Default::default()
+            },
         },
     });
     let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
@@ -454,25 +528,39 @@ unsafe fn simulate_key_combo(modifier: VIRTUAL_KEY, key: u16) -> bool {
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: modifier, ..Default::default() },
+                ki: KEYBDINPUT {
+                    wVk: modifier,
+                    ..Default::default()
+                },
             },
         },
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: VIRTUAL_KEY(key), ..Default::default() },
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(key),
+                    ..Default::default()
+                },
             },
         },
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: VIRTUAL_KEY(key), dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(key),
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
             },
         },
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: modifier, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                ki: KEYBDINPUT {
+                    wVk: modifier,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
             },
         },
     ];
@@ -515,7 +603,11 @@ unsafe fn read_clipboard_text() -> Option<String> {
             return None;
         }
         let mem_size = GlobalSize(hmem);
-        let max_u16 = if mem_size > 0 { mem_size / 2 } else { MAX_CLIPBOARD_U16 };
+        let max_u16 = if mem_size > 0 {
+            mem_size / 2
+        } else {
+            MAX_CLIPBOARD_U16
+        };
         let text = read_u16_string(ptr, max_u16);
         let _ = GlobalUnlock(hmem);
         text
@@ -550,8 +642,10 @@ unsafe fn is_elevated_window(hwnd: HWND) -> bool {
         return false;
     }
 
-    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
     use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
 
     let process = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
         Ok(h) => h,

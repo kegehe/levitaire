@@ -48,16 +48,8 @@ pub fn decrypt(ciphertext: &[u8]) -> Result<Vec<u8>, String> {
     };
 
     unsafe {
-        CryptUnprotectData(
-            &input,
-            None,
-            None,
-            None,
-            None,
-            0,
-            &mut output,
-        )
-        .map_err(|e| format!("CryptUnprotectData 失败: {}", e))?;
+        CryptUnprotectData(&input, None, None, None, None, 0, &mut output)
+            .map_err(|e| format!("CryptUnprotectData 失败: {}", e))?;
     }
 
     let decrypted = extract_blob_data(&output);
@@ -91,12 +83,14 @@ pub fn to_hex(data: &[u8]) -> String {
 
 /// 将十六进制字符串解码为字节数组
 pub fn from_hex(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("无效的十六进制字符串长度".to_string());
     }
     (0..hex.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("十六进制解码失败: {}", e)))
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("十六进制解码失败: {}", e))
+        })
         .collect()
 }
 

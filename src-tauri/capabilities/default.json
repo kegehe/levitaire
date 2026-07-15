@@ -1,8 +1,17 @@
 {
-  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-utils/schema.json",
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/tauri-utils/schema.json",
   "identifier": "default",
   "description": "默认权限配置",
-  "windows": ["toolbar", "settings", "orb"],
+  "windows": [
+    "toolbar",
+    "settings",
+    "orb",
+    "palette",
+    "screenshot-overlay",
+    "voice-overlay",
+    "monitor-overlay",
+    "recording-controls"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-set-position",
@@ -15,6 +24,11 @@
     "core:window:allow-center",
     "core:window:allow-start-dragging",
     "core:window:allow-set-focusable",
+    "core:window:allow-destroy",
+    "core:window:allow-scale-factor",
+    "core:window:allow-outer-position",
+    "core:window:allow-inner-size",
+    "core:webview:allow-create-webview-window",
     "core:webview:allow-set-webview-focus",
     "core:event:default",
     "core:event:allow-listen",

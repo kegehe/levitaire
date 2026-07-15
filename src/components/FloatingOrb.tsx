@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { ensureVoiceWindow, ensureScreenshotWindow } from "../utils/toolWindows";
 import "./FloatingOrb.css";
 
 function FloatingOrb() {
@@ -23,6 +25,41 @@ function FloatingOrb() {
     });
     return () => {
       unlistenTheme.then((fn) => fn());
+    };
+  }, []);
+
+  // 监听语音输入全局热键触发：后端 hotkey 线程 emit voice-hotkey-triggered，
+  // 由常驻的 orb 窗口接收并唤起录音浮层（getUserMedia 必须在前端 webview 执行）
+  useEffect(() => {
+    const un = listen("voice-hotkey-triggered", async () => {
+      try {
+        await ensureVoiceWindow();
+        await invoke("show_voice_window");
+      } catch (err) {
+        console.error(err);
+      }
+    });
+    return () => {
+      un.then((fn) => fn());
+    };
+  }, []);
+
+  // 监听录制全局热键触发：后端 hotkey 线程 emit recording-hotkey-triggered 或
+  // ensure-overlay-and-start-recording，由常驻 orb 窗口接收并处理
+  useEffect(() => {
+    const startRecording = async () => {
+      try {
+        await ensureScreenshotWindow();
+        await invoke("start_recording_select");
+      } catch (err) {
+        console.error("recording hotkey failed:", err);
+      }
+    };
+    const un1 = listen("recording-hotkey-triggered", startRecording);
+    const un2 = listen("ensure-overlay-and-start-recording", startRecording);
+    return () => {
+      un1.then((fn) => fn());
+      un2.then((fn) => fn());
     };
   }, []);
 
@@ -49,34 +86,23 @@ function FloatingOrb() {
 
   // Listen for orb-mouseup event from the Rust mouse hook
   // (startDragging() consumes the DOM mouseup, so we use the hook instead)
+  // payload = 是否为点击（非拖拽），由后端基于鼠标位移判定，比前端窗口位移判定更可靠
   useEffect(() => {
-    const unlistenPromise = win.listen("orb-mouseup", async () => {
+    const unlistenPromise = win.listen<boolean>("orb-mouseup", async (event) => {
       // Clear the safety timeout since we received the event
       if (mouseUpTimeout.current) {
         clearTimeout(mouseUpTimeout.current);
         mouseUpTimeout.current = null;
       }
-      // Compare window position: if it didn't move, it was a click; if it moved, it was a drag
-      if (windowPosOnMouseDown.current) {
-        try {
-          // Wait one frame for the OS drag loop to fully unwind before reading position.
-          // The WH_MOUSE_LL hook fires WM_LBUTTONUP before the OS modal drag loop completes,
-          // so outerPosition() might return a stale value without this delay.
-          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-          const currentPos = await win.outerPosition();
-          const startPos = windowPosOnMouseDown.current;
-          const dx = Math.abs(currentPos.x - startPos.x);
-          const dy = Math.abs(currentPos.y - startPos.y);
-          // If window moved less than 3px, treat as click
-          if (dx < 3 && dy < 3) {
-            // TODO: 悬浮球点击功能待实现
-            // 未来可扩展：打开主面板、快速操作菜单等
-          }
-        } catch (err) {
-          console.error("Failed to get window position:", err);
-        }
+      const clicked = event.payload === true;
+      if (clicked) {
+        // 点击悬浮球：打开卡片工具选择器面板
+        invoke("show_palette").catch(console.error);
         windowPosOnMouseDown.current = null;
+        return;
       }
+      // 拖拽（payload=false 或未传）：仅清理状态，不弹面板
+      windowPosOnMouseDown.current = null;
     });
 
     return () => {

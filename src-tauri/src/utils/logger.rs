@@ -3,6 +3,7 @@
 /// - 仅在 debug 构建时启用日志写入
 /// - 日志写入应用数据目录下的 floast-debug.log（而非相对路径）
 /// - Release 构建中 log() 为空操作，不会泄露用户数据
+#[cfg(debug_assertions)]
 use std::io::Write;
 
 #[cfg(debug_assertions)]

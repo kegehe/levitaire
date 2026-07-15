@@ -1,16 +1,14 @@
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowsHookExW, UnhookWindowsHookEx, CallNextHookEx,
-    PostThreadMessageW, GetMessageW, GetWindowRect,
-    WH_MOUSE_LL, HHOOK,
-    WM_LBUTTONUP, WM_LBUTTONDOWN, WM_QUIT, MSG,
-};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-use tauri::{Emitter, Manager};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicPtr, AtomicBool, AtomicI32, AtomicU64, Ordering};
+use tauri::{Emitter, Manager};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, GetMessageW, GetWindowRect, PostThreadMessageW, SetWindowsHookExW,
+    UnhookWindowsHookEx, HHOOK, MSG, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT,
+};
 
 // ─── 钩子全局状态 ──────────────────────────────────────────────
 
@@ -23,6 +21,12 @@ struct HookState {
     toolbar_visible: AtomicBool,
     /// 二维码预览模式：为 true 时点击工具栏外部不隐藏窗口
     qrcode_preview: AtomicBool,
+    /// 截图模式：为 true 时跳过选区检测，避免截图遮罩上的拖拽误触发文字工具栏
+    screenshot_mode: AtomicBool,
+    /// 录制模式：为 true 时跳过选区检测，避免录制遮罩上的拖拽误触发文字工具栏
+    recording_mode: AtomicBool,
+    /// 文字工具栏是否启用（开关关闭后，拖拽选中文本不再弹出工具栏）
+    text_toolbar_enabled: AtomicBool,
     // 鼠标按下位置（用于拖拽检测）
     mouse_down_x: AtomicI32,
     mouse_down_y: AtomicI32,
@@ -46,6 +50,9 @@ static STATE: HookState = HookState {
     orb_hwnd: AtomicPtr::new(std::ptr::null_mut()),
     toolbar_visible: AtomicBool::new(false),
     qrcode_preview: AtomicBool::new(false),
+    screenshot_mode: AtomicBool::new(false),
+    recording_mode: AtomicBool::new(false),
+    text_toolbar_enabled: AtomicBool::new(true),
     mouse_down_x: AtomicI32::new(0),
     mouse_down_y: AtomicI32::new(0),
     mouse_down_valid: AtomicBool::new(false),
@@ -71,36 +78,18 @@ fn is_point_in_window_rect(hwnd_ptr: *mut std::ffi::c_void, x: i32, y: i32) -> b
         let hwnd = HWND(hwnd_ptr);
         let mut rect = RECT::default();
         if GetWindowRect(hwnd, &mut rect).is_ok() {
-            return x >= rect.left && x <= rect.right
-                && y >= rect.top && y <= rect.bottom;
+            return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
         }
     }
     false
 }
 
-/// 检查屏幕坐标是否在悬浮球的可视圆形区域内（非透明边距）
-/// orb 窗口 80×80，圆形直径 44px（40px + 2×2px border），
-/// 圆心在窗口中心，半径取 28px 留出 hover scale(1.08) 余量
+/// 检查屏幕坐标是否在悬浮球窗口内
+/// orb 窗口 80×80，圆形可视区仅占中心一小块，但用户点击透明边距区域也应视为点球
+/// 因此命中整个窗口矩形（而非仅圆形），避免点在边距时 mouse_down_on_orb 为 false
+/// 导致 mouseup 走选区检测分支、误弹文字工具栏
 fn is_point_on_orb(hwnd_ptr: *mut std::ffi::c_void, x: i32, y: i32) -> bool {
-    if hwnd_ptr.is_null() {
-        return false;
-    }
-    unsafe {
-        let hwnd = HWND(hwnd_ptr);
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_ok() {
-            if x < rect.left || x > rect.right || y < rect.top || y > rect.bottom {
-                return false;
-            }
-            let cx = (rect.left + rect.right) / 2;
-            let cy = (rect.top + rect.bottom) / 2;
-            let r: f64 = 28.0;
-            let dx = (x - cx) as f64;
-            let dy = (y - cy) as f64;
-            return (dx * dx + dy * dy) <= r * r;
-        }
-    }
-    false
+    is_point_in_window_rect(hwnd_ptr, x, y)
 }
 
 fn now_ms() -> u64 {
@@ -138,12 +127,20 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
         while let Ok(event) = rx.recv() {
             match event {
                 HookEvent::MouseUp => {
+                    // 截图/录制模式：跳过所有选区检测与工具栏交互，选区由遮罩前端处理
+                    if STATE.screenshot_mode.load(Ordering::SeqCst)
+                        || STATE.recording_mode.load(Ordering::SeqCst)
+                    {
+                        continue;
+                    }
                     let down_x = STATE.mouse_down_x.load(Ordering::SeqCst);
                     let down_y = STATE.mouse_down_y.load(Ordering::SeqCst);
                     let down_valid = STATE.mouse_down_valid.load(Ordering::SeqCst);
 
                     let mut cur = POINT::default();
-                    unsafe { let _ = GetCursorPos(&mut cur); }
+                    unsafe {
+                        let _ = GetCursorPos(&mut cur);
+                    }
 
                     let has_drag = if down_valid {
                         let dist = ((cur.x - down_x).abs() + (cur.y - down_y).abs()) as u64;
@@ -154,15 +151,28 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     STATE.mouse_down_valid.store(false, Ordering::SeqCst);
 
                     // 悬浮球交互 → 通知 orb 窗口，跳过选区检测
+                    // 注意：此分支不受 text_toolbar_enabled 开关影响，否则关掉文字工具栏后点击悬浮球也无法弹出工具选择面板
+                    // payload.clicked 由鼠标位移判定（!has_drag），前端据此区分点击/拖拽，比窗口位移判定更可靠
                     if down_valid && STATE.mouse_down_on_orb.load(Ordering::SeqCst) {
-                        crate::utils::logger::log("mouse", "MouseUp after mousedown on orb, notifying orb window");
-                        let _ = app.emit_to("orb", "orb-mouseup", ());
+                        crate::utils::logger::log(
+                            "mouse",
+                            "MouseUp after mousedown on orb, notifying orb window",
+                        );
+                        let _ = app.emit_to("orb", "orb-mouseup", !has_drag);
                         continue;
                     }
 
                     // 工具栏内点击 → 跳过选区检测（避免点击工具栏时重新触发选中）
                     if down_valid && STATE.mouse_down_on_toolbar.load(Ordering::SeqCst) {
-                        crate::utils::logger::log("mouse", "Click on toolbar, skipping selection check");
+                        crate::utils::logger::log(
+                            "mouse",
+                            "Click on toolbar, skipping selection check",
+                        );
+                        continue;
+                    }
+
+                    // 文字工具栏已禁用：以下均为选区检测路径，开关关闭后不再弹出文字工具栏
+                    if !STATE.text_toolbar_enabled.load(Ordering::SeqCst) {
                         continue;
                     }
 
@@ -170,7 +180,10 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                         if down_valid {
                             let dist = ((cur.x - down_x).abs() + (cur.y - down_y).abs()) as u64;
                             if dist > 0 {
-                                crate::utils::logger::log("mouse", &format!("Drag too short ({}px), skipping", dist));
+                                crate::utils::logger::log(
+                                    "mouse",
+                                    &format!("Drag too short ({}px), skipping", dist),
+                                );
                             }
                         }
                         continue;
@@ -180,7 +193,10 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     let last = STATE.last_check_ms.load(Ordering::SeqCst);
                     let now = now_ms();
                     if now.saturating_sub(last) < COOLDOWN_MS {
-                        crate::utils::logger::log("mouse", "Cooldown active, skipping selection check");
+                        crate::utils::logger::log(
+                            "mouse",
+                            "Cooldown active, skipping selection check",
+                        );
                         continue;
                     }
                     STATE.last_check_ms.store(now, Ordering::SeqCst);
@@ -194,12 +210,21 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
 
                     match crate::automation::get_current_selection() {
                         Ok(Some(info)) if !info.text.is_empty() || info.has_image => {
-                            crate::utils::logger::log("mouse", &format!("Selection found: {} chars", info.text.len()));
+                            crate::utils::logger::log(
+                                "mouse",
+                                &format!("Selection found: {} chars", info.text.len()),
+                            );
                             let _ = app.emit("selection-found", &info);
                             if let Some(win) = app.get_webview_window("toolbar") {
                                 let x = info.rect.x;
-                                let y = if info.rect.height > 0 { info.rect.y + info.rect.height + 5 } else { info.rect.y + 20 };
-                                let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)));
+                                let y = if info.rect.height > 0 {
+                                    info.rect.y + info.rect.height + 5
+                                } else {
+                                    info.rect.y + 20
+                                };
+                                let _ = win.set_position(tauri::Position::Physical(
+                                    tauri::PhysicalPosition::new(x, y),
+                                ));
                                 let _ = win.show();
                                 STATE.toolbar_visible.store(true, Ordering::SeqCst);
                                 if let Ok(hwnd) = win.hwnd() {
@@ -210,10 +235,18 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                         }
                         Ok(Some(_)) => crate::utils::logger::log("mouse", "Selection empty"),
                         Ok(None) => crate::utils::logger::log("mouse", "No selection"),
-                        Err(e) => crate::utils::logger::log("mouse", &format!("Selection error: {}", e)),
+                        Err(e) => {
+                            crate::utils::logger::log("mouse", &format!("Selection error: {}", e))
+                        }
                     }
                 }
                 HookEvent::MouseDown { x, y } => {
+                    // 截图/录制模式：跳过所有状态写入与选区检测，避免退出后残留状态误触发
+                    if STATE.screenshot_mode.load(Ordering::SeqCst)
+                        || STATE.recording_mode.load(Ordering::SeqCst)
+                    {
+                        continue;
+                    }
                     STATE.mouse_down_x.store(x, Ordering::SeqCst);
                     STATE.mouse_down_y.store(y, Ordering::SeqCst);
                     STATE.mouse_down_valid.store(true, Ordering::SeqCst);
@@ -221,8 +254,11 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     let on_orb = is_point_on_orb(STATE.orb_hwnd.load(Ordering::SeqCst), x, y);
                     STATE.mouse_down_on_orb.store(on_orb, Ordering::SeqCst);
 
-                    let on_toolbar = is_point_in_window_rect(STATE.toolbar_hwnd.load(Ordering::SeqCst), x, y);
-                    STATE.mouse_down_on_toolbar.store(on_toolbar, Ordering::SeqCst);
+                    let on_toolbar =
+                        is_point_in_window_rect(STATE.toolbar_hwnd.load(Ordering::SeqCst), x, y);
+                    STATE
+                        .mouse_down_on_toolbar
+                        .store(on_toolbar, Ordering::SeqCst);
 
                     if !STATE.toolbar_visible.load(Ordering::SeqCst) {
                         continue;
@@ -236,10 +272,16 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     if !is_point_in_window_rect(toolbar_ptr, x, y) {
                         // 二维码预览模式下点击外部不隐藏
                         if STATE.qrcode_preview.load(Ordering::SeqCst) {
-                            crate::utils::logger::log("mouse", "QR code preview active, ignoring outside click");
+                            crate::utils::logger::log(
+                                "mouse",
+                                "QR code preview active, ignoring outside click",
+                            );
                             continue;
                         }
-                        crate::utils::logger::log("mouse", &format!("Click outside toolbar ({}, {}), hiding", x, y));
+                        crate::utils::logger::log(
+                            "mouse",
+                            &format!("Click outside toolbar ({}, {}), hiding", x, y),
+                        );
                         if let Some(win) = app.get_webview_window("toolbar") {
                             let _ = win.hide();
                             let _ = app.emit("toolbar-hidden", ());
@@ -317,6 +359,49 @@ pub fn set_qrcode_preview(active: bool) {
     STATE.qrcode_preview.store(active, Ordering::SeqCst);
 }
 
+/// 截图模式开关：开启后鼠标钩子跳过选区检测，避免截图遮罩拖拽误触发文字工具栏
+pub fn set_screenshot_mode(active: bool) {
+    STATE.screenshot_mode.store(active, Ordering::SeqCst);
+    // 退出截图模式时重置鼠标按下残留状态，避免下次 MouseUp 误判
+    if !active {
+        STATE.mouse_down_valid.store(false, Ordering::SeqCst);
+        STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
+        STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 查询当前是否处于截图模式（供键盘钩子监听 Esc 时判断）
+pub fn is_screenshot_mode() -> bool {
+    STATE.screenshot_mode.load(Ordering::SeqCst)
+}
+
+/// 文字工具栏启用开关：关闭后拖拽选中文本不再触发 selection-found / 弹出工具栏
+pub fn set_text_toolbar_enabled(enabled: bool) {
+    STATE.text_toolbar_enabled.store(enabled, Ordering::SeqCst);
+    crate::utils::logger::log("mouse", &format!("text_toolbar_enabled = {}", enabled));
+}
+
+/// 查询文字工具栏是否启用（供键盘钩子的 Ctrl+C 路径判断，与鼠标抬起路径保持一致）
+pub fn is_text_toolbar_enabled() -> bool {
+    STATE.text_toolbar_enabled.load(Ordering::SeqCst)
+}
+
+/// 录制模式开关：开启后鼠标钩子跳过选区检测，避免录制遮罩拖拽误触发文字工具栏
+pub fn set_recording_mode(active: bool) {
+    STATE.recording_mode.store(active, Ordering::SeqCst);
+    // 退出录制模式时重置鼠标按下残留状态，避免下次 MouseUp 误判
+    if !active {
+        STATE.mouse_down_valid.store(false, Ordering::SeqCst);
+        STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
+        STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 查询当前是否处于录制模式（供键盘钩子监听 Esc 时判断）
+pub fn is_recording_mode() -> bool {
+    STATE.recording_mode.load(Ordering::SeqCst)
+}
+
 // ─── 钩子回调 ──────────────────────────────────────────────────
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -328,6 +413,8 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     let _ = sender.send(HookEvent::MouseUp);
                 }
                 _ if msg == WM_LBUTTONDOWN => {
+                    // WH_MOUSE_LL 的 lparam 是指向 MSLLHOOKSTRUCT 的指针，
+                    // 其首字段 pt: POINT 即真实屏幕坐标
                     let pt = lparam.0 as *const POINT;
                     let x = (*pt).x;
                     let y = (*pt).y;
@@ -395,14 +482,12 @@ mod tests {
     fn test_drag_distance_manhattan() {
         // 验证拖拽检测的曼哈顿距离逻辑
         // 距离 > 2 视为拖拽
-        let has_drag = |dx: i32, dy: i32| -> bool {
-            (dx.abs() + dy.abs()) as u64 > 2
-        };
-        assert!(!has_drag(0, 0));  // 无移动
-        assert!(!has_drag(1, 0));  // 距离 = 1，不算拖拽
-        assert!(!has_drag(1, 1));  // 距离 = 2，刚好不算拖拽
-        assert!(has_drag(1, 2));   // 距离 = 3，算拖拽
-        assert!(has_drag(6, 0));   // 距离 = 6，算拖拽
+        let has_drag = |dx: i32, dy: i32| -> bool { (dx.abs() + dy.abs()) as u64 > 2 };
+        assert!(!has_drag(0, 0)); // 无移动
+        assert!(!has_drag(1, 0)); // 距离 = 1，不算拖拽
+        assert!(!has_drag(1, 1)); // 距离 = 2，刚好不算拖拽
+        assert!(has_drag(1, 2)); // 距离 = 3，算拖拽
+        assert!(has_drag(6, 0)); // 距离 = 6，算拖拽
         assert!(has_drag(-2, -2)); // 负方向也算
     }
 }

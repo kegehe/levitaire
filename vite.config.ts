@@ -21,6 +21,16 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          // 稳定的 vendor chunk，避免每个窗口/工具 chunk 内联 React
+          if (id.includes("node_modules/react-dom") || id.includes("node_modules/react/")) {
+            return "react-vendor";
+          }
+        },
+      },
+    },
   },
   test: {
     environment: "happy-dom",

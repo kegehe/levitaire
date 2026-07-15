@@ -1,6 +1,6 @@
-pub mod selection;
 pub mod clipboard_selection;
 pub mod ocr_selection;
+pub mod selection;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -85,7 +85,10 @@ pub fn store_selection_context(_info: &SelectionInfo, ctx: SelectionContext) {
     if let Ok(mut guard) = store.lock() {
         let text_len = ctx.text.len();
         *guard = Some(ctx);
-        crate::utils::logger::log("automation", &format!("选区上下文已暂存, text: {} chars", text_len));
+        crate::utils::logger::log(
+            "automation",
+            &format!("选区上下文已暂存, text: {} chars", text_len),
+        );
     }
 }
 
@@ -97,33 +100,39 @@ pub fn get_stored_selection_context() -> Option<SelectionContext> {
 
 /// 替换选中文字
 pub fn replace_selection_text(new_text: &str) -> Result<(), String> {
-    let ctx = get_stored_selection_context()
-        .ok_or("没有暂存的选区上下文，请重新选中文本")?;
+    let ctx = get_stored_selection_context().ok_or("没有暂存的选区上下文，请重新选中文本")?;
 
-    crate::utils::logger::log("automation", &format!("replace_selection_text: {} chars -> {} chars", ctx.text.len(), new_text.len()));
+    crate::utils::logger::log(
+        "automation",
+        &format!(
+            "replace_selection_text: {} chars -> {} chars",
+            ctx.text.len(),
+            new_text.len()
+        ),
+    );
 
-    let result = match ctx.method {
-        SelectionMethod::Uia => selection::replace_text_via_uia(&ctx, new_text),
-        SelectionMethod::Win32 => selection::replace_text_via_win32(&ctx, new_text),
-        SelectionMethod::Clipboard => clipboard_selection::replace_text_via_clipboard(&ctx, new_text),
-        SelectionMethod::Ocr => {
-            // OCR 无法定位替换，走剪贴板模拟粘贴
-            clipboard_selection::replace_text_via_clipboard(&ctx, new_text)
-        }
-    };
+    let result = replace_selection_with_fallback(&ctx, new_text);
 
     // 替换成功后更新暂存上下文，使连续替换能正确定位
     // 优先读取控件实际选区位置（避免换行符 \n vs \r\n 导致的计算偏差），
     // 读取失败时回退到计算值
     if result.is_ok() {
+        let effective_method = result
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|_| ctx.method.clone());
         let (new_sel_start, new_sel_end) = unsafe {
-            clipboard_selection::read_actual_selection(ctx.focus_hwnd, &ctx.focus_class)
-                .unwrap_or((ctx.sel_start, ctx.sel_start.saturating_add(new_text.len() as u32)))
+            clipboard_selection::read_actual_selection(ctx.focus_hwnd, &ctx.focus_class).unwrap_or(
+                (
+                    ctx.sel_start,
+                    ctx.sel_start.saturating_add(new_text.len() as u32),
+                ),
+            )
         };
         let new_ctx = SelectionContext {
             text: new_text.to_string(),
             rect: ctx.rect.clone(),
-            method: ctx.method.clone(),
+            method: effective_method,
             foreground_hwnd: ctx.foreground_hwnd,
             focus_hwnd: ctx.focus_hwnd,
             focus_class: ctx.focus_class.clone(),
@@ -141,7 +150,56 @@ pub fn replace_selection_text(new_text: &str) -> Result<(), String> {
         );
     }
 
-    result
+    result.map(|_| ())
+}
+
+fn replace_selection_with_fallback(
+    ctx: &SelectionContext,
+    new_text: &str,
+) -> Result<SelectionMethod, String> {
+    match ctx.method {
+        SelectionMethod::Uia => match selection::replace_text_via_uia(ctx, new_text) {
+            Ok(()) => Ok(SelectionMethod::Uia),
+            Err(uia_err) => {
+                crate::utils::logger::log(
+                    "automation",
+                    &format!("UIA replace failed, trying clipboard fallback: {}", uia_err),
+                );
+                clipboard_selection::replace_text_via_clipboard(ctx, new_text)
+                    .map(|()| SelectionMethod::Clipboard)
+                    .map_err(|clipboard_err| {
+                        format!(
+                            "UIA replace failed: {}; clipboard fallback failed: {}",
+                            uia_err, clipboard_err
+                        )
+                    })
+            }
+        },
+        SelectionMethod::Win32 => match selection::replace_text_via_win32(ctx, new_text) {
+            Ok(()) => Ok(SelectionMethod::Win32),
+            Err(win32_err) => {
+                crate::utils::logger::log(
+                    "automation",
+                    &format!(
+                        "Win32 replace failed, trying clipboard fallback: {}",
+                        win32_err
+                    ),
+                );
+                clipboard_selection::replace_text_via_clipboard(ctx, new_text)
+                    .map(|()| SelectionMethod::Clipboard)
+                    .map_err(|clipboard_err| {
+                        format!(
+                            "Win32 replace failed: {}; clipboard fallback failed: {}",
+                            win32_err, clipboard_err
+                        )
+                    })
+            }
+        },
+        SelectionMethod::Clipboard | SelectionMethod::Ocr => {
+            clipboard_selection::replace_text_via_clipboard(ctx, new_text)
+                .map(|()| SelectionMethod::Clipboard)
+        }
+    }
 }
 
 pub fn get_current_selection() -> Result<Option<SelectionInfo>, Box<dyn std::error::Error>> {
@@ -151,18 +209,21 @@ pub fn get_current_selection() -> Result<Option<SelectionInfo>, Box<dyn std::err
 /// 通过恢复焦点 + 模拟 Ctrl+C 复制选区内容
 /// 适用于所有选区类型（UIA/Win32/Clipboard/Ocr），保留富文本和图片格式
 pub fn copy_selection_via_simulation() -> Result<(), String> {
-    let ctx = get_stored_selection_context()
-        .ok_or("没有暂存的选区上下文，请重新选中文本")?;
+    let ctx = get_stored_selection_context().ok_or("没有暂存的选区上下文，请重新选中文本")?;
 
-    crate::utils::logger::log("automation", &format!(
-        "copy_selection_via_simulation: method={:?}, foreground_hwnd={}",
-        ctx.method, ctx.foreground_hwnd
-    ));
+    crate::utils::logger::log(
+        "automation",
+        &format!(
+            "copy_selection_via_simulation: method={:?}, foreground_hwnd={}",
+            ctx.method, ctx.foreground_hwnd
+        ),
+    );
 
     // 恢复前台窗口焦点
     if ctx.foreground_hwnd != 0 {
         unsafe {
-            let hwnd = windows::Win32::Foundation::HWND(ctx.foreground_hwnd as *mut std::ffi::c_void);
+            let hwnd =
+                windows::Win32::Foundation::HWND(ctx.foreground_hwnd as *mut std::ffi::c_void);
             let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -174,7 +235,10 @@ pub fn copy_selection_via_simulation() -> Result<(), String> {
         clipboard_selection::simulate_copy();
     }
 
-    crate::utils::logger::log("automation", "copy_selection_via_simulation: Ctrl+C simulated");
+    crate::utils::logger::log(
+        "automation",
+        "copy_selection_via_simulation: Ctrl+C simulated",
+    );
     Ok(())
 }
 
@@ -186,13 +250,28 @@ pub fn get_mouse_position() -> Result<Point, Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    // Tests sharing this process-global state must not run concurrently.
+    static CONTEXT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn context_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        CONTEXT_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap()
+    }
+
     // ─── SelectionInfo ────────────────────────────────────────────
 
     #[test]
     fn test_selection_info_clone() {
         let info = SelectionInfo {
             text: "hello world".to_string(),
-            rect: Rect { x: 10, y: 20, width: 100, height: 30 },
+            rect: Rect {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 30,
+            },
             has_image: false,
         };
         let cloned = info.clone();
@@ -205,12 +284,22 @@ mod tests {
     fn test_selection_info_partial_eq() {
         let a = SelectionInfo {
             text: "same".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             has_image: false,
         };
         let b = SelectionInfo {
             text: "same".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             has_image: false,
         };
         assert_eq!(a, b);
@@ -220,12 +309,22 @@ mod tests {
     fn test_selection_info_partial_eq_different() {
         let a = SelectionInfo {
             text: "hello".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             has_image: false,
         };
         let b = SelectionInfo {
             text: "world".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             has_image: false,
         };
         assert_ne!(a, b);
@@ -235,7 +334,12 @@ mod tests {
     fn test_selection_info_serde() {
         let info = SelectionInfo {
             text: "test selection".to_string(),
-            rect: Rect { x: 100, y: 200, width: 300, height: 40 },
+            rect: Rect {
+                x: 100,
+                y: 200,
+                width: 300,
+                height: 40,
+            },
             has_image: false,
         };
         let json = serde_json::to_string(&info).unwrap();
@@ -247,7 +351,12 @@ mod tests {
     fn test_selection_info_empty_text() {
         let info = SelectionInfo {
             text: String::new(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             has_image: false,
         };
         assert!(info.text.is_empty());
@@ -268,18 +377,38 @@ mod tests {
 
     #[test]
     fn test_rect_clone() {
-        let r = Rect { x: 10, y: 20, width: 100, height: 50 };
+        let r = Rect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        };
         let cloned = r.clone();
         assert_eq!(r, cloned);
     }
 
     #[test]
     fn test_rect_partial_eq() {
-        let a = Rect { x: 0, y: 0, width: 0, height: 0 };
-        let b = Rect { x: 0, y: 0, width: 0, height: 0 };
+        let a = Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        let b = Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
         assert_eq!(a, b);
 
-        let c = Rect { x: 1, y: 0, width: 0, height: 0 };
+        let c = Rect {
+            x: 1,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
         assert_ne!(a, c);
     }
 
@@ -289,7 +418,12 @@ mod tests {
     fn test_selection_context_clone() {
         let ctx = SelectionContext {
             text: "selected text".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             method: SelectionMethod::Uia,
             foreground_hwnd: 12345,
             focus_hwnd: 67890,
@@ -311,7 +445,10 @@ mod tests {
     fn test_selection_method_clone() {
         assert_eq!(SelectionMethod::Uia.clone(), SelectionMethod::Uia);
         assert_eq!(SelectionMethod::Win32.clone(), SelectionMethod::Win32);
-        assert_eq!(SelectionMethod::Clipboard.clone(), SelectionMethod::Clipboard);
+        assert_eq!(
+            SelectionMethod::Clipboard.clone(),
+            SelectionMethod::Clipboard
+        );
         assert_eq!(SelectionMethod::Ocr.clone(), SelectionMethod::Ocr);
     }
 
@@ -319,14 +456,25 @@ mod tests {
 
     #[test]
     fn test_store_and_get_selection_context() {
+        let _lock = context_test_lock();
         let info = SelectionInfo {
             text: "test context".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             has_image: false,
         };
         let ctx = SelectionContext {
             text: "test context".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             method: SelectionMethod::Clipboard,
             foreground_hwnd: 999,
             focus_hwnd: 0,
@@ -347,6 +495,7 @@ mod tests {
 
     #[test]
     fn test_get_stored_selection_context_after_clear() {
+        let _lock = context_test_lock();
         // 先清空 store
         {
             let store = get_selection_context_store();
@@ -360,14 +509,25 @@ mod tests {
 
     #[test]
     fn test_store_selection_context_overwrites() {
+        let _lock = context_test_lock();
         let info = SelectionInfo {
             text: "overwrite test".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             has_image: false,
         };
         let ctx1 = SelectionContext {
             text: "overwrite test".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             method: SelectionMethod::Uia,
             foreground_hwnd: 1,
             focus_hwnd: 0,
@@ -380,7 +540,12 @@ mod tests {
 
         let ctx2 = SelectionContext {
             text: "overwrite test".to_string(),
-            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             method: SelectionMethod::Win32,
             foreground_hwnd: 2,
             focus_hwnd: 0,
@@ -400,6 +565,7 @@ mod tests {
 
     #[test]
     fn test_replace_selection_text_no_context() {
+        let _lock = context_test_lock();
         // 先清空 store 确保无上下文
         {
             let store = get_selection_context_store();

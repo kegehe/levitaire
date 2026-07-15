@@ -1,5 +1,6 @@
-pub mod mouse;
+pub mod hotkey;
 pub mod keyboard;
+pub mod mouse;
 
 /// 钩子管理器
 ///

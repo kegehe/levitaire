@@ -14,6 +14,11 @@
 }
 
 /* ── Drag Handle ─────────────────────────────────────────── */
+/* 拖拽手柄：左侧可抓区域。data-tauri-drag-region 委托 Tauri 原生拖窗。
+   尺寸略放大、默认不透明度提高，避免暗色背景下几乎不可见导致用户以为不能拖动。
+   横向占位 = width(16) + margin-right(2) = 18px（比原 14px 多 4px），
+   通用态窗口尺寸校准常量已据此 +4。分隔线用 box-shadow inset 绘制，
+   不占布局空间，保证 scrollWidth/contentRect 测量可预测。 */
 .toolbar-drag-handle {
   display: flex;
   align-items: center;
@@ -22,19 +27,26 @@
   flex-shrink: 0;
   user-select: none;
   -webkit-user-select: none;
-  width: 14px;
-  height: 28px;
+  width: 16px;
+  align-self: stretch;
+  margin-right: var(--space-0-5);
+  /* inset box-shadow 画右侧分隔线，不占布局空间，避免影响尺寸校准常量 */
+  box-shadow: inset -1px 0 0 0 var(--color-border);
+  /* 左侧贴合容器圆角，hover 背景高亮时不会以直角溢出容器圆角 */
+  border-top-left-radius: var(--toolbar-radius);
+  border-bottom-left-radius: var(--toolbar-radius);
   /* GripVertical SVG as background — no child elements, data-tauri-drag-region always hits */
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a3a3a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='12' r='1'/%3E%3Ccircle cx='9' cy='5' r='1'/%3E%3Ccircle cx='9' cy='19' r='1'/%3E%3Ccircle cx='15' cy='12' r='1'/%3E%3Ccircle cx='15' cy='5' r='1'/%3E%3Ccircle cx='15' cy='19' r='1'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: center;
   background-size: 12px;
-  transition: opacity var(--transition-fast);
-  opacity: 0.5;
+  transition: opacity var(--transition-fast), background-color var(--transition-fast);
+  opacity: 0.7;
 }
 
 .toolbar-drag-handle:hover {
-  opacity: 0.8;
+  opacity: 1;
+  background-color: var(--color-border);
 }
 
 .toolbar-drag-handle:active {
@@ -44,14 +56,6 @@
 
 [data-theme="dark"] .toolbar-drag-handle {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='12' r='1'/%3E%3Ccircle cx='9' cy='5' r='1'/%3E%3Ccircle cx='9' cy='19' r='1'/%3E%3Ccircle cx='15' cy='12' r='1'/%3E%3Ccircle cx='15' cy='5' r='1'/%3E%3Ccircle cx='15' cy='19' r='1'/%3E%3C/svg%3E");
-}
-
-[data-theme="dark"] .toolbar-drag-handle:hover {
-  opacity: 0.8;
-}
-
-[data-theme="dark"] .toolbar-drag-handle:active {
-  opacity: 1;
 }
 
 @keyframes toolbarEnter {
@@ -149,7 +153,7 @@
   content: "▋";
   display: inline;
   animation: blink 0.8s step-end infinite;
-  color: var(--color-primary);
+  color: var(--color-accent);
   margin-left: 1px;
 }
 
@@ -183,6 +187,24 @@
   align-items: center;
 }
 
+/* 纵向布局（二维码预览）下，手柄转为顶部横条：
+   align-self 撑满宽度作为可拖标题栏，分隔线改用 inset box-shadow 画底部，
+   避免竖条在纵向交叉轴上错位缩成一点 */
+.toolbar-container:has(.toolbar-qrcode) .toolbar-drag-handle {
+  width: 100%;
+  height: 20px;
+  align-self: stretch;
+  margin-right: 0;
+  margin-bottom: var(--space-1);
+  box-shadow: inset 0 -1px 0 0 var(--color-border);
+  /* 顶部两角贴合容器圆角，底部直角与分隔线衔接 */
+  border-top-left-radius: var(--toolbar-radius);
+  border-top-right-radius: var(--toolbar-radius);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  background-position: center;
+}
+
 .toolbar-qrcode-image {
   width: 200px;
   height: 200px;
@@ -192,6 +214,81 @@
   border: 1px solid var(--preview-border);
   box-shadow: var(--shadow-sm);
   object-fit: contain;
+}
+
+/* ── Char Count Preview ──────────────────────────────────── */
+.toolbar-charcount {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+  min-width: 320px;
+  max-width: 380px;
+  animation: previewEnter var(--transition-normal) ease-out;
+}
+
+.toolbar-charcount-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1px;
+  padding: 1px;
+  border-radius: var(--preview-radius);
+  background: var(--preview-border);
+  overflow: hidden;
+}
+
+.toolbar-charcount-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1-5) var(--space-2);
+  background: var(--preview-bg);
+  min-width: 0;
+}
+
+/* 主指标：字符数(含空格)跨整行，强调字号与配色 */
+.toolbar-charcount-item--primary {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2-5);
+  background: var(--color-accent-subtle);
+}
+
+.toolbar-charcount-label {
+  font-size: var(--text-sm);
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.toolbar-charcount-value {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-accent);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.toolbar-charcount-item--primary .toolbar-charcount-label {
+  font-size: var(--text-base);
+  color: var(--color-fg);
+}
+
+.toolbar-charcount-item--primary .toolbar-charcount-value {
+  font-size: var(--text-lg);
+  font-weight: 700;
+}
+
+.toolbar-charcount .toolbar-preview-actions {
+  justify-content: flex-end;
 }
 
 /* ── Error ───────────────────────────────────────────────── */

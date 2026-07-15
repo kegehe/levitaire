@@ -41,22 +41,22 @@
         "visible": true,
         "x": 100,
         "y": 100
-      },
-      {
-        "label": "settings",
-        "title": "Floast Settings",
-        "width": 600,
-        "height": 650,
-        "visible": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: http://asset.localhost asset:; connect-src 'self'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$TEMP/floast-recording/**"]
+      }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "binaries/ffmpeg.exe": "ffmpeg.exe"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

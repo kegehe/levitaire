@@ -1,13 +1,19 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod commands;
-mod hooks;
+mod ai;
 mod automation;
 mod clipboard;
-mod utils;
+mod commands;
 mod config;
-mod ai;
+mod hooks;
+mod monitor;
+mod ocr;
+mod recording;
+mod screenshot;
+mod stt;
+mod tts;
+mod utils;
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -18,13 +24,26 @@ use tauri::{
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // 单实例限制：第二个实例启动时直接退出，并激活已有实例
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("orb") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
+            // 清理上次运行遗留的贴图临时文件
+            crate::screenshot::pin::cleanup_stale_temp_files();
+
             // 初始化配置管理器
             let config_manager = config::ConfigManager::new();
 
+            // 一次性读取启动时需要的所有配置（减少加锁次数）
+            let startup_config = config_manager.get_startup_config()?;
+
             // 使用配置中的 AI 设置初始化 AI 服务
             // 环境变量仅在配置值为空时作为 fallback，不写回配置文件
-            let mut ai_config = config_manager.get_ai_config()?;
+            let mut ai_config = startup_config.ai_config;
 
             if ai_config.api_key.is_empty() {
                 if let Ok(key) = std::env::var("FLOAST_AI_API_KEY") {
@@ -45,7 +64,27 @@ fn main() {
             let ai_service = ai::AiService::new(ai_config);
             app.manage(ai_service);
 
+            // 初始化截图启用标志（热键触发时检查）
+            hooks::hotkey::set_screenshot_enabled(startup_config.screenshot_enabled);
+            // 初始化文字工具栏启用标志（鼠标钩子选区检测时检查）
+            hooks::mouse::set_text_toolbar_enabled(startup_config.text_toolbar_enabled);
+
+            // 初始化语音输入启用标志
+            hooks::hotkey::set_slot_enabled(
+                hooks::hotkey::HotkeySlotId::Voice,
+                startup_config.stt_enabled,
+            );
+
+            // 初始化录屏启用标志
+            hooks::hotkey::set_slot_enabled(
+                hooks::hotkey::HotkeySlotId::Recording,
+                startup_config.recording_enabled,
+            );
+
             app.manage(config_manager);
+
+            // 截图全屏画面缓存（进入截图模式时填充，退出时清空）
+            app.manage(screenshot::ScreenCache::default());
 
             // 初始化钩子管理器
             let hook_manager = hooks::HookManager::new();
@@ -55,31 +94,49 @@ fn main() {
             let clipboard_manager = clipboard::ClipboardManager::new();
             app.manage(clipboard_manager);
 
-            // 拦截设置窗口关闭事件：隐藏而非销毁
-            // 避免窗口被销毁后无法再次打开
-            let settings_app_handle = app.handle().clone();
-            let settings_window = app.get_webview_window("settings").unwrap();
-            settings_window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    if let Some(win) = settings_app_handle.get_webview_window("settings") {
-                        let _ = win.hide();
-                    }
-                }
+            // 初始化 TTS 朗读状态（持有当前播放的 MediaPlayer）
+            app.manage(tts::TtsState::default());
+
+            // 初始化 STT 语音输入状态（仅取消标志，云端方案无常驻资源）
+            app.manage(stt::SttState::default());
+
+            // 初始化系统监控状态（采集线程随监控窗口开关启停，此处仅注册 state）
+            app.manage(monitor::MonitorState::default());
+
+            // 初始化录屏状态（录制线程随录制开关启停，此处仅注册 state）
+            app.manage(recording::RecordingState::default());
+
+            // 初始化 OCR 服务（后台线程，避免阻塞启动）
+            // 模型目录为 %APPDATA%/floast/ocr
+            // 不使用 catch_unwind：OcrService::new 内部涉及 COM 和 ONNX Runtime，
+            // catch_unwind 无法捕获 C++ 异常导致的 abort，且 panic unwind 后 COM 状态可能不一致。
+            // 让 panic 自然终止线程更安全——线程崩溃后 OCR 功能不可用，但不会留下不一致状态。
+            std::thread::spawn(move || {
+                crate::utils::logger::log("ocr", "后台线程开始初始化 OCR 服务...");
+                let ocr_service = ocr::OcrService::new(None, None);
+                ocr::set_ocr_service(ocr_service);
+                crate::utils::logger::log("ocr", "OCR 服务后台初始化完成");
             });
 
+            // settings 和 palette 窗口的关闭拦截已移至 show_settings/show_palette 命令中
+            // （延迟创建窗口时，在首次 show 时注册关闭拦截）
+
             // 创建系统托盘菜单
-            let toggle_orb = MenuItem::with_id(app, "toggle_orb", "显示/隐藏浮球", true, None::<&str>)?;
-            let show_settings = MenuItem::with_id(app, "show_settings", "设置", true, None::<&str>)?;
+            let toggle_orb =
+                MenuItem::with_id(app, "toggle_orb", "显示/隐藏浮球", true, None::<&str>)?;
+            let show_settings =
+                MenuItem::with_id(app, "show_settings", "设置", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&toggle_orb, &show_settings, &separator, &quit])?;
 
             // 创建系统托盘图标
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon()
-                    .expect("未找到默认图标，请检查 src-tauri/icons/ 目录下是否存在图标文件")
-                    .clone())
+                .icon(
+                    app.default_window_icon()
+                        .expect("未找到默认图标，请检查 src-tauri/icons/ 目录下是否存在图标文件")
+                        .clone(),
+                )
                 .tooltip("Floast Service")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -96,10 +153,14 @@ fn main() {
                             }
                         }
                         "show_settings" => {
-                            if let Some(window) = app.get_webview_window("settings") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            // 在独立线程中调用 async 命令，
+                            // 避免 WebviewWindowBuilder::build() 在 Windows 主线程上死锁
+                            let handle = app.clone();
+                            std::thread::spawn(move || {
+                                tauri::async_runtime::block_on(async {
+                                    let _ = crate::commands::show_settings(handle).await;
+                                });
+                            });
                         }
                         "quit" => {
                             app.exit(0);
@@ -112,7 +173,8 @@ fn main() {
                         button: MouseButton::Left,
                         button_state: tauri::tray::MouseButtonState::Up,
                         ..
-                    } = event {
+                    } = event
+                    {
                         // 左键点击托盘图标：切换浮球显示
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("orb") {
@@ -139,23 +201,109 @@ fn main() {
                 hooks::start_keyboard_hook(app_handle_kb);
             });
 
+            // 启动全局热键监听线程（截图快捷键）
+            let app_handle_hk = app.handle().clone();
+            hooks::hotkey::start_hotkey_thread(app_handle_hk);
+
+            // 启动时按配置注册截图热键（热键线程的消息窗口需先就绪）
+            let startup_hotkey = startup_config.screenshot_hotkey;
+            if !startup_hotkey.is_empty() {
+                std::thread::spawn(move || {
+                    // 轮询等待热键线程就绪（最多约 2 秒）
+                    for _ in 0..40 {
+                        match hooks::hotkey::register_hotkey(
+                            hooks::hotkey::HotkeySlotId::Screenshot,
+                            &startup_hotkey,
+                        ) {
+                            Ok(_) => return,
+                            Err(e) if e == "热键线程未就绪" => {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                continue;
+                            }
+                            Err(e) => {
+                                crate::utils::logger::log(
+                                    "hotkey",
+                                    &format!("启动注册热键失败: {}", e),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    crate::utils::logger::log("hotkey", "启动时注册热键超时（热键线程未就绪）");
+                });
+            }
+
+            // 启动时按配置注册语音输入热键
+            let startup_stt_hotkey = startup_config.stt_hotkey;
+            if !startup_stt_hotkey.is_empty() {
+                std::thread::spawn(move || {
+                    for _ in 0..40 {
+                        match hooks::hotkey::register_hotkey(
+                            hooks::hotkey::HotkeySlotId::Voice,
+                            &startup_stt_hotkey,
+                        ) {
+                            Ok(_) => return,
+                            Err(e) if e == "热键线程未就绪" => {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                continue;
+                            }
+                            Err(e) => {
+                                crate::utils::logger::log(
+                                    "hotkey",
+                                    &format!("启动注册语音热键失败: {}", e),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    crate::utils::logger::log("hotkey", "启动时注册语音热键超时（热键线程未就绪）");
+                });
+            }
+
+            // 启动时按配置注册录屏热键
+            let startup_recording_hotkey = startup_config.recording_hotkey;
+            if !startup_recording_hotkey.is_empty() {
+                std::thread::spawn(move || {
+                    for _ in 0..40 {
+                        match hooks::hotkey::register_hotkey(
+                            hooks::hotkey::HotkeySlotId::Recording,
+                            &startup_recording_hotkey,
+                        ) {
+                            Ok(_) => return,
+                            Err(e) if e == "热键线程未就绪" => {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                continue;
+                            }
+                            Err(e) => {
+                                crate::utils::logger::log(
+                                    "hotkey",
+                                    &format!("启动注册录屏热键失败: {}", e),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    crate::utils::logger::log("hotkey", "启动时注册录屏热键超时（热键线程未就绪）");
+                });
+            }
+
             // 将浮球（orb）窗口定位到主屏右下角
             // 覆盖 tauri.conf.json 中默认的左上角 (100, 100) 位置
             if let Some(orb) = app.get_webview_window("orb") {
                 let margin = 20.0f64;
-                // 窗口逻辑尺寸（tauri.conf.json 中配置的 width/height）
-                // 乘以 scale_factor 得到物理像素，与物理坐标的 workarea 单位一致
-                let scale = orb.scale_factor().unwrap_or(1.0);
+                // inner_size() 已返回物理像素，与物理坐标的 workarea 单位一致
                 let inner = orb.inner_size().unwrap_or_default();
-                let win_w = inner.width as f64 * scale;
-                let win_h = inner.height as f64 * scale;
+                let win_w = inner.width as f64;
+                let win_h = inner.height as f64;
 
                 // 取主屏工作区（已排除任务栏），避免浮球被任务栏遮挡
                 // SPI_GETWORKAREA 在 DPI-aware 进程下返回物理像素，与 PhysicalPosition 单位一致
                 #[cfg(target_os = "windows")]
                 {
-                    use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
                     use windows::Win32::Foundation::RECT;
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+                    };
                     let mut rc = RECT::default();
                     let ok = unsafe {
                         SystemParametersInfoW(
@@ -163,17 +311,54 @@ fn main() {
                             0,
                             Some(&mut rc as *mut _ as *mut std::ffi::c_void),
                             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-                        ).is_ok()
+                        )
+                        .is_ok()
                     };
                     if ok {
                         let x = rc.right as f64 - win_w - margin;
                         let y = rc.bottom as f64 - win_h - margin;
-                        let _ = orb.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-                            x as i32, y as i32,
-                        )));
+                        let _ = orb.set_position(tauri::Position::Physical(
+                            tauri::PhysicalPosition::new(x as i32, y as i32),
+                        ));
                     }
                 }
             }
+
+            // 预创建 screenshot-overlay 窗口（visible=false），确保首次截图/录制时
+            // webview 已加载完毕，避免首次点击时因 webview 未就绪导致 overlay 显示空白。
+            // 截图和录制工具复用此窗口，通过 OverlaySwitcher 切换内容。
+            // 在新线程中创建，避免 WebviewWindowBuilder::build() 在主线程死锁。
+            let precreate_app = app.handle().clone();
+            std::thread::spawn(move || {
+                // 等待 Tauri 主循环启动
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+                // 检查是否已被前端创建
+                if precreate_app.get_webview_window("screenshot-overlay").is_some() {
+                    crate::utils::logger::log("main", "screenshot-overlay 已存在，跳过预创建");
+                    return;
+                }
+                let overlay = WebviewWindowBuilder::new(
+                    &precreate_app,
+                    "screenshot-overlay",
+                    WebviewUrl::App("index.html".into()),
+                )
+                .title("Floast Screenshot")
+                .inner_size(800.0, 600.0)
+                .resizable(false)
+                .transparent(true)
+                .decorations(false)
+                .shadow(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focusable(true)
+                .visible(false)
+                .build();
+                match overlay {
+                    Ok(_) => crate::utils::logger::log("main", "screenshot-overlay 窗口预创建成功"),
+                    Err(e) => crate::utils::logger::log("main", &format!("screenshot-overlay 窗口预创建失败: {}", e)),
+                }
+            });
 
             Ok(())
         })
@@ -186,6 +371,17 @@ fn main() {
             commands::hide_toolbar,
             commands::show_orb,
             commands::hide_orb,
+            commands::show_palette,
+            commands::hide_palette,
+            commands::start_screenshot,
+            commands::cancel_screenshot,
+            commands::get_virtual_desktop_bounds,
+            commands::get_screen_cache_png,
+            commands::capture_region,
+            commands::clipboard_set_image,
+            commands::ocr_region,
+            commands::pin_image,
+            commands::close_pin,
             commands::show_settings,
             commands::call_ai,
             commands::call_ai_stream,
@@ -197,6 +393,78 @@ fn main() {
             commands::open_url,
             commands::save_image,
             commands::set_qrcode_preview,
+            commands::get_screenshot_hotkey,
+            commands::set_screenshot_hotkey,
+            commands::set_screenshot_enabled,
+            commands::get_screenshot_enabled,
+            commands::set_text_toolbar_enabled,
+            commands::get_text_toolbar_enabled,
+            commands::get_toolbar_features,
+            commands::set_toolbar_features,
+            commands::get_dedup_mode,
+            commands::set_dedup_mode,
+            commands::get_md5_length,
+            commands::set_md5_length,
+            commands::get_numbering_style,
+            commands::set_numbering_style,
+            commands::get_clear_options,
+            commands::set_clear_options,
+            commands::tts_speak,
+            commands::tts_stop,
+            commands::tts_pause,
+            commands::tts_resume,
+            commands::tts_get_voices,
+            commands::tts_get_state,
+            commands::get_tts_config,
+            commands::set_tts_config,
+            commands::show_voice_window,
+            commands::hide_voice_window,
+            commands::stt_transcribe,
+            commands::stt_cancel,
+            commands::stt_paste_text,
+            commands::get_stt_hotkey,
+            commands::set_stt_hotkey,
+            commands::get_stt_enabled,
+            commands::set_stt_enabled,
+            commands::get_stt_config,
+            commands::set_stt_config,
+            commands::get_stt_api_key,
+            commands::set_stt_api_key,
+            commands::show_monitor_window,
+            commands::hide_monitor_window,
+            commands::get_system_monitor_enabled,
+            commands::set_system_monitor_enabled,
+            commands::get_system_monitor_config,
+            commands::set_system_monitor_config,
+            commands::get_ocr_engines,
+            commands::set_ocr_engine,
+            commands::start_recording_select,
+            commands::start_recording,
+            commands::show_recording_controls,
+            commands::finish_recording_controls,
+            commands::pause_recording,
+            commands::resume_recording,
+            commands::stop_recording,
+            commands::cancel_recording,
+            commands::cancel_recording_select,
+            commands::get_recording_state,
+            commands::is_recording_select_active,
+            commands::clipboard_set_gif,
+            commands::save_gif,
+            commands::save_video,
+            commands::save_video_file,
+            commands::enumerate_windows,
+            commands::get_recording_enabled,
+            commands::set_recording_enabled,
+            commands::get_recording_hotkey,
+            commands::set_recording_hotkey,
+            commands::get_recording_config,
+            commands::set_recording_config,
+            commands::get_recording_save_path,
+            commands::set_recording_save_path,
+            commands::get_screenshot_save_path,
+            commands::set_screenshot_save_path,
+            commands::pick_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
