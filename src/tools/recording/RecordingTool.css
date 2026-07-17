@@ -151,13 +151,14 @@
   color: #e74c3c;
 }
 
-/* 录制选区框（红色虚线，区别于截图的蓝色实线） */
+/* 录制选区框（绿色虚线，区别于截图的蓝色实线） */
 .rec-selection-box {
   position: absolute;
-  border: 2px dashed #ff6b6b;
+  border: 2px dashed #22c55e;
   box-sizing: border-box;
   pointer-events: none;
   z-index: 5;
+  animation: rec-selection-breathe 1.4s ease-in-out infinite;
 }
 
 /* 全屏模式面板 */
@@ -303,6 +304,16 @@
 @keyframes rec-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
+}
+
+@keyframes rec-selection-breathe {
+  0%, 100% { border-color: rgba(34, 197, 94, 0.96); }
+  50% { border-color: rgba(34, 197, 94, 0.40); }
+}
+
+@keyframes rec-outline-breathe {
+  0%, 100% { outline-color: rgba(34, 197, 94, 0.96); }
+  50% { outline-color: rgba(34, 197, 94, 0.40); }
 }
 
 .rec-timer {
@@ -510,26 +521,32 @@
   pointer-events: none;
 }
 
-/* 选区框边框（红色虚线） */
+/* 选区框边框（绿色虚线） */
 .rec-rec-selection {
   position: absolute;
-  border: 2px dashed #ff6b6b;
+  border: 2px dashed #22c55e;
   box-sizing: border-box;
   pointer-events: none;
   z-index: 5;
+  animation: rec-selection-breathe 1.4s ease-in-out infinite;
 }
 
-/* The normal outline is outside the captured region. At the virtual desktop
-   edge there is no outside space, so use a visible inset status border. The
-   recording overlay is marked WDA_EXCLUDEFROMCAPTURE while recording. */
+/* 录制中非全屏选区框：使用 outline 向外延伸（不被 BitBlt 截到）+ 呼吸动画 */
+.rec-rec-selection-outline {
+  border: none;
+  outline: 2px dashed #22c55e;
+  animation: rec-outline-breathe 1.4s ease-in-out infinite;
+}
+
+/* A full-screen selection has no outside space for an outline. */
 .rec-rec-selection-fullscreen {
-  box-shadow: inset 0 0 0 3px #e53935;
+  box-shadow: inset 0 0 0 3px #16a34a;
   animation: rec-fullscreen-border-pulse 1.4s ease-in-out infinite;
 }
 
 @keyframes rec-fullscreen-border-pulse {
-  0%, 100% { box-shadow: inset 0 0 0 3px rgba(229, 57, 53, 0.96); }
-  50% { box-shadow: inset 0 0 0 3px rgba(229, 57, 53, 0.52); }
+  0%, 100% { box-shadow: inset 0 0 0 3px rgba(22, 163, 74, 0.96); }
+  50% { box-shadow: inset 0 0 0 3px rgba(22, 163, 74, 0.52); }
 }
 
 /* 选区尺寸标签 */

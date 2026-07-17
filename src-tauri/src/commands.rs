@@ -3,7 +3,7 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    SetWindowDisplayAffinity, WDA_NONE,
 };
 
 use crate::automation::SelectionInfo;
@@ -1855,12 +1855,20 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     // 如果已经在录制中，热键触发时停止录制（toggle 行为）
     if crate::hooks::mouse::is_recording_mode() {
         let state = app.state::<crate::recording::RecordingState>();
-        if state.is_running() {
+        if state.is_running() && state.can_stop_from_hotkey() {
             crate::utils::logger::log("recording", "recording in progress, stopping via hotkey");
             // stop 后清理录制模式状态（与 stop_recording 命令一致）
             // 不恢复 orb——编码/预览期间 overlay 仍需显示
             state.stop()?;
             crate::hooks::mouse::set_recording_mode(false);
+            finish_recording_controls(app.clone())?;
+            return Ok(());
+        }
+        if state.is_running() {
+            crate::utils::logger::log(
+                "recording",
+                "ignoring repeated recording hotkey immediately after start",
+            );
             return Ok(());
         }
         // 录制模式但未在录制中（可能在选区阶段），忽略重复触发
@@ -1913,11 +1921,11 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
         return Err(error.to_string());
     }
 
-    // 等待底层 HWND 就绪（与 start_screenshot_inner 相同的逻辑）
+    // 等待底层 HWND 就绪
     // ensureScreenshotWindow 的 tauri://created 事件触发时，窗口逻辑对象已创建，
     // 但 Win32 HWND 可能尚未就绪，show/set_focus 会 no-op。
     let mut hwnd_ready = false;
-    for _ in 0..40 {
+    for _ in 0..100 {
         match overlay.hwnd() {
             Ok(_) => {
                 hwnd_ready = true;
@@ -1929,7 +1937,7 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     if !hwnd_ready {
         crate::utils::logger::log(
             "recording",
-            "ERROR: overlay hwnd 2秒内未就绪，录制遮罩可能无法显示",
+            "ERROR: overlay hwnd 5秒内未就绪，录制遮罩可能无法显示",
         );
         let _ = cancel_recording_select(app.clone());
         return Err("recording overlay HWND did not become ready".to_string());
@@ -2048,75 +2056,63 @@ pub fn start_recording(
 
     let state = app.state::<crate::recording::RecordingState>();
     // Enable exclusion before the worker can capture its first frame.
-    set_recording_capture_protection(&app, true);
+    set_recording_capture_protection(&app);
     if let Err(error) = state.start(&app, region, record_mode, fps, max_duration_sec) {
-        set_recording_capture_protection(&app, false);
+        set_recording_capture_protection(&app);
         return Err(error);
     }
     Ok(())
 }
 
-fn hide_recording_controls_window(app: &tauri::AppHandle) {
+fn destroy_recording_controls_window(app: &tauri::AppHandle) {
     if let Some(controls) = app.get_webview_window("recording-controls") {
-        let _ = controls.hide();
+        // WebView2 can leave a white composited surface after hide() on a
+        // transparent child window. The controls are recreated for each recording.
+        let _ = controls.destroy();
     }
 }
 
-fn set_recording_capture_protection(
-    app: &tauri::AppHandle,
-    enabled: bool,
-) -> bool {
-    let affinity = if enabled {
-        WDA_EXCLUDEFROMCAPTURE
-    } else {
-        WDA_NONE
-    };
-    let mut overlay_protected = false;
-    for label in ["screenshot-overlay", "recording-controls"] {
-        let Some(window) = app.get_webview_window(label) else {
-            continue;
-        };
-        let result = window
-            .hwnd()
-            .map_err(|error| error.to_string())
-            .and_then(|hwnd| unsafe {
-                SetWindowDisplayAffinity(hwnd, affinity).map_err(|error| error.to_string())
-            });
-        if let Err(error) = result {
-            crate::utils::logger::log(
-                "recording",
-                &format!("unable to set capture protection for {}: {}", label, error),
-            );
-        } else if label == "screenshot-overlay" {
-            overlay_protected = enabled;
+fn set_recording_capture_protection(app: &tauri::AppHandle) {
+    // The selection outline and mask sit outside the recorded region. Applying
+    // WDA_EXCLUDEFROMCAPTURE to this transparent WebView2 window makes its
+    // visible content disappear on some Windows versions, so keep it visible.
+    if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
+        if let Ok(hwnd) = overlay.hwnd() {
+            unsafe {
+                let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
+            }
         }
     }
-    overlay_protected
+    // Transparent WebView2 windows disappear from the desktop on some Windows
+    // versions when WDA_EXCLUDEFROMCAPTURE is applied. Keep the controls visible.
+    if let Some(controls) = app.get_webview_window("recording-controls") {
+        if let Ok(hwnd) = controls.hwnd() {
+            unsafe {
+                let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
+            }
+        }
+    }
 }
 
 /// The control window is created asynchronously by the frontend. This command
 /// only makes the full-screen selection overlay click-through.
 #[tauri::command]
 pub fn show_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
-    let overlay_protected = set_recording_capture_protection(&app, true);
+    set_recording_capture_protection(&app);
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
         overlay
             .set_ignore_cursor_events(true)
             .map_err(|error| error.to_string())?;
     }
     let _ = app.emit("recording-controls-started", ());
-    let _ = app.emit(
-        "recording-capture-protection",
-        serde_json::json!({ "overlayProtected": overlay_protected }),
-    );
     Ok(())
 }
 
-/// Hide recording controls and restore interaction with the main overlay.
+/// Destroy recording controls and restore interaction with the main overlay.
 #[tauri::command]
 pub fn finish_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
-    hide_recording_controls_window(&app);
-    set_recording_capture_protection(&app, false);
+    destroy_recording_controls_window(&app);
+    set_recording_capture_protection(&app);
     crate::hooks::mouse::set_recording_mode(false);
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
         overlay
@@ -2160,6 +2156,16 @@ pub fn cancel_recording(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<crate::recording::RecordingState>();
     state.cancel()?;
     finish_recording_controls(app)
+}
+
+/// Cancel an active recording and leave the selection overlay in one native
+/// operation. This is used by the control window, which is destroyed during
+/// cleanup and therefore cannot safely issue a follow-up frontend command.
+#[tauri::command]
+pub fn cancel_recording_and_select(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<crate::recording::RecordingState>();
+    state.cancel()?;
+    cancel_recording_select(app)
 }
 
 /// 获取录制状态快照

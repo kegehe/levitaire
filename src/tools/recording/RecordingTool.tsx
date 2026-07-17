@@ -92,9 +92,8 @@ function RecordingTool() {
   const [videoPath, setVideoPath] = useState<string | null>(null);
   const [resultWidth, setResultWidth] = useState(0);
   const [resultHeight, setResultHeight] = useState(0);
-  const [overlayCaptureProtected, setOverlayCaptureProtected] = useState(false);
-  // DPI 缩放和虚拟桌面原点（用于物理像素 ↔ CSS 像素转换）
   const scaleRef = useRef<number>(1);
+  // DPI 缩放和虚拟桌面原点（用于物理像素 ↔ CSS 像素转换）
   const originRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   // 代际计数
   const genRef = useRef(0);
@@ -116,7 +115,6 @@ function RecordingTool() {
     setGifBase64(null);
     setVideoBase64(null);
     setVideoPath(null);
-    setOverlayCaptureProtected(false);
     if (shouldCancelBackend) {
       await invoke("cancel_recording").catch(console.error);
     }
@@ -146,7 +144,6 @@ function RecordingTool() {
 
   // 获取 DPI 缩放和虚拟桌面原点
   useEffect(() => {
-    win.scaleFactor().then((s) => { scaleRef.current = s; }).catch(() => {});
     invoke<{ originX: number; originY: number; width: number; height: number }>("get_virtual_desktop_bounds")
       .then((b) => { originRef.current = { x: b.originX, y: b.originY }; })
       .catch(() => {});
@@ -257,9 +254,6 @@ function RecordingTool() {
       listen("recording-stop-requested", () => setPhase("encoding")),
       listen("recording-paused", () => setPhase("paused")),
       listen("recording-resumed", () => setPhase("recording")),
-      listen<{ overlayProtected: boolean }>("recording-capture-protection", (event) => {
-        setOverlayCaptureProtected(event.payload.overlayProtected);
-      }),
     ]);
     return () => {
       unlisten.then((handlers) => handlers.forEach((handler) => handler()));
@@ -279,7 +273,6 @@ function RecordingTool() {
 
   const startRecording = useCallback(async (selectedMode: RecordMode) => {
     cancellingRef.current = false;
-    setOverlayCaptureProtected(false);
     setMode(selectedMode);
     setPhase("area_select");
   }, []);
@@ -294,11 +287,9 @@ function RecordingTool() {
     try {
       // Refresh these values at the point of use. The selection UI can be used
       // before this component's initial DPI query has completed.
-      const [scale, bounds] = await Promise.all([
-        win.scaleFactor(),
-        invoke<{ originX: number; originY: number }>("get_virtual_desktop_bounds"),
-      ]);
+      const bounds = await invoke<{ originX: number; originY: number; width: number }>("get_virtual_desktop_bounds");
       const origin = { x: bounds.originX, y: bounds.originY };
+      const scale = bounds.width / window.innerWidth;
       scaleRef.current = scale;
       originRef.current = origin;
       setRegion(selectedRegion);
@@ -314,11 +305,6 @@ function RecordingTool() {
       );
       if (!controlsPosition) throw new Error("屏幕空间不足，无法显示录制控制栏");
 
-      const controls = await ensureRecordingControlsWindow();
-      await controls.setPosition(new PhysicalPosition(
-        Math.round(origin.x + controlsPosition.left * scale),
-        Math.round(origin.y + controlsPosition.top * scale),
-      ));
       await invoke("start_recording", {
         left: selectedRegion.left,
         top: selectedRegion.top,
@@ -329,6 +315,11 @@ function RecordingTool() {
         maxDurationSec,
       });
       recordingStarted = true;
+      const controls = await ensureRecordingControlsWindow();
+      await controls.setPosition(new PhysicalPosition(
+        Math.round(origin.x + controlsPosition.left * scale),
+        Math.round(origin.y + controlsPosition.top * scale),
+      ));
       await controls.show();
       await invoke("show_recording_controls");
       setPhase("recording");
@@ -413,7 +404,6 @@ function RecordingTool() {
       setVideoPath(null);
       setResultWidth(0);
       setResultHeight(0);
-      setOverlayCaptureProtected(false);
       // Keep the current GIF/video choice and go straight to area selection.
       setPhase(mode ? "area_select" : "mode_select");
       await invoke("start_recording_select");
@@ -454,8 +444,8 @@ function RecordingTool() {
 
       {/* 录制中 / 暂停中：选区框 + 控制面板 */}
       {(phase === "recording" || phase === "paused") && region && (() => {
-        const scale = scaleRef.current;
         const origin = originRef.current;
+        const scale = scaleRef.current;
         // 物理像素 → CSS 像素（overlay 坐标空间）
         const cssLeft = (region.left - origin.x) / scale;
         const cssTop = (region.top - origin.y) / scale;
@@ -476,22 +466,22 @@ function RecordingTool() {
 
             {/* 选区框：录制期间用 outline（向外延伸到遮罩区域）代替 border（向内画在录制区域内），
                 outline 不占布局空间且在录制区域外，BitBlt 不会截到 */}
-            {(!isFullscreen || overlayCaptureProtected) && <div
-              className={`rec-rec-selection${isFullscreen ? " rec-rec-selection-fullscreen" : ""}`}
+            <div
+              className={`rec-rec-selection${isFullscreen ? " rec-rec-selection-fullscreen" : " rec-rec-selection-outline"}`}
               style={{
                 left: cssLeft,
                 top: cssTop,
                 width: cssWidth,
                 height: cssHeight,
                 border: "none",
-                outline: isFullscreen ? "none" : "2px dashed #ff6b6b",
+                outline: isFullscreen ? "none" : undefined,
               }}
             >
               {/* 尺寸标签 */}
               <div className="rec-rec-size-badge">
                 {region.width} × {region.height}
               </div>
-            </div>}
+            </div>
 
           </>
         );

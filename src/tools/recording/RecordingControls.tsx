@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
 import "./RecordingTool.css";
@@ -12,6 +12,15 @@ function RecordingControls() {
   const [frameCount, setFrameCount] = useState(0);
   const [recordingActive, setRecordingActive] = useState(false);
   const actionPending = useRef(false);
+  // 标记窗口是否已被主动隐藏（stop/cancel/编码完成），
+  // 防止残留的 frame 事件将 recordingActive 设回 true 导致窗口重新显示
+  const hiddenRef = useRef(false);
+
+  const hideWindow = useCallback(() => {
+    hiddenRef.current = true;
+    setRecordingActive(false);
+    win.hide().catch(() => {});
+  }, [win]);
 
   const syncState = useCallback(() => {
     invoke<{ running: boolean; paused: boolean; elapsedMs: number; frameCount: number }>("get_recording_state")
@@ -20,15 +29,21 @@ function RecordingControls() {
         setPaused(state.paused);
         setElapsedMs(state.elapsedMs);
         setFrameCount(state.frameCount);
+        // 录制已停止（非暂停）时，自动隐藏控制窗口
+        if (!state.running && !state.paused) {
+          hideWindow();
+        }
       })
       .catch(() => {});
-  }, []);
+  }, [hideWindow]);
 
   useEffect(() => {
     document.documentElement.style.background = "transparent";
     document.body.style.background = "transparent";
     document.body.style.margin = "0";
 
+    // Signal that React has rendered before the native window is shown.
+    void emit("recording-controls-ready");
     syncState();
 
     const unlisten = Promise.all([
@@ -36,24 +51,31 @@ function RecordingControls() {
         const data = event.payload as { type: string; elapsedMs?: number; frameCount?: number };
         if (data.elapsedMs !== undefined) setElapsedMs(data.elapsedMs);
         if (data.frameCount !== undefined) setFrameCount(data.frameCount);
-        if (data.type === "frame") setRecordingActive(true);
+        if (data.type === "frame") {
+          // 窗口已被主动隐藏后，忽略残留的 frame 事件
+          if (!hiddenRef.current) {
+            setRecordingActive(true);
+          }
+        }
         if (data.type === "encoding" || data.type === "done" || data.type === "error") {
-          setRecordingActive(false);
-          win.hide().catch(() => {});
+          hideWindow();
         }
       }),
       listen("recording-controls-started", () => {
+        hiddenRef.current = false;
         setRecordingActive(true);
         syncState();
       }),
-      listen("recording-controls-finished", () => setRecordingActive(false)),
+      listen("recording-controls-finished", () => {
+        hideWindow();
+      }),
       listen("recording-paused", () => setPaused(true)),
       listen("recording-resumed", () => setPaused(false)),
     ]);
     return () => {
       unlisten.then((handlers) => handlers.forEach((handler) => handler()));
     };
-  }, [syncState, win]);
+  }, [syncState, hideWindow]);
 
   useEffect(() => {
     if (!recordingActive) return;
@@ -94,8 +116,7 @@ function RecordingControls() {
     if (actionPending.current) return;
     actionPending.current = true;
     try {
-      await invoke("cancel_recording");
-      await invoke("cancel_recording_select");
+      await invoke("cancel_recording_and_select");
     } catch (error) {
       console.error("cancel_recording failed:", error);
     } finally {

@@ -24,27 +24,13 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
 
   // 获取 DPI 缩放和虚拟桌面原点
   const fetchReady = useCallback(() => {
-    let scaleReady = false;
-    let originReady = false;
-    const markReady = () => {
-      if (scaleReady && originReady) {
-        setReady(true);
-      }
-    };
-    win.scaleFactor()
-      .then((s) => {
-        scaleRef.current = s;
-        scaleReady = true;
-        markReady();
-      })
-      .catch((e) => console.error("scaleFactor failed:", e));
     invoke<{ originX: number; originY: number; width: number; height: number }>(
       "get_virtual_desktop_bounds",
     )
       .then((b) => {
         originRef.current = { x: b.originX, y: b.originY };
-        originReady = true;
-        markReady();
+        scaleRef.current = b.width / window.innerWidth;
+        setReady(true);
       })
       .catch((e) => console.error("get_virtual_desktop_bounds failed:", e));
   }, [win]);
@@ -67,9 +53,9 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
     }
   }, [areaMode]);
 
-  const snap = useCallback((cssPx: number) => {
-    const s = scaleRef.current || 1;
-    return Math.round(cssPx * s) / s;
+  const snap = useCallback((value: number) => {
+    const scale = scaleRef.current || 1;
+    return Math.round(value * scale) / scale;
   }, []);
 
   // 全屏模式：直接使用虚拟桌面边界
@@ -140,8 +126,8 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
       return;
     }
 
-    const scale = scaleRef.current;
     const origin = originRef.current;
+    const scale = scaleRef.current || 1;
     onAreaSelected({
       left: Math.round(left * scale) + origin.x,
       top: Math.round(top * scale) + origin.y,

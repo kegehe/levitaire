@@ -174,7 +174,7 @@ unsafe fn capture_screen_region_inner(
         return Err("SelectObject failed".into());
     }
 
-    if !BitBlt(
+    if BitBlt(
         mem_dc,
         0,
         0,

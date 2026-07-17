@@ -1,7 +1,8 @@
 import { lazy, Suspense, useState, useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import RecordingControls from "./tools/recording/RecordingControls";
 
 // 按窗口 label 懒加载，每个窗口只加载对应 chunk，减少资源占用
 const TextToolbar = lazy(() => import("./tools/text-toolbar/TextToolbar"));
@@ -9,7 +10,6 @@ const FloatingOrb = lazy(() => import("./components/FloatingOrb"));
 const ToolPalette = lazy(() => import("./components/ToolPalette"));
 const ScreenshotTool = lazy(() => import("./tools/screenshot/ScreenshotTool"));
 const RecordingTool = lazy(() => import("./tools/recording/RecordingTool"));
-const RecordingControls = lazy(() => import("./tools/recording/RecordingControls"));
 const VoiceInput = lazy(() => import("./tools/voice-input/VoiceInput"));
 const SystemMonitor = lazy(() => import("./tools/system-monitor/SystemMonitor"));
 const Settings = lazy(() => import("./components/Settings"));
@@ -47,6 +47,7 @@ function OverlaySwitcher() {
     const un3 = listen("recording-select-cancel", () => {
       setMode("screenshot");
     });
+    void Promise.all([un, un2, un3, un4]).then(() => emit("screenshot-overlay-ready"));
     return () => {
       un.then((fn) => fn());
       un2.then((fn) => fn());
@@ -60,6 +61,17 @@ function OverlaySwitcher() {
 
 function App() {
   const windowLabel = getCurrentWebviewWindow().label;
+
+  // 非 main 窗口（overlay、controls 等）始终透明背景，
+  // 防止 lazy 组件加载期间 Suspense fallback={null} 导致白色闪烁
+  useEffect(() => {
+    if (windowLabel !== "toolbar" && windowLabel !== "orb" && windowLabel !== "palette" && windowLabel !== "settings") {
+      document.documentElement.style.background = "transparent";
+      document.body.style.background = "transparent";
+      document.body.style.margin = "0";
+      document.body.style.overflow = "hidden";
+    }
+  }, [windowLabel]);
 
   let content: React.ReactNode;
   if (windowLabel === "toolbar") {

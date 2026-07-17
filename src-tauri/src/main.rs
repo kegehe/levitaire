@@ -324,41 +324,11 @@ fn main() {
                 }
             }
 
-            // 预创建 screenshot-overlay 窗口（visible=false），确保首次截图/录制时
-            // webview 已加载完毕，避免首次点击时因 webview 未就绪导致 overlay 显示空白。
-            // 截图和录制工具复用此窗口，通过 OverlaySwitcher 切换内容。
-            // 在新线程中创建，避免 WebviewWindowBuilder::build() 在主线程死锁。
-            let precreate_app = app.handle().clone();
-            std::thread::spawn(move || {
-                // 等待 Tauri 主循环启动
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
-                // 检查是否已被前端创建
-                if precreate_app.get_webview_window("screenshot-overlay").is_some() {
-                    crate::utils::logger::log("main", "screenshot-overlay 已存在，跳过预创建");
-                    return;
-                }
-                let overlay = WebviewWindowBuilder::new(
-                    &precreate_app,
-                    "screenshot-overlay",
-                    WebviewUrl::App("index.html".into()),
-                )
-                .title("Floast Screenshot")
-                .inner_size(800.0, 600.0)
-                .resizable(false)
-                .transparent(true)
-                .decorations(false)
-                .shadow(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .focusable(true)
-                .visible(false)
-                .build();
-                match overlay {
-                    Ok(_) => crate::utils::logger::log("main", "screenshot-overlay 窗口预创建成功"),
-                    Err(e) => crate::utils::logger::log("main", &format!("screenshot-overlay 窗口预创建失败: {}", e)),
-                }
-            });
+            // 注：不再在 Rust 端预创建 screenshot-overlay 窗口。
+            // dev 模式下 Rust 端创建窗口时 app URL 尚未初始化，
+            // WebviewUrl::App("index.html") 会被解析为 about:blank，
+            // 导致前端代码无法加载、BitBlt 截屏失败。
+            // 改为让前端 ensureScreenshotWindow() 自行创建窗口。
 
             Ok(())
         })
@@ -446,6 +416,7 @@ fn main() {
             commands::resume_recording,
             commands::stop_recording,
             commands::cancel_recording,
+            commands::cancel_recording_and_select,
             commands::cancel_recording_select,
             commands::get_recording_state,
             commands::is_recording_select_active,

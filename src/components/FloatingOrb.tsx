@@ -50,6 +50,8 @@ function FloatingOrb() {
     const startRecording = async () => {
       try {
         await ensureScreenshotWindow();
+        // Native startup waits for the Win32 HWND. The frontend WebviewWindow
+        // API has no hwnd() method, so polling it delayed every first launch.
         await invoke("start_recording_select");
       } catch (err) {
         console.error("recording hotkey failed:", err);

@@ -54,4 +54,22 @@ describe("RecordingControls", () => {
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("pause_recording"));
     expect(mockInvoke.mock.calls.filter(([command]) => command === "pause_recording")).toHaveLength(1);
   });
+
+  it("cancels and closes the overlay through one native command", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_recording_state") {
+        return Promise.resolve({ paused: false, elapsedMs: 0, frameCount: 0 });
+      }
+      return Promise.resolve();
+    });
+
+    render(<RecordingControls />);
+    const cancelButton = document.querySelector<HTMLButtonElement>(".rec-rec-btn-cancel");
+    expect(cancelButton).toBeTruthy();
+    fireEvent.click(cancelButton!);
+
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("cancel_recording_and_select"));
+    expect(mockInvoke).not.toHaveBeenCalledWith("cancel_recording");
+    expect(mockInvoke).not.toHaveBeenCalledWith("cancel_recording_select");
+  });
 });

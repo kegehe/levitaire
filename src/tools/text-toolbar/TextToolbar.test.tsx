@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import FloatingToolbar from "./TextToolbar";
 import { emitMockEvent, clearMockListeners, mockHide } from "../../test/tauri-mock";
@@ -2130,6 +2130,9 @@ describe("FloatingToolbar MD5 加密功能", () => {
       fireEvent.click(btn);
     });
 
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("replace_selection", expect.any(Object));
+    });
     const calls = mockInvoke.mock.calls.filter(([cmd]) => cmd === "replace_selection");
     expect(calls).toHaveLength(1);
     const text = calls[0][1] as { text: string };
@@ -2146,9 +2149,9 @@ describe("FloatingToolbar MD5 加密功能", () => {
       fireEvent.click(screen.getByRole("button", { name: "MD5" }));
     });
 
-    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
       text: "5d41402abc4b2a76b9719d911017c592",
-    });
+    }));
   });
 
   it("16 位：切换位数后输出 32 位结果的第 9~24 位", async () => {

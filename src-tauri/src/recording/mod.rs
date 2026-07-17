@@ -234,6 +234,16 @@ impl RecordingState {
         self.finishing.load(Ordering::SeqCst)
     }
 
+    /// Ignore repeated global-hotkey events immediately after recording starts.
+    pub fn can_stop_from_hotkey(&self) -> bool {
+        self.start_time
+            .lock()
+            .ok()
+            .and_then(|start| *start)
+            .map(|start| start.elapsed() >= Duration::from_secs(3))
+            .unwrap_or(false)
+    }
+
     /// Stop a failed worker only when it still owns the active generation.
     pub fn fail_generation(&self, gen: u64) -> bool {
         if self
