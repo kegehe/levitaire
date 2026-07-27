@@ -1,4 +1,4 @@
-# Floast Service 快速开始指南
+# Floatory 快速开始指南
 
 ## 5 分钟快速上手
 
@@ -31,8 +31,8 @@ cargo install tauri-cli
 ### 第二步：获取代码
 
 ```bash
-git clone https://github.com/yourusername/floast_service.git
-cd floast_service
+git clone https://github.com/yourusername/Floatory.git
+cd Floatory
 ```
 
 ### 第三步：安装依赖
@@ -62,7 +62,7 @@ cargo tauri dev
 ## 项目结构概览
 
 ```
-floast_service/
+Floatory/
 ├── src-tauri/          # Rust 后端
 │   ├── src/            # 源代码
 │   ├── Cargo.toml      # Rust 依赖

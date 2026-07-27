@@ -55,8 +55,8 @@ unsafe extern "system" fn enum_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
         return BOOL(1);
     }
 
-    // 排除 Floast 自身窗口
-    if title.starts_with("Floast") {
+    // 排除 Floatory 自身窗口
+    if title.starts_with("Floatory") {
         return BOOL(1);
     }
 

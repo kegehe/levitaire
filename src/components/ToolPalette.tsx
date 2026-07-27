@@ -6,8 +6,11 @@ import Icon from "./Icon";
 import {
   FLOATING_TOOLS,
   CATEGORY_LABELS,
+  BACKEND_TOOLS,
   getEnabledTools,
   setEnabledTools,
+  getAutostartTools,
+  setAutostartTools,
   type FloatingTool,
   type ToolCategory,
 } from "../tools/registry";
@@ -24,6 +27,9 @@ function ToolPalette() {
   // ref 镜像最新 enabledIds，供异步失败回滚读取当前真值，避免闭包陈旧
   const enabledIdsRef = useRef(enabledIds);
   enabledIdsRef.current = enabledIds;
+  const [autostartIds, setAutostartIdsState] = useState<string[]>(() => getAutostartTools());
+  const autostartIdsRef = useRef(autostartIds);
+  autostartIdsRef.current = autostartIds;
   // 标记是否有后端 toggle 写入正在进行，syncFromBackend 在此期间跳过，
   // 避免后端 getter 读到 toggle 前旧值而覆盖乐观更新（窄窗口竞态）
   const pendingToggle = useRef(0);
@@ -33,7 +39,7 @@ function ToolPalette() {
 
   // 同步主题（palette 是独立窗口）
   useLayoutEffect(() => {
-    const theme = localStorage.getItem("floast-theme") || "light";
+    const theme = localStorage.getItem("floatory-theme") || "light";
     document.documentElement.setAttribute("data-theme", theme);
     // 透明背景需逐窗口设置（与 FloatingOrb 同理，避免污染 settings 全局规则）
     document.documentElement.style.background = "transparent";
@@ -47,9 +53,9 @@ function ToolPalette() {
   }, []);
 
   useEffect(() => {
-    const un = listen<string>("floast-theme-changed", (e) => {
+    const un = listen<string>("floatory-theme-changed", (e) => {
       document.documentElement.setAttribute("data-theme", e.payload);
-      localStorage.setItem("floast-theme", e.payload);
+      localStorage.setItem("floatory-theme", e.payload);
     });
     return () => {
       un.then((fn) => fn());
@@ -63,26 +69,22 @@ function ToolPalette() {
     // 有 toggle 写入 inflight 时跳过：此时后端 getter 可能尚未反映本次写入，
     // 用旧值覆盖会回退乐观更新。等 toggle 落定后下次获焦会重新同步。
     if (pendingToggle.current > 0) return;
-    const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string }> = [
-      { id: "text-toolbar", getter: "get_text_toolbar_enabled" },
-      { id: "screenshot", getter: "get_screenshot_enabled" },
-      { id: "voice-input", getter: "get_stt_enabled" },
-      { id: "system-monitor", getter: "get_system_monitor_enabled" },
-      { id: "recording", getter: "get_recording_enabled" },
-    ];
-    Promise.all(
-      BACKEND_TOOLS.map((t) =>
-        invoke<boolean>(t.getter)
-          .then((enabled) => ({ id: t.id, enabled }))
-          .catch(() => null),
+    Promise.all([
+      Promise.all(
+        BACKEND_TOOLS.map((t) =>
+          invoke<boolean>(t.getter)
+            .then((enabled) => ({ id: t.id, enabled }))
+            .catch(() => null),
+        ),
       ),
-    ).then((results) => {
+      invoke<string[]>("get_tools_autostart").catch(() => null),
+    ]).then(([results, autostartResult]) => {
       const valid = results.filter((r): r is { id: string; enabled: boolean } => r !== null);
-      if (valid.length === 0) {
-        console.warn("syncFromBackend: 两个后端命令均失败，保持 localStorage 状态");
+      if (valid.length === 0 && autostartResult === null) {
+        console.warn("syncFromBackend: 后端命令均失败，保持 localStorage 状态");
         return;
       }
-      // 在 updater 外派生 next，避免在 state updater 内产生副作用（localStorage 写入）
+      // 同步启用状态
       const prev = enabledIdsRef.current;
       let next = prev;
       for (const { id, enabled } of valid) {
@@ -93,6 +95,17 @@ function ToolPalette() {
       setEnabledIds(next);
       setEnabledTools(next);
       enabledIdsRef.current = next;
+
+      // 同步自启动状态
+      if (autostartResult !== null) {
+        // 自启动列表中只保留有效且已启用的工具
+        const allIdSet = new Set(FLOATING_TOOLS.map((t) => t.id));
+        const enabledSet = new Set(next);
+        const validAutostart = autostartResult.filter((id) => allIdSet.has(id) && enabledSet.has(id));
+        setAutostartIdsState(validAutostart);
+        setAutostartTools(validAutostart);
+        autostartIdsRef.current = validAutostart;
+      }
     });
   }, []);
 
@@ -153,6 +166,26 @@ function ToolPalette() {
     setEnabledIds(next);
     setEnabledTools(next);
     enabledIdsRef.current = next;
+
+    // 禁用工具时联动清除自启动标记（先记住旧值，以便启用回滚时恢复）
+    const prevAutostart = autostartIds;
+    let nextAutostart = autostartIds;
+    if (wasEnabled && autostartIds.includes(id)) {
+      nextAutostart = autostartIds.filter((x) => x !== id);
+      setAutostartIdsState(nextAutostart);
+      setAutostartTools(nextAutostart);
+      autostartIdsRef.current = nextAutostart;
+      // 独立计数，避免 set_*_enabled 完成后、set_tools_autostart 完成前
+      // syncFromBackend 读取后端旧自启动值覆盖乐观更新
+      pendingToggle.current += 1;
+      invoke("set_tools_autostart", { ids: nextAutostart })
+        .then(() => { pendingToggle.current = Math.max(0, pendingToggle.current - 1); })
+        .catch((err) => {
+          console.error("Failed to sync autostart to backend:", err);
+          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
+        });
+    }
+
     // 工具级开关同步到后端：仅启用时对应行为才触发
     // screenshot：仅启用时全局热键才触发
     // text-toolbar：仅启用时拖拽选中文本才弹出工具栏
@@ -169,6 +202,16 @@ function ToolPalette() {
       setEnabledIds(restored);
       setEnabledTools(restored);
       enabledIdsRef.current = restored;
+      // 禁用失败时恢复被联动清除的自启动标记
+      if (!enabled && nextAutostart !== prevAutostart) {
+        setAutostartIdsState(prevAutostart);
+        setAutostartTools(prevAutostart);
+        autostartIdsRef.current = prevAutostart;
+        // 同步恢复后端自启动值，避免下次 syncFromBackend 用后端旧值覆盖
+        invoke("set_tools_autostart", { ids: prevAutostart }).catch((err) => {
+          console.error("Failed to restore autostart on rollback:", err);
+        });
+      }
     };
     if (id === "screenshot") {
       invoke("set_screenshot_enabled", { enabled })
@@ -206,6 +249,29 @@ function ToolPalette() {
           rollback();
         });
     }
+  };
+
+  const handleToggleAutostart = (id: string) => {
+    // 仅已启用的工具可设置自启动
+    if (!enabledIds.includes(id)) return;
+    const has = autostartIds.includes(id);
+    const prevAutostart = autostartIds;
+    const next = has ? prevAutostart.filter((x) => x !== id) : [...prevAutostart, id];
+    setAutostartIdsState(next);
+    setAutostartTools(next);
+    autostartIdsRef.current = next;
+    // 标记 inflight，避免窗口获焦触发的 syncFromBackend 读到后端旧值覆盖乐观更新
+    pendingToggle.current += 1;
+    invoke("set_tools_autostart", { ids: next })
+      .then(() => { pendingToggle.current = Math.max(0, pendingToggle.current - 1); })
+      .catch((err) => {
+        console.error("Failed to sync autostart to backend:", err);
+        pendingToggle.current = Math.max(0, pendingToggle.current - 1);
+        // 回滚到变更前的值
+        setAutostartIdsState(prevAutostart);
+        setAutostartTools(prevAutostart);
+        autostartIdsRef.current = prevAutostart;
+      });
   };
 
   const handleActivate = async (tool: FloatingTool) => {
@@ -299,6 +365,7 @@ function ToolPalette() {
             <div className="palette-grid">
               {tools.map((tool) => {
                 const enabled = enabledIds.includes(tool.id);
+                const autostart = autostartIds.includes(tool.id);
                 return (
                   <div
                     className={`palette-card ${enabled ? "is-enabled" : ""} ${activating ? "is-busy" : ""}`}
@@ -313,6 +380,20 @@ function ToolPalette() {
                     <div className="palette-card-text">
                       <div className="palette-card-name">{tool.name}</div>
                     </div>
+                    {enabled && (
+                      <button
+                        className={`palette-autostart ${autostart ? "is-on" : ""}`}
+                        aria-label={autostart ? "取消自启动" : "自启动"}
+                        aria-pressed={autostart}
+                        title={autostart ? "取消自启动" : "启动时自动打开"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleAutostart(tool.id);
+                        }}
+                      >
+                        <Icon name="Rocket" size={14} />
+                      </button>
+                    )}
                     <button
                       className={`palette-toggle ${enabled ? "is-on" : ""}`}
                       aria-label={enabled ? "禁用" : "启用"}

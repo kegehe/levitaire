@@ -210,6 +210,41 @@
   transform: translateX(16px);
 }
 
+.palette-autostart {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-fg-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+  padding: 0;
+}
+
+.palette-autostart:hover {
+  background: var(--button-hover-bg);
+  color: var(--color-fg);
+}
+
+.palette-autostart.is-on {
+  color: var(--color-accent);
+}
+
+.palette-autostart.is-on:hover {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent-hover);
+}
+
+.palette-autostart:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 .palette-empty {
   text-align: center;
   color: var(--color-fg-subtle);

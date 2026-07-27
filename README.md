@@ -1,26 +1,47 @@
-# Floast Service
+# Floatory
 
-一个基于 Rust + Tauri 的 Windows 悬浮工具栏应用。在任意应用中选中文字后，自动在选中区域下方显示悬浮工具栏，提供剪切、复制等快捷操作。
+一个基于 Rust + Tauri 的 Windows 悬浮工具集应用。通过悬浮球快速唤起截图、录屏、OCR、语音输入、系统监控、AI 文本优化等多种效率工具。
 
 ## ✨ 功能特性
 
-- 🔍 **全局文字选择检测** — 通过 Windows 鼠标钩子监听页面选中文字
+### 📋 文字工具
+- 🔍 **全局文字选择检测** — 通过 Windows 全局低级鼠标钩子（WH_MOUSE_LL）和键盘钩子（WH_KEYBOARD_LL）监听选中文字
 - 📋 **悬浮工具栏** — 在选中文字下方自动弹出，透明无边框，始终置顶
 - ✂️ **复制** — 快捷执行剪贴板操作
 - 🤖 **AI 文本优化** — 润色、正式化、简洁化、翻译，支持 Anthropic 和 OpenAI 兼容 API
-- 💫 **悬浮球** — 可拖拽的悬浮快捷入口，始终置顶
+- 📱 **二维码生成** — 将选中文字转为二维码
+
+### 📷 屏幕工具
+- 🖼️ **区域截图** — 拖框截取屏幕任意区域，支持多显示器虚拟桌面
+- 📌 **钉图** — 截图后钉在桌面最上层，可拖拽、缩放，用作临时参考
+- 🎥 **GIF / 视频录制** — 录制屏幕区域为 GIF 动图或 MP4 视频（通过 ffmpeg 编码）
+- 🔤 **离线 OCR** — 双引擎离线文字识别（Windows 系统 OCR + PaddleOCR ONNX），截图后可一键提取文字
+- ✏️ **截图标注** — 截图后可绘制箭头、矩形、文字标注
+
+### 🎤 语音工具
+- 🎙️ **语音输入 (STT)** — 录音并云端识别为文字，自动粘贴到当前焦点窗口（支持 OpenAI 兼容 STT API）
+- 🔊 **语音朗读 (TTS)** — 选中文字后朗读，支持暂停/继续/停止，基于 Windows 内置语音合成
+
+### 📊 系统工具
+- 📈 **系统监控** — 常驻悬浮显示 CPU、内存、网络、磁盘、电池实时状态曲线
+- ⌨️ **全局热键** — 三槽位独立热键：截图热键、语音输入热键、录屏热键（Win32 RegisterHotKey）
+- 💫 **悬浮球** — 可拖拽的悬浮快捷入口，始终置顶，点击展开工具面板
+
+### ⚙️ 系统特性
 - 🔒 **API Key 加密存储** — 使用 Windows DPAPI 加密保护 API 密钥
 - 🚀 **开机自启动** — 通过 Windows 注册表实现
-- 🎨 **主题支持** — 内置浅色 / 深色主题切换（设置页面）
-- ⚡ **高性能** — Rust 原生编译，内存占用约 35MB
+- 🎨 **主题支持** — 内置浅色 / 深色主题切换
+- ⚡ **高性能** — Rust 原生编译，GDI 截屏、WinRT 语音/OCR 全链路原生调用
 
 ## 🛠️ 技术栈
 
 | 层级 | 技术 | 说明 |
 |------|------|------|
-| 后端 | Rust + windows-rs 0.61 | 系统钩子、剪贴板、UI Automation |
-| 前端 | React 18 + TypeScript + Vite | 工具栏 UI |
-| 框架 | Tauri 2.x | 前后端桥接、多窗口管理 |
+| 后端 | Rust + windows-rs 0.61 | 系统钩子、GDI 截屏、WinRT OCR/TTS、PDH 性能计数、DPAPI 加密 |
+| 深度学习 | ONNX Runtime (ort 2.0.0-rc.12) | PaddleOCR 本地推理引擎（可选，无模型文件时自动回退 Windows OCR） |
+| 前端 | React 18 + TypeScript + Vite + Tailwind CSS 4 | 工具栏 UI、悬浮球、设置页 |
+| 框架 | Tauri 2.x | 前后端桥接、多窗口管理、托盘图标 |
+| 编码 | ffmpeg | MP4 视频编码（通过子进程 pipe） |
 | 构建 | Cargo + npm | 依赖管理与构建 |
 
 ## 📦 环境要求
@@ -30,13 +51,15 @@
 - [Node.js](https://nodejs.org/) 18+
 - [Tauri CLI](https://tauri.app/) 2.x
 
+> **注意**：PaddleOCR 依赖 ONNX Runtime (`onnxruntime.dll`, ~20.5MB)，已纳入仓库版本控制（`src-tauri/libs/`）。使用 `load-dynamic` 模式，运行时动态加载，无需联网下载。构建产物中 DLL 会自动复制到安装目录。若仅使用 Windows 系统 OCR，可在 `Cargo.toml` 中移除 `ort` 依赖以减小构建体积和内存占用。
+
 ## 🚀 快速开始
 
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/yourusername/floast_service.git
-cd floast_service
+git clone https://github.com/yourusername/Floatory.git
+cd Floatory
 ```
 
 ### 2. 安装依赖
@@ -59,6 +82,7 @@ cargo tauri dev
 - Vite 开发服务器运行在 `http://localhost:1420`
 - Tauri 窗口自动加载前端页面
 - 系统托盘出现应用图标
+- 悬浮球显示在屏幕中央
 
 ### 4. 构建发布版本
 
@@ -70,61 +94,88 @@ cargo tauri build
 
 ## 📖 使用方法
 
-1. 启动应用后，系统托盘出现 Floast 图标
-2. 在任意应用中用鼠标选中一段文字
-3. 松开鼠标后，悬浮工具栏自动出现在选中区域下方
-4. 点击 **✂️ 剪切** 或 **📋 复制** 执行操作
-5. 点击工具栏外部区域自动隐藏
+1. 启动应用后，系统托盘出现 Floatory 图标，悬浮球显示在屏幕中央
+2. **文字工具**：在任意应用中选中文字，自动弹出工具栏（复制、翻译、AI 优化、二维码、语音朗读）
+3. **截图工具**：点击悬浮球 → 截图，拖框选取区域后可复制、保存、OCR 识别或钉在桌面
+4. **录屏工具**：点击悬浮球 → 录屏，选择 GIF 或视频模式，拖框选区后开始录制
+5. **语音输入**：点击悬浮球 → 语音输入，录音后自动识别并粘贴文字
+6. **系统监控**：点击悬浮球 → 系统监控，显示实时性能面板
+7. **全局热键**：在设置中配置三类快捷键，无需点击悬浮球即可快速触发
 
 ## 📁 项目结构
 
 ```
-floast_service/
-├── src-tauri/                        # Rust 后端
+Floatory/
+├── src-tauri/                              # Rust 后端
 │   ├── src/
-│   │   ├── main.rs                   # 入口：初始化管理器、启动钩子
-│   │   ├── commands.rs               # Tauri 命令（get_selection, copy_text 等）
-│   │   ├── hooks/                    # Windows 鼠标钩子
-│   │   │   ├── mod.rs                # HookManager
-│   │   │   └── mouse.rs             # WH_MOUSE_LL 全局钩子实现
-│   │   ├── automation/               # 文字选择检测
-│   │   │   ├── mod.rs                # SelectionInfo / Rect / Point 结构体
-│   │   │   └── selection.rs          # get_selection / get_cursor_position
-│   │   ├── clipboard/                # 剪贴板管理
-│   │   │   ├── mod.rs                # ClipboardManager
-│   │   │   └── manager.rs            # copy / cut / history
-│   │   ├── config/                   # 配置管理（含 DPAPI 加密存储、开机自启动）
-│   │   │   └── mod.rs                # ConfigManager / AiConfig / auto_start
-│   │   ├── ai/                       # AI 服务（支持 Anthropic / OpenAI 兼容 API）
-│   │   │   └── mod.rs                # AiService
-│   │   └── utils/                    # 工具模块
+│   │   ├── main.rs                         # 入口：初始化各模块、注册命令
+│   │   ├── commands.rs                     # Tauri 命令（103 个 #[tauri::command]）
+│   │   ├── hooks/
+│   │   │   ├── mod.rs                      # HookManager（Tauri managed state 占位）
+│   │   │   ├── mouse.rs                    # WH_MOUSE_LL 全局鼠标钩子
+│   │   │   ├── keyboard.rs                 # WH_KEYBOARD_LL 全局键盘钩子
+│   │   │   └── hotkey.rs                   # Win32 RegisterHotKey 全局热键
+│   │   ├── automation/
+│   │   │   ├── mod.rs                      # SelectionInfo / Rect / Point 结构体
+│   │   │   ├── selection.rs               # 多策略选区获取（UIA / Win32 / 剪贴板 / OCR 回退）
+│   │   │   ├── clipboard_selection.rs     # 剪贴板回退选区
+│   │   │   └── ocr_selection.rs           # OCR 回退选区
+│   │   ├── clipboard/
+│   │   │   ├── mod.rs                      # ClipboardManager
+│   │   │   └── manager.rs                 # copy / cut / history
+│   │   ├── screenshot/
+│   │   │   ├── mod.rs                      # GDI 截屏（多显示器支持）、PNG 编码
+│   │   │   └── pin.rs                     # 钉图窗口管理
+│   │   ├── ocr/
+│   │   │   ├── mod.rs                      # OcrService（引擎管理、分块、线程隔离）
+│   │   │   ├── engine.rs                   # OcrEngine trait 统一接口
+│   │   │   ├── windows_ocr.rs             # Windows.Media.Ocr 引擎
+│   │   │   └── paddle_ocr.rs             # PaddleOCR ONNX 引擎
+│   │   ├── recording/
+│   │   │   ├── mod.rs                      # RecordingState（GIF / 视频录制循环）
+│   │   │   ├── gif_encoder.rs             # 流式 GIF 编码
+│   │   │   ├── video_encoder.rs           # ffmpeg pipe MP4 编码
+│   │   │   └── window_detect.rs           # 窗口检测（录屏区域识别）
+│   │   ├── tts/
+│   │   │   └── mod.rs                      # WinRT SpeechSynthesizer 语音合成
+│   │   ├── stt/
+│   │   │   └── mod.rs                      # 云端语音识别（OpenAI 兼容 API）
+│   │   ├── monitor/
+│   │   │   └── mod.rs                      # 系统监控（CPU/内存/网络/磁盘/电池）
+│   │   ├── ai/
+│   │   │   └── mod.rs                      # AI 服务（Anthropic / OpenAI 兼容 API）
+│   │   ├── config/
+│   │   │   └── mod.rs                      # ConfigManager / AiConfig / 自启动
+│   │   └── utils/
 │   │       ├── mod.rs
-│   │       ├── logger.rs             # 日志（debug 仅输出）
-│   │       └── crypto.rs             # DPAPI 加解密
+│   │       ├── logger.rs                   # 日志
+│   │       └── crypto.rs                   # DPAPI 加解密
 │   ├── Cargo.toml
-│   ├── tauri.conf.json               # 窗口 / 托盘 / 构建配置
-│   └── icons/                        # 应用图标
+│   ├── tauri.conf.json                     # 窗口 / 托盘 / CSP / 构建配置
+│   └── icons/                              # 应用图标
 │
-├── src/                              # 前端（React + TypeScript）
-│   ├── main.tsx                      # 入口
-│   ├── App.tsx                       # 路由：toolbar / orb / settings 窗口
-│   ├── types.ts                      # 类型定义
+├── src/                                    # 前端（React + TypeScript）
+│   ├── main.tsx                            # 入口
+│   ├── App.tsx                             # 路由：toolbar / orb / settings 窗口
+│   ├── types.ts                            # 类型定义
 │   ├── components/
-│   │   ├── FloatingToolbar.tsx       # 悬浮工具栏主组件
-│   │   ├── FloatingOrb.tsx           # 悬浮球组件
-│   │   ├── ToolbarButton.tsx         # 工具栏按钮组件
-│   │   ├── Icon.tsx                  # 图标组件（基于 lucide-react）
-│   │   ├── Settings.tsx              # 设置页面
-│   │   └── *.css                     # 组件样式
-│   ├── hooks/
-│   │   └── useAiOptimize.ts          # AI 优化 Hook
-│   ├── constants/
-│   │   └── optimizeModes.ts          # AI 优化模式定义
+│   │   ├── FloatingOrb.tsx                 # 悬浮球组件
+│   │   ├── ToolPalette.tsx                 # 工具面板（悬浮球展开）
+│   │   ├── ToolbarButton.tsx              # 工具栏按钮组件
+│   │   ├── Icon.tsx                        # 图标组件（基于 lucide-react）
+│   │   └── Settings.tsx                    # 设置页面
+│   ├── tools/
+│   │   ├── registry.ts                     # 工具注册表（FLOATING_TOOLS）
+│   │   ├── text-toolbar/                   # 文字工具栏
+│   │   ├── screenshot/                     # 截图工具 + 标注
+│   │   ├── recording/                      # 录屏工具
+│   │   ├── voice-input/                    # 语音输入
+│   │   └── system-monitor/                 # 系统监控
 │   └── styles/
-│       ├── global.css                # 全局 CSS
-│       └── tokens.css                # CSS 变量
+│       ├── global.css                      # 全局 CSS
+│       └── tokens.css                      # CSS 变量
 │
-├── docs/                             # 设计文档
+├── docs/                                   # 设计文档
 ├── package.json
 ├── vite.config.ts
 ├── tsconfig.json
@@ -134,30 +185,38 @@ floast_service/
 ## 🏗️ 架构概览
 
 ```
-┌─────────────────────────────────────────────┐
-│           前端层 (React + WebView)          │
-│   FloatingToolbar ← listen("mouse-up")      │
-├─────────────────────────────────────────────┤
-│           桥接层 (Tauri invoke / emit)       │
-├─────────────────────────────────────────────┤
-│           后端层 (Rust)                      │
-│   Mouse Hook ──mpsc──→ emit("mouse-up")     │
-│   UI Automation ──→ get_selection            │
-│   Clipboard ──→ copy / cut                  │
-│   AI Service ──→ call_ai                    │
-└─────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│              前端层 (React + WebView)                  │
+│   FloatingOrb → ToolPalette → 各工具组件               │
+├───────────────────────────────────────────────────────┤
+│              桥接层 (Tauri invoke / emit / listen)      │
+├───────────────────────────────────────────────────────┤
+│              后端层 (Rust)                              │
+│   Mouse Hook ──→ emit("mouse-up")                      │
+│   UI Automation ──→ get_selection                      │
+│   GDI ──→ capture_screen_region                        │
+│   WinRT OCR ──→ ocr_region                             │
+│   WinRT TTS ──→ tts_speak / pause / resume             │
+│   ffmpeg pipe ──→ start_recording / stop_recording     │
+│   STT Cloud API ──→ stt_transcribe                     │
+│   sysinfo + PDH ──→ show_monitor_window                │
+│   RegisterHotKey ──→ 截图 / 语音 / 录屏 热键            │
+│   AI Service ──→ call_ai                               │
+└───────────────────────────────────────────────────────┘
 ```
 
 ### 核心流程
 
 1. **鼠标钩子** (`hooks/mouse.rs`)：通过 `SetWindowsHookExW` 注册全局低级鼠标钩子，监听 `WM_LBUTTONUP` 事件
 2. **事件传递**：钩子回调通过 `std::sync::mpsc` 将事件发送到后台线程，由后台线程调用 `app_handle.emit("mouse-up")` 通知前端
-3. **前端响应**：`FloatingToolbar` 组件监听 `mouse-up` 事件，调用 `get_selection` 命令获取选中文字，显示工具栏
-4. **操作执行**：用户点击按钮后，前端调用 `copy_text` 或 `cut_text` 命令
+3. **前端响应**：`ToolPalette` 中的文字工具栏监听 `mouse-up` 事件，调用 `get_selection` 命令获取选中文字，显示工具栏
+4. **悬浮球**：`FloatingOrb` 始终置顶显示，点击展开 `ToolPalette` 工具面板，选择截图/录屏/语音输入/系统监控等工具
+5. **全局热键**：独立线程创建仅消息窗口，通过 `RegisterHotKey` 注册系统级快捷键，触发时直接调用后端功能无需经过前端
+6. **OCR 引擎**：双引擎架构（Windows 系统 OCR + PaddleOCR ONNX），自动选择或手动切换，大图自动分块+COM 线程隔离
 
 ## 🔌 AI 配置
 
-Floast 支持两种 AI API 格式：
+Floatory 支持两种 AI API 格式：
 
 ### Anthropic（默认）
 - **Base URL**: `https://api.anthropic.com`
@@ -171,7 +230,11 @@ Floast 支持两种 AI API 格式：
 
 在设置页面的"API 类型"下拉框中选择对应类型，填写 API Key、Base URL 和 Model 即可。
 
-API Key 使用 Windows DPAPI 加密存储在 `%APPDATA%/floast/config.json` 中，绑定当前用户，不可跨机器迁移。
+API Key 使用 Windows DPAPI 加密存储在 `%APPDATA%/floatory/config.json` 中，绑定当前用户，不可跨机器迁移。
+
+### STT 语音识别配置
+
+语音输入使用 OpenAI 兼容的 STT API（`/v1/audio/transcriptions`），支持任何兼容平台（OpenAI、Groq、DeepInfra 等），在设置页面单独配置 API Key、Base URL 和 Model。
 
 ## 📚 相关文档
 
@@ -181,4 +244,4 @@ API Key 使用 Windows DPAPI 加密存储在 `%APPDATA%/floast/config.json` 中�
 
 ## 📄 许可证
 
-[MIT License](LICENSE) © 2026 Floast Service
+[MIT License](LICENSE) © 2026 Floatory

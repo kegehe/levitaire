@@ -226,9 +226,10 @@ src-tauri/target/
 # Tauri
 src-tauri/binaries/
 src-tauri/gen/
+src-tauri/libs/
 
 # Debug log (written by app at runtime)
-floast-debug.log
+floatory-debug.log
 
 # Screenshots (不应入库)
 screenshot.png

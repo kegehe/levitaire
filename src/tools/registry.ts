@@ -93,8 +93,20 @@ export const CATEGORY_LABELS: Record<ToolCategory, string> = {
   system: "系统工具",
 };
 
-const STORAGE_KEY = "floast-tools-enabled";
-const LEGACY_KEY = "floast-toolbar-features";
+const STORAGE_KEY = "floatory-tools-enabled";
+const AUTOSTART_KEY = "floatory-tools-autostart";
+const LEGACY_KEY = "floatory-toolbar-features";
+
+/** 工具启用状态的后端 getter 命令映射。
+ * 用于前端与后端 config.json 真值同步（ToolPalette、FloatingOrb 自启动）。
+ * 新增工具时在此登记一项即可，两处调用方自动生效。 */
+export const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string }> = [
+  { id: "text-toolbar", getter: "get_text_toolbar_enabled" },
+  { id: "screenshot", getter: "get_screenshot_enabled" },
+  { id: "voice-input", getter: "get_stt_enabled" },
+  { id: "system-monitor", getter: "get_system_monitor_enabled" },
+  { id: "recording", getter: "get_recording_enabled" },
+];
 
 /** 获取启用的工具 ID 列表 */
 export function getEnabledTools(): string[] {
@@ -102,7 +114,7 @@ export function getEnabledTools(): string[] {
   const defaults = FLOATING_TOOLS.filter((t) => t.defaultEnabled).map((t) => t.id);
   const stored = localStorage.getItem(STORAGE_KEY);
 
-  // 旧版迁移：原 floast-toolbar-features 存的是文字工具栏内部功能 ID（copy/search/...）
+  // 旧版迁移：原 floatory-toolbar-features 存的是文字工具栏内部功能 ID（copy/search/...）
   // 与工具级开关语义不同，迁移时按 defaultEnabled 初始化
   if (!stored && localStorage.getItem(LEGACY_KEY)) {
     setEnabledTools(defaults);
@@ -133,4 +145,38 @@ export function getEnabledTools(): string[] {
 /** 保存启用的工具 ID 列表 */
 export function setEnabledTools(ids: string[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+}
+
+/** 获取自启动工具 ID 列表（应用启动时自动打开窗口的工具） */
+export function getAutostartTools(): string[] {
+  const allIdSet = new Set(FLOATING_TOOLS.map((t) => t.id));
+  const stored = localStorage.getItem(AUTOSTART_KEY);
+  if (stored) {
+    try {
+      const parsed: string[] = JSON.parse(stored);
+      // 过滤掉已移除工具的残留 ID
+      const valid = parsed.filter((id) => allIdSet.has(id));
+      if (valid.length !== parsed.length) {
+        setAutostartTools(valid);
+      }
+      return valid;
+    } catch {
+      // fallthrough
+    }
+  }
+  return [];
+}
+
+/** 保存自启动工具 ID 列表 */
+export function setAutostartTools(ids: string[]): void {
+  localStorage.setItem(AUTOSTART_KEY, JSON.stringify(ids));
+}
+
+/** 切换某个工具的自启动状态，返回切换后的值 */
+export function toggleAutostart(id: string): boolean {
+  const current = getAutostartTools();
+  const has = current.includes(id);
+  const next = has ? current.filter((x) => x !== id) : [...current, id];
+  setAutostartTools(next);
+  return !has;
 }

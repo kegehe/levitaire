@@ -4,10 +4,14 @@ import {
   CATEGORY_LABELS,
   getEnabledTools,
   setEnabledTools,
+  getAutostartTools,
+  setAutostartTools,
+  toggleAutostart,
 } from "./registry";
 
-const STORAGE_KEY = "floast-tools-enabled";
-const LEGACY_KEY = "floast-toolbar-features";
+const STORAGE_KEY = "floatory-tools-enabled";
+const AUTOSTART_KEY = "floatory-tools-autostart";
+const LEGACY_KEY = "floatory-toolbar-features";
 
 beforeEach(() => {
   localStorage.clear();
@@ -117,5 +121,60 @@ describe("setEnabledTools", () => {
   it("持久化到 localStorage", () => {
     setEnabledTools(["a", "b"]);
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual(["a", "b"]);
+  });
+});
+
+describe("getAutostartTools", () => {
+  it("首次使用：返回空数组", () => {
+    const result = getAutostartTools();
+    expect(result).toEqual([]);
+  });
+
+  it("返回存储的自启动工具 ID 列表", () => {
+    localStorage.setItem(AUTOSTART_KEY, JSON.stringify(["system-monitor", "voice-input"]));
+    const result = getAutostartTools();
+    expect(result.sort()).toEqual(["system-monitor", "voice-input"]);
+  });
+
+  it("过滤已移除工具的残留 ID", () => {
+    localStorage.setItem(AUTOSTART_KEY, JSON.stringify(["system-monitor", "removed-tool"]));
+    const result = getAutostartTools();
+    expect(result).toEqual(["system-monitor"]);
+    expect(result).not.toContain("removed-tool");
+  });
+
+  it("损坏的 JSON 回退到空数组", () => {
+    localStorage.setItem(AUTOSTART_KEY, "not-json{{{");
+    const result = getAutostartTools();
+    expect(result).toEqual([]);
+  });
+});
+
+describe("setAutostartTools", () => {
+  it("持久化到 localStorage", () => {
+    setAutostartTools(["system-monitor"]);
+    expect(JSON.parse(localStorage.getItem(AUTOSTART_KEY)!)).toEqual(["system-monitor"]);
+  });
+});
+
+describe("toggleAutostart", () => {
+  it("添加自启动标记并返回 true", () => {
+    const result = toggleAutostart("system-monitor");
+    expect(result).toBe(true);
+    expect(getAutostartTools()).toContain("system-monitor");
+  });
+
+  it("移除自启动标记并返回 false", () => {
+    setAutostartTools(["system-monitor"]);
+    const result = toggleAutostart("system-monitor");
+    expect(result).toBe(false);
+    expect(getAutostartTools()).not.toContain("system-monitor");
+  });
+
+  it("多次 toggle 交替生效", () => {
+    expect(toggleAutostart("voice-input")).toBe(true);
+    expect(getAutostartTools()).toContain("voice-input");
+    expect(toggleAutostart("voice-input")).toBe(false);
+    expect(getAutostartTools()).not.toContain("voice-input");
   });
 });

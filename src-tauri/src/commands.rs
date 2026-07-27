@@ -183,8 +183,8 @@ pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
                 "settings",
                 WebviewUrl::App("index.html".into()),
             )
-            .title("Floast Settings")
-            .inner_size(600.0, 650.0)
+            .title("Floatory Settings")
+            .inner_size(780.0, 560.0)
             .center()
             .visible(false)
             .build()
@@ -569,7 +569,7 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
                 "palette",
                 WebviewUrl::App("index.html".into()),
             )
-            .title("Floast Tools")
+            .title("Floatory Tools")
             .inner_size(360.0, 340.0)
             .resizable(false)
             .transparent(true)
@@ -2355,7 +2355,7 @@ pub async fn save_video_file(
         .canonicalize()
         .map_err(|e| format!("读取视频文件失败: {}", e))?;
     let recording_temp_dir = std::env::temp_dir()
-        .join("floast-recording")
+        .join("floatory-recording")
         .canonicalize()
         .map_err(|e| format!("读取录屏临时目录失败: {}", e))?;
     if !source.starts_with(&recording_temp_dir) {
@@ -2566,6 +2566,23 @@ pub async fn pick_folder() -> Result<Option<String>, String> {
         let path = f.path();
         path.to_string_lossy().to_string()
     }))
+}
+
+/// 获取自启动工具 ID 列表
+#[tauri::command]
+pub fn get_tools_autostart(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<Vec<String>, String> {
+    config_manager.get_tools_autostart()
+}
+
+/// 设置自启动工具 ID 列表并持久化
+#[tauri::command]
+pub fn set_tools_autostart(
+    ids: Vec<String>,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_tools_autostart(ids)
 }
 
 /// 退出录制选区模式（前端选区取消时调用）

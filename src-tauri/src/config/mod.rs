@@ -108,6 +108,9 @@ pub struct AppConfig {
     /// 截图文件保存路径（目录）。空串表示未设置，每次保存时弹出对话框选择位置
     #[serde(default)]
     pub screenshot_save_path: String,
+    /// 自启动工具 ID 列表（应用启动时自动打开窗口的工具，如 ["system-monitor"]）
+    #[serde(default)]
+    pub tools_autostart: Vec<String>,
 }
 
 fn default_screenshot_enabled() -> bool {
@@ -153,6 +156,7 @@ impl Default for AppConfig {
             recording_config: String::new(),
             recording_save_path: String::new(),
             screenshot_save_path: String::new(),
+            tools_autostart: Vec::new(),
         }
     }
 }
@@ -224,7 +228,7 @@ impl ConfigManager {
     /// 获取配置文件路径
     fn get_config_path() -> PathBuf {
         let data_dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        let app_dir = data_dir.join("floast");
+        let app_dir = data_dir.join("floatory");
         // 确保目录存在
         let _ = fs::create_dir_all(&app_dir);
         app_dir.join("config.json")
@@ -798,12 +802,32 @@ impl ConfigManager {
         }
         self.save_config()
     }
+
+    /// 获取自启动工具 ID 列表
+    pub fn get_tools_autostart(&self) -> Result<Vec<String>, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.tools_autostart.clone())
+    }
+
+    /// 更新自启动工具 ID 列表并持久化
+    pub fn update_tools_autostart(&self, ids: Vec<String>) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.tools_autostart = ids;
+        }
+        self.save_config()
+    }
 }
 
 // ─── 开机自启动（Windows 注册表） ────────────────────────────────
 
 const REG_RUN_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const REG_VALUE_NAME_STR: &str = "FloastService";
+const REG_VALUE_NAME_STR: &str = "FloatoryService";
 
 /// 获取当前可执行文件路径（UTF-16）
 fn get_exe_path_wide() -> Result<Vec<u16>, String> {
@@ -924,6 +948,7 @@ mod tests {
         assert_eq!(config.system_monitor_interval_ms, 1000);
         assert!(!config.stt_enabled);
         assert!(!config.system_monitor_enabled);
+        assert!(config.tools_autostart.is_empty());
     }
 
     #[test]
@@ -975,7 +1000,7 @@ mod tests {
     /// 使用临时目录，不影响真实配置文件
     #[test]
     fn test_config_manager_save_load_encrypted() {
-        let tmp = std::env::temp_dir().join(format!("floast_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("floatory_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1019,7 +1044,7 @@ mod tests {
     /// 测试清空 API Key 时加密字段也被清除
     #[test]
     fn test_config_manager_clear_key_removes_encrypted() {
-        let tmp = std::env::temp_dir().join(format!("floast_test_clear_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("floatory_test_clear_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1081,7 +1106,7 @@ mod tests {
     /// 测试 ConfigManager 持久化 md5_length 的保存与加载
     #[test]
     fn test_config_manager_md5_length_save_load() {
-        let tmp = std::env::temp_dir().join(format!("floast_test_md5_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("floatory_test_md5_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1130,7 +1155,7 @@ mod tests {
     #[test]
     fn test_config_manager_numbering_style_save_load() {
         let tmp =
-            std::env::temp_dir().join(format!("floast_test_numbering_{}", std::process::id()));
+            std::env::temp_dir().join(format!("floatory_test_numbering_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1183,7 +1208,7 @@ mod tests {
     #[test]
     fn test_config_manager_clear_options_save_load() {
         let tmp =
-            std::env::temp_dir().join(format!("floast_test_clearopts_{}", std::process::id()));
+            std::env::temp_dir().join(format!("floatory_test_clearopts_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1235,7 +1260,7 @@ mod tests {
     /// 测试 ConfigManager 持久化 tts_config 的保存与加载
     #[test]
     fn test_config_manager_tts_config_save_load() {
-        let tmp = std::env::temp_dir().join(format!("floast_test_tts_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("floatory_test_tts_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1298,7 +1323,7 @@ mod tests {
     /// 测试 ConfigManager 持久化 stt 字段的保存与加载
     #[test]
     fn test_config_manager_stt_save_load() {
-        let tmp = std::env::temp_dir().join(format!("floast_test_stt_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("floatory_test_stt_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1329,7 +1354,7 @@ mod tests {
     /// 测试 STT API Key 的加密存储与解密加载
     #[test]
     fn test_config_manager_stt_api_key_encrypted() {
-        let tmp = std::env::temp_dir().join(format!("floast_test_sttkey_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("floatory_test_sttkey_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 

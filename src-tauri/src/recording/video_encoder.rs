@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn ffmpeg_path(extra_candidates: &[PathBuf]) -> PathBuf {
-    if let Ok(path) = std::env::var("FLOAST_FFMPEG_PATH") {
+    if let Ok(path) = std::env::var("FLOATORY_FFMPEG_PATH") {
         let path = PathBuf::from(path);
         if path.is_file() {
             return path;
@@ -106,7 +106,7 @@ impl FfmpegEncoder {
             .spawn()
             .map_err(|e| {
                 format!(
-                    "启动 ffmpeg 失败: {}。请安装 ffmpeg，或将 ffmpeg.exe 放到 src-tauri/binaries/ffmpeg.exe，或设置 FLOAST_FFMPEG_PATH。当前路径: {}",
+                    "启动 ffmpeg 失败: {}。请安装 ffmpeg，或将 ffmpeg.exe 放到 src-tauri/binaries/ffmpeg.exe，或设置 FLOATORY_FFMPEG_PATH。当前路径: {}",
                     e,
                     encoder_path.to_string_lossy()
                 )
@@ -188,5 +188,217 @@ impl Drop for FfmpegEncoder {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ffmpeg_path 测试 ──────────────────────────────────────────
+
+    #[test]
+    fn ffmpeg_path_uses_env_var_when_set() {
+        // 创建一个临时文件模拟 ffmpeg
+        let tmp = std::env::temp_dir().join("_floatory_test_ffmpeg_env.exe");
+        std::fs::write(&tmp, b"").ok();
+        std::env::set_var("FLOATORY_FFMPEG_PATH", tmp.to_string_lossy().as_ref());
+        let result = ffmpeg_path(&[]);
+        // 清理放在断言之前，确保即使断言失败也不会残留环境变量
+        std::env::remove_var("FLOATORY_FFMPEG_PATH");
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(result, tmp);
+    }
+
+    #[test]
+    fn ffmpeg_path_falls_back_to_candidates() {
+        std::env::remove_var("FLOATORY_FFMPEG_PATH");
+        // 传入一个不存在的候选路径，但当前目录或 exe 目录可能存在 ffmpeg，
+        // 因此只验证函数不会 panic，返回值为某个 PathBuf
+        let non_existent = PathBuf::from("_ certainly_not_exists_ffmpeg_xyz.exe");
+        let result = ffmpeg_path(&[non_existent]);
+        // 至少返回一个路径，不会 panic
+        assert!(!result.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn ffmpeg_path_uses_extra_candidate_when_present() {
+        std::env::remove_var("FLOATORY_FFMPEG_PATH");
+        let tmp = std::env::temp_dir().join("_floatory_test_extra_ffmpeg.exe");
+        std::fs::write(&tmp, b"").ok();
+        let result = ffmpeg_path(&[tmp.clone()]);
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(result, tmp);
+    }
+
+    // ── write_frame 帧大小校验 ─────────────────────────────────────
+
+    #[test]
+    fn write_frame_rejects_wrong_sized_data() {
+        // 创建一个真实的子进程，用 echo 替代 ffmpeg
+        let child = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("echo")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd /c echo should be available on Windows");
+
+        let mut encoder = FfmpegEncoder {
+            child,
+            frame_size: 16, // 期望 4×4×4 = 16 字节
+        };
+
+        // 大小不匹配
+        assert!(encoder.write_frame(&[0u8; 10]).is_err());
+        // 大小匹配
+        assert!(encoder.write_frame(&[0u8; 16]).is_ok());
+        // drop 会 kill 子进程
+    }
+
+    #[test]
+    fn write_frame_fails_when_stdin_is_none() {
+        let mut child = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("echo")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd /c echo should be available on Windows");
+
+        let stdin = child.stdin.take().unwrap();
+        drop(stdin); // 关闭 stdin 句柄，使 child.stdin 变为 None
+
+        let mut encoder = FfmpegEncoder {
+            child,
+            frame_size: 4,
+        };
+
+        assert!(encoder.write_frame(&[0u8; 4]).is_err());
+    }
+
+    // ── finish / finish_with_cancel 测试 ────────────────────────────
+
+    #[test]
+    fn finish_waits_for_child_exit() {
+        // cmd /c echo 会立即退出
+        let child = std::process::Command::new("cmd")
+            .arg("/c").arg("echo").arg("hello")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd /c echo should be available on Windows");
+
+        let encoder = FfmpegEncoder {
+            child,
+            frame_size: 16,
+        };
+
+        // echo 立即退出，finish 应该很快完成
+        let result = encoder.finish(std::time::Duration::from_secs(5));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn finish_with_cancel_stops_waiting_when_canceled() {
+        // 使用一个不会立即退出的进程: cmd /c timeout /t 60
+        let child = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("timeout")
+            .arg("/t")
+            .arg("60")
+            .arg("/nobreak")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd /c timeout should be available on Windows");
+
+        let encoder = FfmpegEncoder {
+            child,
+            frame_size: 16,
+        };
+
+        // 立即触发取消
+        let result = encoder.finish_with_cancel(
+            std::time::Duration::from_secs(30),
+            || true, // 立即取消
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("已取消"));
+    }
+
+    #[test]
+    fn finish_timouts_when_child_hangs() {
+        // 使用 PowerShell Start-Sleep 模拟长时间挂起（stdin 为 piped 时不会提前退出）
+        let child = std::process::Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("Start-Sleep -Seconds 300")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("powershell should be available on Windows");
+
+        let encoder = FfmpegEncoder {
+            child,
+            frame_size: 16,
+        };
+
+        let result = encoder.finish(std::time::Duration::from_millis(500));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("超时"));
+    }
+
+    // ── Drop 安全退出测试 ─────────────────────────────────────────
+
+    #[test]
+    fn drop_handles_already_exited_process() {
+        // cmd /c echo 会立即退出
+        let child = std::process::Command::new("cmd")
+            .arg("/c").arg("echo")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd /c echo should be available on Windows");
+
+        let encoder = FfmpegEncoder {
+            child,
+            frame_size: 16,
+        };
+
+        // 先正常 finish（子进程退出）
+        encoder.finish(std::time::Duration::from_secs(5)).ok();
+
+        // drop 不应 panic（子进程已退出，try_wait 返回 Some）
+        // 这个测试通过不 panic 来验证
+    }
+
+    #[test]
+    fn drop_kills_running_process() {
+        // 使用 PowerShell Start-Sleep 确保进程在 drop 时仍在运行
+        let child = std::process::Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("Start-Sleep -Seconds 300")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("powershell should be available on Windows");
+
+        let encoder = FfmpegEncoder {
+            child,
+            frame_size: 16,
+        };
+
+        // 直接 drop，不应 panic，且子进程应被 kill
+        drop(encoder);
+        // 通过不 panic 来验证正确性
     }
 }

@@ -1,9 +1,9 @@
 [package]
-name = "floast-service"
+name = "floatory"
 version = "0.1.0"
 edition = "2021"
 description = "Windows 浮窗工具 - 选中文字后显示工具栏"
-authors = ["Floast Service Contributors"]
+authors = ["Floatory Contributors"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -25,7 +25,7 @@ futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "gif"] }
 sysinfo = { version = "0.32", default-features = false, features = ["system", "disk", "network"] }
 thiserror = "1"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "tls-native"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "api-24", "std", "tracing"] }
 ndarray = { version = "0.17", features = ["std"] }
 
 [dependencies.windows]

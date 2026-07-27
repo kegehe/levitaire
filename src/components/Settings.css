@@ -1,59 +1,105 @@
-/* ── Container ───────────────────────────────────────────── */
-.settings-container {
-  padding: var(--space-6);
-  max-width: 600px;
-  margin: 0 auto;
+/* ── Layout: Sidebar + Content ─────────────────────────────── */
+.settings-layout {
+  display: flex;
+  height: 100vh;
   background: var(--settings-bg);
 }
 
-.settings-title {
-  font-size: var(--text-xl);
+/* ── Sidebar ──────────────────────────────────────────────── */
+.settings-sidebar {
+  flex-shrink: 0;
+  width: 160px;
+  display: flex;
+  flex-direction: column;
+  background: var(--settings-sidebar-bg);
+  border-right: 1px solid var(--settings-sidebar-border);
+  padding: var(--space-3) 0;
+  overflow-y: auto;
+}
+
+.settings-sidebar-title {
+  font-size: var(--text-lg);
   font-weight: 600;
-  margin-bottom: var(--space-6);
+  color: var(--settings-heading-color);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  letter-spacing: -0.01em;
+}
+
+/* ── Nav Item ─────────────────────────────────────────────── */
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2-5);
+  width: 100%;
+  padding: var(--space-2-5) var(--space-4);
+  border: none;
+  border-left: 3px solid transparent;
+  background: transparent;
+  color: var(--color-fg-muted);
+  font-size: var(--text-md);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-fast),
+    color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.settings-nav-item:hover {
+  background: var(--settings-nav-hover-bg);
+  color: var(--color-fg);
+}
+
+.settings-nav-item.is-active {
+  border-left-color: var(--settings-nav-active-border);
+  background: var(--settings-nav-active-bg);
+  color: var(--settings-nav-active-color);
+  font-weight: 500;
+}
+
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* ── Content Area ─────────────────────────────────────────── */
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+/* ── Panel ────────────────────────────────────────────────── */
+.settings-panel-title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-5);
   color: var(--settings-heading-color);
   letter-spacing: -0.01em;
 }
 
-/* ── Section (fieldset/section) ──────────────────────────── */
-.settings-section {
-  margin-bottom: var(--space-6);
-  padding: var(--space-4);
-  background: var(--settings-section-bg);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--settings-border);
-  transition: background-color var(--transition-normal),
-    border-color var(--transition-normal);
-  min-width: 0; /* fieldset 元素默认 min-width: min-content，防止宽度溢出 */
+.settings-panel-desc {
+  font-size: var(--text-sm);
+  color: var(--color-fg-subtle);
+  margin-bottom: var(--space-5);
 }
 
-fieldset.settings-section {
-  margin: 0 0 var(--space-6) 0; /* 覆盖 fieldset 默认 margin */
-}
-
-.settings-section-heading {
-  font-size: var(--text-lg);
-  font-weight: 500;
-  margin-bottom: var(--space-4);
-  color: var(--settings-subheading-color);
-  padding: 0;
-  display: block;
-  width: fit-content;
-}
-
-/* ── Item ────────────────────────────────────────────────── */
+/* ── Item ─────────────────────────────────────────────────── */
 .settings-item {
-  margin-bottom: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 .settings-item:last-child {
   margin-bottom: 0;
 }
 
-/* ── Row layout (inline items) ───────────────────────────── */
+/* ── Row layout (inline items) ────────────────────────────── */
 .settings-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-4);
 }
 
 .settings-inline-group {
@@ -62,7 +108,7 @@ fieldset.settings-section {
   gap: var(--space-2);
 }
 
-/* ── Checkbox label ──────────────────────────────────────── */
+/* ── Checkbox label ───────────────────────────────────────── */
 .settings-checkbox-label {
   display: inline-flex;
   align-items: center;
@@ -87,29 +133,32 @@ fieldset.settings-section {
   cursor: pointer;
 }
 
-/* ── Label ───────────────────────────────────────────────── */
+/* ── Label ────────────────────────────────────────────────── */
 .settings-label {
   display: block;
   font-size: var(--text-sm);
   font-weight: 500;
-  margin-bottom: var(--space-1);
+  margin-bottom: var(--space-1-5);
   color: var(--settings-subheading-color);
 }
 
 .settings-inline-group .settings-label {
   display: inline;
   margin-bottom: 0;
+  flex-shrink: 0;
 }
 
-/* ── Select ──────────────────────────────────────────────── */
+/* ── Select ───────────────────────────────────────────────── */
 .settings-select {
-  padding: var(--space-1-5) var(--space-2-5);
+  padding: var(--space-1-5) var(--space-4) var(--space-1-5) var(--space-2-5);
   border: 1px solid var(--settings-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: var(--text-md);
+  font-family: inherit;
   background: var(--settings-input-bg);
   color: var(--settings-heading-color);
   cursor: pointer;
+  min-width: 100px;
   transition: border-color var(--transition-fast),
     box-shadow var(--transition-fast);
 }
@@ -120,16 +169,16 @@ fieldset.settings-section {
   box-shadow: 0 0 0 3px var(--settings-focus-shadow);
 }
 
-/* ── Input ───────────────────────────────────────────────── */
+/* ── Input ────────────────────────────────────────────────── */
 .settings-input {
   width: 100%;
   padding: var(--space-2) var(--space-2-5);
   border: 1px solid var(--settings-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: var(--text-md);
+  font-family: inherit;
   background: var(--settings-input-bg);
   color: var(--settings-heading-color);
-  font-family: inherit;
   transition: border-color var(--transition-fast),
     box-shadow var(--transition-fast);
 }
@@ -153,17 +202,20 @@ fieldset.settings-section {
   flex: 1;
 }
 
-/* ── Toggle button (eye icon) ────────────────────────────── */
+/* ── Toggle button (icon buttons: eye, X, folder) ────────── */
 .settings-toggle-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: var(--space-2);
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border: 1px solid var(--settings-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--settings-input-bg);
   cursor: pointer;
   color: var(--color-fg-muted);
+  flex-shrink: 0;
   transition: background-color var(--transition-fast),
     color var(--transition-fast);
 }
@@ -178,25 +230,26 @@ fieldset.settings-section {
   outline-offset: 1px;
 }
 
-/* ── Save button ─────────────────────────────────────────── */
+/* ── Save button ──────────────────────────────────────────── */
 .settings-save-btn {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1-5);
-  padding: var(--space-2) var(--space-5);
+  padding: var(--space-2-5) var(--space-6);
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--settings-save-btn-bg);
   color: var(--settings-save-btn-text);
   font-size: var(--text-md);
   font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
-  transition: opacity var(--transition-fast),
+  transition: background-color var(--transition-fast),
     transform var(--transition-fast);
 }
 
 .settings-save-btn:hover {
-  opacity: 0.9;
+  background: var(--color-accent-hover);
 }
 
 .settings-save-btn:active {
@@ -218,14 +271,14 @@ fieldset.settings-section {
   animation: spin 0.8s linear infinite;
 }
 
-/* ── Hint text ───────────────────────────────────────────── */
+/* ── Hint text ────────────────────────────────────────────── */
 .settings-hint {
   font-size: var(--text-sm);
   color: var(--color-fg-subtle);
-  margin-bottom: var(--space-3);
+  margin-bottom: var(--space-2);
 }
 
-/* ── Features grid ───────────────────────────────────────── */
+/* ── Features grid ────────────────────────────────────────── */
 .settings-features-grid {
   display: flex;
   flex-wrap: wrap;
@@ -238,7 +291,7 @@ fieldset.settings-section {
   gap: var(--space-1-5);
   padding: var(--space-1-5) var(--space-3);
   border: 1px solid var(--settings-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--settings-input-bg);
   font-size: var(--text-sm);
   color: var(--settings-heading-color);
@@ -262,3 +315,23 @@ fieldset.settings-section {
   display: none;
 }
 
+/* ── Divider ──────────────────────────────────────────────── */
+.settings-divider {
+  border: none;
+  border-top: 1px solid var(--settings-border);
+  margin: var(--space-5) 0;
+}
+
+/* ── Subsection heading ───────────────────────────────────── */
+.settings-subsection-title {
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--settings-subheading-color);
+  margin-bottom: var(--space-3);
+}
+
+/* ── Animation ────────────────────────────────────────────── */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

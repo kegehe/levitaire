@@ -2,4 +2,4 @@
 Hello World! This is an OCR test with English and Chinese mixed text.
 数字测试：1+1=2  3.14159  2024/01/01  100%  温度：25°C  ￥99.99  (555)123-4567
 符号测试：@ # $ % ^ & * ( ) _ + - = [ ] { } < > ? / ! ~
-中英混排：floast service 是一个 Windows 桌面悬浮窗工具，支持 AI、OCR、TTS、STT 等功能。
+中英混排：floatory service 是一个 Windows 桌面悬浮窗工具，支持 AI、OCR、TTS、STT 等功能。

@@ -15,22 +15,68 @@
   cursor: grabbing;
 }
 
-/* ── Visible circle ──────────────────────────────────────── */
+/* ── Glassmorphism circle ──────────────────────────────── */
 .orb-inner {
-  width: 40px;
-  height: 40px;
+  width: var(--orb-size);
+  height: var(--orb-size);
   border-radius: 50%;
   background: var(--orb-bg);
+  border: var(--orb-border);
+  box-shadow: var(--orb-shadow);
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-backdrop-filter: var(--orb-backdrop);
+  backdrop-filter: var(--orb-backdrop);
+  transition: transform 120ms ease, box-shadow 200ms ease, background 200ms ease;
+  animation: orb-breathe 3s ease-in-out infinite;
+}
+
+/* Fallback: 不支持 backdrop-filter 时用更高不透明度模拟 */
+@supports not (backdrop-filter: blur(10px)) {
+  .orb-inner {
+    background: var(--orb-bg-fallback);
+  }
+}
+
+/* ── Icon ──────────────────────────────────────────────── */
+.orb-icon {
+  color: var(--orb-icon-color);
+  stroke: var(--orb-icon-color);
+  stroke-width: 1.2;
+  filter: drop-shadow(0 0.5px 1px oklch(0 0 0 / 0.25));
   transition: transform 120ms ease;
 }
 
-/* ── Hover: enlarge from center ──────────────────────── */
+/* ── Hover: enlarge + glow ──────────────────────────────── */
 .orb-container:hover .orb-inner {
   transform: scale(1.08);
+  box-shadow: var(--orb-shadow-hover);
+  animation: none;
+}
+
+.orb-container:hover .orb-icon {
+  transform: scale(1.05);
 }
 
 /* ── Active: shrink ──────────────────────────────────── */
 .orb-container:active .orb-inner {
   transform: scale(0.95);
+  box-shadow: var(--orb-shadow-active);
+  animation: none;
+}
+
+.orb-container:active .orb-icon {
+  transform: scale(0.92);
+}
+
+/* ── Breathing animation ──────────────────────────────── */
+@keyframes orb-breathe {
+  0%, 100% {
+    box-shadow: var(--orb-shadow-breathe-start);
+  }
+  50% {
+    box-shadow: var(--orb-shadow-breathe-end);
+  }
 }

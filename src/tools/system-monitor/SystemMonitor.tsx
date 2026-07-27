@@ -4,11 +4,7 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
-import {
-  fetchSystemMonitorConfig,
-  type SystemMonitorConfig,
-  type SystemMonitorDisplayMode,
-} from "../../constants/systemMonitorConfig";
+import { fetchSystemMonitorConfig, saveSystemMonitorConfig, type SystemMonitorConfig, type SystemMonitorDisplayMode } from "../../constants/systemMonitorConfig";
 import { formatBytes, formatRate, formatUptime } from "../../utils/formatBytes";
 import "./SystemMonitor.css";
 
@@ -158,7 +154,7 @@ function SystemMonitor() {
 
   // 独立 WebView 需要自行初始化主题和透明背景，避免首帧闪烁。
   useLayoutEffect(() => {
-    const theme = localStorage.getItem("floast-theme") || "light";
+    const theme = localStorage.getItem("floatory-theme") || "light";
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.style.background = "transparent";
     document.body.style.background = "transparent";
@@ -176,9 +172,9 @@ function SystemMonitor() {
 
   // 设置窗口的 localStorage 不应作为运行中跨窗口同步机制。
   useEffect(() => {
-    const unlistenTheme = listen<string>("floast-theme-changed", (event) => {
+    const unlistenTheme = listen<string>("floatory-theme-changed", (event) => {
       document.documentElement.setAttribute("data-theme", event.payload);
-      localStorage.setItem("floast-theme", event.payload);
+      localStorage.setItem("floatory-theme", event.payload);
     });
     return () => {
       unlistenTheme.then((fn) => fn()).catch(console.error);
@@ -259,6 +255,18 @@ function SystemMonitor() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const toggleDisplayMode = async () => {
+    const nextMode: SystemMonitorDisplayMode = isMini ? "full" : "mini";
+    const newConfig = { ...configRef.current, displayMode: nextMode };
+    try {
+      await saveSystemMonitorConfig(newConfig);
+      // 后端只做持久化，不会 emit 事件；需自行通知本窗口监听器刷新 UI + 窗口尺寸
+      emit("floatory-system-monitor-config-changed", newConfig).catch(console.error);
+    } catch (e) {
+      console.error("Failed to save monitor config:", e);
+    }
+  };
+
   const resizeMonitorWindow = (displayMode: SystemMonitorDisplayMode) => {
     const size = MONITOR_WINDOW_SIZES[displayMode];
     getCurrentWebviewWindow()
@@ -267,7 +275,7 @@ function SystemMonitor() {
   };
 
   useEffect(() => {
-    const unlisten = listen<SystemMonitorConfig>("floast-system-monitor-config-changed", (event) => {
+    const unlisten = listen<SystemMonitorConfig>("floatory-system-monitor-config-changed", (event) => {
       configVersionRef.current += 1;
       configRef.current = event.payload;
       setConfig(event.payload);
@@ -305,6 +313,14 @@ function SystemMonitor() {
           <span className="monitor-title" data-tauri-drag-region="">
             系统监控
           </span>
+          <button
+            className="monitor-icon-btn"
+            aria-label={isMini ? "标准模式" : "迷你模式"}
+            title={isMini ? "切换到标准模式" : "切换到迷你模式"}
+            onClick={toggleDisplayMode}
+          >
+            <Icon name={isMini ? "Maximize2" : "Minimize2"} size={14} />
+          </button>
           <button
             className="monitor-icon-btn"
             aria-label="关闭"

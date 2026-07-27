@@ -430,7 +430,7 @@ mod tests {
     }
 
     /// 真机测试：枚举系统已安装语音。需 Windows 语音包，默认 ignore（CI 无语音环境）。
-    /// 手动验证：cargo test --bin floast-service tts::tests::tts_list_voices_real -- --ignored --nocapture
+    /// 手动验证：cargo test --bin floatory tts::tests::tts_list_voices_real -- --ignored --nocapture
     #[test]
     #[ignore]
     fn tts_list_voices_real() {
@@ -451,7 +451,7 @@ mod tests {
 
     /// 真机测试：验证 WinRT 合成+播放 API 链路（speak 的核心调用，不经 TtsState/回调）。
     /// 会真实发声（朗读"测试"两字约 1 秒）。默认 ignore。
-    /// 手动验证：cargo test --bin floast-service tts::tests::tts_synthesize_play_real -- --ignored --nocapture
+    /// 手动验证：cargo test --bin floatory tts::tests::tts_synthesize_play_real -- --ignored --nocapture
     #[test]
     #[ignore]
     fn tts_synthesize_play_real() {

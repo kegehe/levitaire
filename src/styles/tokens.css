@@ -56,7 +56,7 @@
 }
 
 /* ============================================================
-   Design Tokens — Floast Service
+   Design Tokens — Floatory
    Three-layer system: Primitive → Semantic → Component
    Color space: oklch
    ============================================================ */
@@ -232,13 +232,39 @@
   --button-danger-hover-bg: var(--color-danger-subtle);
   --button-danger-active-bg: var(--red-100);
 
-  /* Orb */
-  --orb-bg: var(--blue-500);
-  --orb-border: var(--blue-600);
-  --orb-size: 40px;
-  --orb-shadow: 0 2px 8px oklch(0.20 0 0 / 0.20);
-  --orb-shadow-hover: 0 4px 16px oklch(0.20 0 0 / 0.28);
-  --orb-glow: 0 0 16px oklch(0.58 0.19 250 / 0.30);
+  /* Orb — Apple-style frosted glass */
+  --orb-bg:
+    linear-gradient(135deg, oklch(1.00 0 0 / 0.30) 0%, oklch(1.00 0 0 / 0.05) 60%),
+    oklch(1.00 0 0 / 0.12);
+  --orb-bg-fallback:
+    linear-gradient(135deg, oklch(1.00 0 0 / 0.40) 0%, oklch(1.00 0 0 / 0.15) 60%),
+    oklch(0.95 0.005 250 / 0.65);
+  --orb-border: 1px solid oklch(1.00 0 0 / 0.25);
+  --orb-backdrop: blur(10px) saturate(180%);
+  --orb-size: 42px;
+  --orb-icon-color: oklch(1.00 0 0);
+  --orb-shadow:
+    inset 0 1px 1px oklch(1.00 0 0 / 0.25),
+    0 1px 4px oklch(0.20 0 0 / 0.10),
+    0 4px 12px oklch(0.20 0 0 / 0.08);
+  --orb-shadow-hover:
+    inset 0 1px 1px oklch(1.00 0 0 / 0.30),
+    0 2px 8px oklch(0.20 0 0 / 0.12),
+    0 6px 20px oklch(0.20 0 0 / 0.10),
+    0 0 20px oklch(1.00 0 0 / 0.20);
+  --orb-shadow-active:
+    inset 0 1px 2px oklch(0.20 0 0 / 0.10),
+    0 1px 3px oklch(0.20 0 0 / 0.08);
+  --orb-shadow-breathe-start:
+    inset 0 1px 1px oklch(1.00 0 0 / 0.25),
+    0 1px 4px oklch(0.20 0 0 / 0.10),
+    0 4px 12px oklch(0.20 0 0 / 0.08),
+    0 0 12px oklch(1.00 0 0 / 0.15);
+  --orb-shadow-breathe-end:
+    inset 0 1px 1px oklch(1.00 0 0 / 0.25),
+    0 1px 4px oklch(0.20 0 0 / 0.10),
+    0 4px 12px oklch(0.20 0 0 / 0.08),
+    0 0 22px oklch(1.00 0 0 / 0.30);
 
   /* Preview */
   --preview-text-color: var(--color-fg);
@@ -261,6 +287,12 @@
   --settings-focus-shadow: oklch(0.50 0.19 250 / 0.15);
   --settings-save-btn-bg: var(--color-accent);
   --settings-save-btn-text: var(--color-accent-fg);
+  --settings-sidebar-bg: var(--color-bg-elevated);
+  --settings-sidebar-border: var(--color-border);
+  --settings-nav-active-bg: var(--color-accent-subtle);
+  --settings-nav-active-color: var(--color-accent);
+  --settings-nav-active-border: var(--color-accent);
+  --settings-nav-hover-bg: var(--button-hover-bg);
 
   /* Tooltip */
   --tooltip-bg: var(--neutral-800);
@@ -328,11 +360,37 @@
   --button-danger-hover-bg: var(--red-950);
   --button-danger-active-bg: var(--red-900);
 
-  --orb-bg: var(--blue-500);
-  --orb-border: var(--blue-400);
-  --orb-shadow: 0 2px 8px oklch(0.00 0 0 / 0.35);
-  --orb-shadow-hover: 0 4px 16px oklch(0.00 0 0 / 0.45);
-  --orb-glow: 0 0 20px oklch(0.58 0.19 250 / 0.25);
+  --orb-bg:
+    linear-gradient(135deg, oklch(1.00 0 0 / 0.10) 0%, oklch(1.00 0 0 / 0.02) 60%),
+    oklch(0.22 0 0 / 0.50);
+  --orb-bg-fallback:
+    linear-gradient(135deg, oklch(1.00 0 0 / 0.15) 0%, oklch(1.00 0 0 / 0.03) 60%),
+    oklch(0.25 0 0 / 0.70);
+  --orb-border: 1px solid oklch(1.00 0 0 / 0.08);
+  --orb-backdrop: blur(10px) saturate(180%);
+  --orb-icon-color: oklch(0.98 0 0);
+  --orb-shadow:
+    inset 0 1px 1px oklch(1.00 0 0 / 0.06),
+    0 1px 4px oklch(0.00 0 0 / 0.25),
+    0 4px 12px oklch(0.00 0 0 / 0.35);
+  --orb-shadow-hover:
+    inset 0 1px 1px oklch(1.00 0 0 / 0.08),
+    0 2px 8px oklch(0.00 0 0 / 0.30),
+    0 6px 20px oklch(0.00 0 0 / 0.40),
+    0 0 20px oklch(1.00 0 0 / 0.10);
+  --orb-shadow-active:
+    inset 0 1px 2px oklch(0.00 0 0 / 0.20),
+    0 1px 3px oklch(0.00 0 0 / 0.25);
+  --orb-shadow-breathe-start:
+    inset 0 1px 1px oklch(1.00 0 0 / 0.06),
+    0 1px 4px oklch(0.00 0 0 / 0.25),
+    0 4px 12px oklch(0.00 0 0 / 0.35),
+    0 0 12px oklch(1.00 0 0 / 0.08);
+  --orb-shadow-breathe-end:
+    inset 0 1px 1px oklch(1.00 0 0 / 0.06),
+    0 1px 4px oklch(0.00 0 0 / 0.25),
+    0 4px 12px oklch(0.00 0 0 / 0.35),
+    0 0 22px oklch(1.00 0 0 / 0.18);
 
   --preview-text-color: var(--color-fg);
   --preview-bg: var(--neutral-900);
@@ -351,6 +409,12 @@
   --settings-focus-shadow: oklch(0.58 0.19 250 / 0.15);
   --settings-save-btn-bg: var(--color-accent);
   --settings-save-btn-text: var(--color-accent-fg);
+  --settings-sidebar-bg: var(--color-bg-elevated);
+  --settings-sidebar-border: var(--color-border);
+  --settings-nav-active-bg: var(--color-accent-subtle);
+  --settings-nav-active-color: var(--color-accent);
+  --settings-nav-active-border: var(--color-accent);
+  --settings-nav-hover-bg: var(--button-hover-bg);
 
   --tooltip-bg: var(--neutral-200);
   --tooltip-text: var(--neutral-900);

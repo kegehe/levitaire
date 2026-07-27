@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
@@ -18,7 +18,7 @@ describe("SystemMonitor theme synchronization", () => {
   });
 
   it("uses the saved theme when the monitor window opens", () => {
-    localStorage.setItem("floast-theme", "dark");
+    localStorage.setItem("floatory-theme", "dark");
 
     render(<SystemMonitor />);
 
@@ -41,10 +41,10 @@ describe("SystemMonitor theme synchronization", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    act(() => emitMockEvent("floast-theme-changed", "dark"));
+    act(() => emitMockEvent("floatory-theme-changed", "dark"));
 
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
-    expect(localStorage.getItem("floast-theme")).toBe("dark");
+    expect(localStorage.getItem("floatory-theme")).toBe("dark");
   });
 
   it("renders aggregate disk read and write rates without disk names", async () => {
@@ -116,21 +116,66 @@ describe("SystemMonitor theme synchronization", () => {
       await Promise.resolve();
     });
 
-    act(() => emitMockEvent("floast-system-monitor-config-changed", {
+    act(() => emitMockEvent("floatory-system-monitor-config-changed", {
       intervalMs: 1000,
       displayMode: "mini",
     }));
 
     expect(container.querySelector(".monitor-body")).toHaveClass("is-mini");
     expect(mockSetSize).toHaveBeenCalledWith(expect.objectContaining({ width: 300, height: 180 }));
-    expect(container.querySelectorAll(".monitor-icon-btn")).toHaveLength(1);
+    expect(container.querySelectorAll(".monitor-icon-btn")).toHaveLength(2);
   });
 
   it("does not provide monitor configuration controls in the floating window", () => {
     const { container } = render(<SystemMonitor />);
 
     expect(container.querySelector(".monitor-settings")).not.toBeInTheDocument();
-    expect(container.querySelectorAll(".monitor-icon-btn")).toHaveLength(1);
+    expect(container.querySelectorAll(".monitor-icon-btn")).toHaveLength(2);
+  });
+
+  it("toggles display mode when the mode button is clicked", async () => {
+    const { container } = render(<SystemMonitor />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // 默认 full 模式，按钮 aria-label 应为"迷你模式"
+    const toggleBtn = screen.getByLabelText("迷你模式");
+    expect(toggleBtn).toBeInTheDocument();
+    expect(container.querySelector(".monitor-body")).not.toHaveClass("is-mini");
+
+    await act(async () => {
+      fireEvent.click(toggleBtn);
+    });
+
+    // saveSystemMonitorConfig 应被调用，displayMode 切换为 mini
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "set_system_monitor_config",
+      expect.objectContaining({
+        config: expect.stringContaining('"displayMode":"mini"'),
+      }),
+    );
+    // 应手动 emit 事件以触发本窗口 UI 刷新
+    expect(mockEmit).toHaveBeenCalledWith(
+      "floatory-system-monitor-config-changed",
+      expect.objectContaining({ displayMode: "mini" }),
+    );
+  });
+
+  it("shows standard mode label when in mini mode", async () => {
+    mockInvoke.mockImplementation((command) =>
+      command === "get_system_monitor_config"
+        ? Promise.resolve(JSON.stringify({ intervalMs: 1000, displayMode: "mini" }))
+        : Promise.resolve(""),
+    );
+
+    render(<SystemMonitor />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const toggleBtn = screen.getByLabelText("标准模式");
+    expect(toggleBtn).toBeInTheDocument();
   });
 
 });

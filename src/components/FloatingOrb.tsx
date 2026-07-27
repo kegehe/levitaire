@@ -3,7 +3,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { ensureVoiceWindow, ensureScreenshotWindow } from "../utils/toolWindows";
+import { ensureVoiceWindow, ensureScreenshotWindow, openToolWindow } from "../utils/toolWindows";
+import { BACKEND_TOOLS } from "../tools/registry";
 import "./FloatingOrb.css";
 
 function FloatingOrb() {
@@ -13,15 +14,15 @@ function FloatingOrb() {
 
   // 同步设置页选择的主题（orb 是独立窗口，需手动读取 localStorage）
   useLayoutEffect(() => {
-    const theme = localStorage.getItem("floast-theme") || "light";
+    const theme = localStorage.getItem("floatory-theme") || "light";
     document.documentElement.setAttribute("data-theme", theme);
   }, []);
 
   // 监听设置窗口的主题变更事件
   useEffect(() => {
-    const unlistenTheme = listen<string>("floast-theme-changed", (event) => {
+    const unlistenTheme = listen<string>("floatory-theme-changed", (event) => {
       document.documentElement.setAttribute("data-theme", event.payload);
-      localStorage.setItem("floast-theme", event.payload);
+      localStorage.setItem("floatory-theme", event.payload);
     });
     return () => {
       unlistenTheme.then((fn) => fn());
@@ -86,6 +87,35 @@ function FloatingOrb() {
     }
   }, [win]);
 
+  // 自启动：应用启动时自动打开"启用 + 自启动"的工具窗口
+  // 从后端读取真值，避免 localStorage 与后端 config.json 不同步
+  useEffect(() => {
+    // 延迟一小段时间再打开，避免 orb 窗口本身还没完全就绪
+    const timer = setTimeout(() => {
+      Promise.all([
+        Promise.all(
+          BACKEND_TOOLS.map((t) =>
+            invoke<boolean>(t.getter)
+              .then((enabled) => ({ id: t.id, enabled }))
+              .catch(() => null),
+          ),
+        ),
+        invoke<string[]>("get_tools_autostart").catch(() => []),
+      ]).then(([results, autostartIds]) => {
+        const enabledIds = results
+          .filter((r): r is { id: string; enabled: boolean } => r !== null && r.enabled)
+          .map((r) => r.id);
+        const toOpen = autostartIds.filter((id) => enabledIds.includes(id));
+        for (const toolId of toOpen) {
+          openToolWindow(toolId).catch((err) => {
+            console.error(`自启动工具 ${toolId} 打开失败:`, err);
+          });
+        }
+      });
+    }, 500);
+    return () => clearTimeout(timer);
+  }, []);
+
   // Listen for orb-mouseup event from the Rust mouse hook
   // (startDragging() consumes the DOM mouseup, so we use the hook instead)
   // payload = 是否为点击（非拖拽），由后端基于鼠标位移判定，比前端窗口位移判定更可靠
@@ -149,9 +179,26 @@ function FloatingOrb() {
       className="orb-container"
       onMouseDown={handleMouseDown}
       role="button"
-      aria-label="Floast 悬浮球 — 拖拽移动，点击触发"
+      aria-label="Floatory 悬浮球 — 拖拽移动，点击触发"
     >
-      <div className="orb-inner" />
+      <div className="orb-inner">
+        {/* 原子轨道图标 — 中心圆点 + 3 条椭圆轨道交叉，象征悬浮球为中心、多工具环绕 */}
+        <svg
+          className="orb-icon"
+          width="24"
+          height="24"
+          viewBox="0 0 18 18"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          {/* 中心实心圆点 */}
+          <circle cx="9" cy="9" r="1.5" fill="currentColor" stroke="none" />
+          {/* 3 条椭圆轨道，分别旋转 0° / 60° / 120° */}
+          <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(0 9 9)" />
+          <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(60 9 9)" />
+          <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(120 9 9)" />
+        </svg>
+      </div>
     </div>
   );
 }

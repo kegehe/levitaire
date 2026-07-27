@@ -597,7 +597,7 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
     );
 
     // 临时输出文件
-    let temp_dir = std::env::temp_dir().join("floast-recording");
+    let temp_dir = std::env::temp_dir().join("floatory-recording");
     let _ = std::fs::create_dir_all(&temp_dir);
     let output_path = temp_dir.join(format!("recording_{}.mp4", gen));
 

@@ -1,4 +1,4 @@
-# Floast Service 开发指南
+# Floatory 开发指南
 
 ## 目录
 
@@ -15,7 +15,7 @@
 
 ## 项目概述
 
-Floast Service 是一个 Windows 悬浮工具，采用 Rust + Tauri 技术栈，主要用于选中文字后显示工具栏，提供剪切、复制等功能。
+Floatory 是一个 Windows 悬浮工具，采用 Rust + Tauri 技术栈，主要用于选中文字后显示工具栏，提供剪切、复制等功能。
 
 ### 技术栈
 
@@ -59,8 +59,8 @@ Floast Service 是一个 Windows 悬浮工具，采用 Rust + Tauri 技术栈，
 
 1. 克隆项目
 ```bash
-git clone https://github.com/yourusername/floast_service.git
-cd floast_service
+git clone https://github.com/yourusername/Floatory.git
+cd Floatory
 ```
 
 2. 安装前端依赖
@@ -78,7 +78,7 @@ cargo tauri dev
 ## 项目结构
 
 ```
-floast_service/
+Floatory/
 ├── src-tauri/                          # Rust 后端
 │   ├── src/
 │   │   ├── main.rs                     # 程序入口
@@ -485,8 +485,8 @@ cargo tauri build
 
 ## 联系方式
 
-- 项目主页: [GitHub](https://github.com/yourusername/floast_service)
-- 问题反馈: [Issues](https://github.com/yourusername/floast_service/issues)
+- 项目主页: [GitHub](https://github.com/yourusername/Floatory)
+- 问题反馈: [Issues](https://github.com/yourusername/Floatory/issues)
 
 ---
 

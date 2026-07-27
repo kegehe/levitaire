@@ -46,6 +46,9 @@ import {
   Monitor,
   AppWindow,
   FolderOpen,
+  Minimize2,
+  Maximize2,
+  Rocket,
 } from "lucide-react";
 import type { LucideProps } from "lucide-react";
 
@@ -97,6 +100,9 @@ const ICON_MAP = {
   Monitor,
   AppWindow,
   FolderOpen,
+  Minimize2,
+  Maximize2,
+  Rocket,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;

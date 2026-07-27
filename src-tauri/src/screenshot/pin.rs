@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// VK_ESCAPE 虚拟键码（避免跨模块导入 KeyboardAndMouse）
 const VK_ESCAPE: u16 = 0x1B;
 
-const PIN_CLASS_NAME: PCWSTR = w!("FloastPinWindow");
+const PIN_CLASS_NAME: PCWSTR = w!("FloatoryPinWindow");
 const CMD_CLOSE: u16 = 1;
 const CMD_COPY: u16 = 2;
 const CMD_SAVE: u16 = 3;
@@ -113,7 +113,7 @@ pub fn cleanup_stale_temp_files() {
         for entry in temp.flatten() {
             let name = entry.file_name();
             if let Some(name) = name.to_str() {
-                if name.starts_with("floast-pin-") && name.ends_with(".png") {
+                if name.starts_with("floatory-pin-") && name.ends_with(".png") {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -229,7 +229,7 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         let hwnd = CreateWindowExW(
             ex_style,
             PIN_CLASS_NAME,
-            w!("Floast Pin"),
+            w!("Floatory Pin"),
             style,
             win_x,
             win_y,

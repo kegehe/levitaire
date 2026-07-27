@@ -112,7 +112,7 @@ fn ocr_acc_mix() {
     run_test(
         &OcrService::new(None, None),
         "中英混排",
-        "中英混排：floast service 是一个 Windows 桌面悬浮窗工具，支持 AI、OCR、TTS、STT 等功能。",
+        "中英混排：floatory service 是一个 Windows 桌面悬浮窗工具，支持 AI、OCR、TTS、STT 等功能。",
         18,
         175,
         1280,
@@ -128,7 +128,7 @@ fn ocr_acc_all() {
 Hello World! This is an OCR test with English and Chinese mixed text.\n\
 数字测试：1+1=2  3.14159  2024/01/01  100%  温度：25°C  ￥99.99  (555)123-4567\n\
 符号测试：@ # $ % ^ & * ( ) _ + - = [ ] { } < > ? / ! ~\n\
-中英混排：floast service 是一个 Windows 桌面悬浮窗工具，支持 AI、OCR、TTS、STT 等功能。";
+中英混排：floatory service 是一个 Windows 桌面悬浮窗工具，支持 AI、OCR、TTS、STT 等功能。";
     run_test(
         &OcrService::new(None, None),
         "全部5行",

@@ -142,7 +142,7 @@ fn run_hotkey_message_loop() {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(hotkey_wndproc),
             hInstance: hinst.into(),
-            lpszClassName: w!("FloastHotkeySink"),
+            lpszClassName: w!("FloatoryHotkeySink"),
             ..Default::default()
         };
         let _ = RegisterClassExW(&wc);
@@ -150,8 +150,8 @@ fn run_hotkey_message_loop() {
         // 创建仅消息窗口（HWND_MESSAGE，不可见），用于接收 WM_HOTKEY 与注册请求
         let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
-            w!("FloastHotkeySink"),
-            w!("FloastHotkeySink"),
+            w!("FloatoryHotkeySink"),
+            w!("FloatoryHotkeySink"),
             WS_OVERLAPPED,
             0,
             0,

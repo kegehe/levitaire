@@ -374,7 +374,7 @@ describe("FloatingToolbar 去重功能", () => {
     vi.clearAllMocks();
     clearMockListeners();
     // 重置去重配置为默认（按行），避免上一用例通过事件写入的配置污染本用例
-    localStorage.removeItem("floast-dedup-mode");
+    localStorage.removeItem("floatory-dedup-mode");
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
         return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
@@ -722,7 +722,7 @@ describe("FloatingToolbar 去重功能", () => {
   const setDedupMode = async (mode: { granularity: string; charSubMode: string }) => {
     await flush();
     await act(async () => {
-      emitMockEvent("floast-dedup-mode-changed", mode);
+      emitMockEvent("floatory-dedup-mode-changed", mode);
     });
   };
 
@@ -2160,7 +2160,7 @@ describe("FloatingToolbar MD5 加密功能", () => {
 
     // 广播 16 位配置变更
     await act(async () => {
-      emitMockEvent("floast-md5-length-changed", "16");
+      emitMockEvent("floatory-md5-length-changed", "16");
     });
     await flush();
 
@@ -2180,7 +2180,7 @@ describe("FloatingToolbar MD5 加密功能", () => {
     await showToolbar("中文测试");
 
     await act(async () => {
-      emitMockEvent("floast-md5-length-changed", "16");
+      emitMockEvent("floatory-md5-length-changed", "16");
     });
     await flush();
 
@@ -2843,13 +2843,13 @@ describe("FloatingToolbar 字符统计功能", () => {
     expect(screen.queryByRole("button", { name: "统计" })).not.toBeInTheDocument();
   });
 
-  it("设置窗口广播 floast-features-changed 后实时隐藏统计按钮", async () => {
+  it("设置窗口广播 floatory-features-changed 后实时隐藏统计按钮", async () => {
     render(<FloatingToolbar />);
     await showToolbar("hello");
     expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
 
     await act(async () => {
-      emitMockEvent("floast-features-changed", [
+      emitMockEvent("floatory-features-changed", [
         "copy", "search", "translate", "optimize", "uppercase", "lowercase",
         "dedup", "base64-encode", "base64-decode", "unicode-encode", "unicode-decode",
         "md5-encrypt", "qrcode", "clear",

@@ -154,7 +154,7 @@
 ### 5.1 目录结构
 
 ```
-floast_service/
+Floatory/
 ├── src-tauri/                          # Rust 后端
 │   ├── src/
 │   │   ├── main.rs                     # 程序入口

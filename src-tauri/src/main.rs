@@ -1,6 +1,31 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// ONNX Runtime DLL 加载：开发模式在仓库 libs/ 目录，发布模式在 exe 同目录（由 tauri resources 打包）。
+// ort 的 load-dynamic feature 在首次调用 ort::api() 时自动加载 DLL，
+// 查找优先级: ORT_DYLIB_PATH 环境变量 > 当前目录 onnxruntime.dll > exe 同目录。
+fn init_ort_dylib() {
+    use std::path::PathBuf;
+    let candidates: &[fn() -> Option<PathBuf>] = &[
+        // 1. ORT_DYLIB_PATH 环境变量（用户显式指定，最高优先级）
+        || std::env::var("ORT_DYLIB_PATH").ok().map(PathBuf::from).filter(|p| p.exists()),
+        // 2. 仓库 libs/ 目录（开发模式 cargo tauri dev）
+        || {
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("libs").join("onnxruntime.dll");
+            p.exists().then_some(p)
+        },
+    ];
+    for candidate in candidates {
+        if let Some(path) = candidate() {
+            std::env::set_var("ORT_DYLIB_PATH", &path);
+            crate::utils::logger::log("ort", &format!("ONNX Runtime DLL: {}", path.display()));
+            return;
+        }
+    }
+    // 未找到本地 DLL，ort 将在首次调用时尝试当前目录/exe 同目录加载
+    crate::utils::logger::log("ort", "未找到本地 onnxruntime.dll，运行时将搜索默认路径");
+}
+
 mod ai;
 mod automation;
 mod clipboard;
@@ -22,6 +47,9 @@ use tauri::{
 };
 
 fn main() {
+    // 初始化 ONNX Runtime DLL 搜索路径（ort load-dynamic 模式，在 OCR 线程前调用）
+    init_ort_dylib();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         // 单实例限制：第二个实例启动时直接退出，并激活已有实例
@@ -46,17 +74,17 @@ fn main() {
             let mut ai_config = startup_config.ai_config;
 
             if ai_config.api_key.is_empty() {
-                if let Ok(key) = std::env::var("FLOAST_AI_API_KEY") {
+                if let Ok(key) = std::env::var("FLOATORY_AI_API_KEY") {
                     ai_config.api_key = key;
                 }
             }
             if ai_config.base_url.is_empty() {
-                if let Ok(url) = std::env::var("FLOAST_AI_BASE_URL") {
+                if let Ok(url) = std::env::var("FLOATORY_AI_BASE_URL") {
                     ai_config.base_url = url;
                 }
             }
             if ai_config.model.is_empty() {
-                if let Ok(model) = std::env::var("FLOAST_AI_MODEL") {
+                if let Ok(model) = std::env::var("FLOATORY_AI_MODEL") {
                     ai_config.model = model;
                 }
             }
@@ -107,7 +135,7 @@ fn main() {
             app.manage(recording::RecordingState::default());
 
             // 初始化 OCR 服务（后台线程，避免阻塞启动）
-            // 模型目录为 %APPDATA%/floast/ocr
+            // 模型目录为 %APPDATA%/floatory/ocr
             // 不使用 catch_unwind：OcrService::new 内部涉及 COM 和 ONNX Runtime，
             // catch_unwind 无法捕获 C++ 异常导致的 abort，且 panic unwind 后 COM 状态可能不一致。
             // 让 panic 自然终止线程更安全——线程崩溃后 OCR 功能不可用，但不会留下不一致状态。
@@ -131,13 +159,29 @@ fn main() {
             let menu = Menu::with_items(app, &[&toggle_orb, &show_settings, &separator, &quit])?;
 
             // 创建系统托盘图标
+            // 运行时从 icons/icon.png 读取，避免依赖编译时嵌入的旧图标
+            let tray_icon = {
+                let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("icons")
+                    .join("icon.png");
+                match image::open(&icon_path) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let w = rgba.width();
+                        let h = rgba.height();
+                        tauri::image::Image::new_owned(rgba.into_raw(), w, h)
+                    }
+                    Err(e) => {
+                        crate::utils::logger::log("tray", &format!("无法加载图标文件 {}: {e}，回退到默认图标", icon_path.display()));
+                        app.default_window_icon()
+                            .expect("未找到默认图标，请检查 src-tauri/icons/ 目录下是否存在图标文件")
+                            .to_owned()
+                    }
+                }
+            };
             let _tray = TrayIconBuilder::new()
-                .icon(
-                    app.default_window_icon()
-                        .expect("未找到默认图标，请检查 src-tauri/icons/ 目录下是否存在图标文件")
-                        .clone(),
-                )
-                .tooltip("Floast Service")
+                .icon(tray_icon)
+                .tooltip("Floatory")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
@@ -436,6 +480,8 @@ fn main() {
             commands::get_screenshot_save_path,
             commands::set_screenshot_save_path,
             commands::pick_folder,
+            commands::get_tools_autostart,
+            commands::set_tools_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

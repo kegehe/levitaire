@@ -1,4 +1,4 @@
-/* Floast Service — Global Styles */
+/* Floatory — Global Styles */
 @import "./tokens.css";
 
 /* ── Reset ───────────────────────────────────────────────── */
@@ -26,9 +26,9 @@ body.toolbar-window {
   padding-top: 24px;
 }
 
-/* 设置窗口：允许内容滚动 */
+/* 设置窗口：滚动由内容面板内部处理 */
 body.settings-window {
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 #root {

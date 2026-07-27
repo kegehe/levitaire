@@ -1,5 +1,6 @@
 import { WebviewWindow, type WebviewWindow as WebviewWindowInstance } from "@tauri-apps/api/webviewWindow";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 type ToolWindowLabel = "screenshot-overlay" | "voice-overlay" | "monitor-overlay" | "recording-controls";
 
@@ -145,7 +146,7 @@ export async function ensureScreenshotWindow(): Promise<WebviewWindowInstance> {
   await prepareScreenshotOverlayReadyListener();
   screenshotOverlayReady = false;
   const window = await createToolWindow("screenshot-overlay", {
-    title: "Floast Screenshot",
+    title: "Floatory Screenshot",
     width: 800,
     height: 600,
     resizable: false,
@@ -164,7 +165,7 @@ export async function ensureScreenshotWindow(): Promise<WebviewWindowInstance> {
 
 export function ensureVoiceWindow(): Promise<WebviewWindowInstance> {
   return createToolWindow("voice-overlay", {
-    title: "Floast Voice",
+    title: "Floatory Voice",
     width: 260,
     height: 140,
     resizable: false,
@@ -183,7 +184,7 @@ export async function ensureRecordingControlsWindow(): Promise<WebviewWindowInst
   await prepareRecordingControlsReadyListener();
   recordingControlsReady = false;
   const window = await createToolWindow("recording-controls", {
-    title: "Floast Recording Controls",
+    title: "Floatory Recording Controls",
     width: 136,
     height: 128,
     resizable: false,
@@ -211,7 +212,7 @@ export async function ensureMonitorWindow(): Promise<{ window: WebviewWindowInst
   await prepareMonitorWindowReadyListener();
   monitorReady = false;
   const window = await createToolWindow("monitor-overlay", {
-    title: "Floast Monitor",
+    title: "Floatory Monitor",
     width: 300,
     height: 520,
     resizable: false,
@@ -225,4 +226,32 @@ export async function ensureMonitorWindow(): Promise<{ window: WebviewWindowInst
     y: 100,
   });
   return { window, created: true };
+}
+
+/**
+ * 根据工具 ID 打开对应的工具窗口。
+ * 用于 ToolPalette 激活和 FloatingOrb 自启动两种场景。
+ * 返回 true 表示成功打开，false 表示该工具不支持窗口打开或打开失败。
+ */
+export async function openToolWindow(toolId: string): Promise<boolean> {
+  try {
+    if (toolId === "system-monitor") {
+      const monitorWindow = await ensureMonitorWindow();
+      if (monitorWindow.created) {
+        await waitForNewMonitorWindowReady();
+      }
+      await invoke("show_monitor_window");
+      return true;
+    } else if (toolId === "voice-input") {
+      await ensureVoiceWindow();
+      await invoke("show_voice_window");
+      return true;
+    }
+    // 其他工具（screenshot、recording、text-toolbar）是按需触发的，
+    // 自启动打开窗口对它们无意义，忽略
+    return false;
+  } catch (err) {
+    console.error(`openToolWindow(${toolId}) failed:`, err);
+    return false;
+  }
 }

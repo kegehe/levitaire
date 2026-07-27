@@ -47,7 +47,7 @@ function VoiceInput() {
 
   // 同步主题 + 透明背景（独立窗口）
   useEffect(() => {
-    const theme = localStorage.getItem("floast-theme") || "light";
+    const theme = localStorage.getItem("floatory-theme") || "light";
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.style.background = "transparent";
     document.body.style.background = "transparent";

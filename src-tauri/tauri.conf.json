@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
-  "productName": "Floast Service",
+  "productName": "Floatory",
   "version": "0.1.0",
-  "identifier": "com.floast.service",
+  "identifier": "com.floatory.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "toolbar",
-        "title": "Floast Toolbar",
+        "title": "Floatory Toolbar",
         "width": 400,
         "height": 50,
         "resizable": false,
@@ -29,7 +29,7 @@
       },
       {
         "label": "orb",
-        "title": "Floast Orb",
+        "title": "Floatory Orb",
         "width": 64,
         "height": 64,
         "resizable": false,
@@ -47,7 +47,7 @@
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: http://asset.localhost asset:; connect-src 'self'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$TEMP/floast-recording/**"]
+        "scope": ["$TEMP/floatory-recording/**"]
       }
     }
   },
@@ -55,7 +55,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "binaries/ffmpeg.exe": "ffmpeg.exe"
+      "binaries/ffmpeg.exe": "ffmpeg.exe",
+      "libs/onnxruntime.dll": "onnxruntime.dll"
     },
     "icon": [
       "icons/32x32.png",

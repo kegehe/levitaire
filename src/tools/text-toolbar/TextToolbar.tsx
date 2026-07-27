@@ -85,7 +85,7 @@ function FloatingToolbar() {
   const [enabledClearIds, setEnabledClearIds] = useState<string[]>(DEFAULT_CLEAR_IDS);
 
   useLayoutEffect(() => {
-    const theme = localStorage.getItem("floast-theme") || "light";
+    const theme = localStorage.getItem("floatory-theme") || "light";
     document.documentElement.setAttribute("data-theme", theme);
     // 工具栏窗口：上方预留 tooltip 空间
     document.body.classList.add("toolbar-window");
@@ -111,26 +111,26 @@ function FloatingToolbar() {
       if (clear.status === "fulfilled") setEnabledClearIds(clear.value);
     });
 
-    const unlistenTheme = listen<string>("floast-theme-changed", (event) => {
+    const unlistenTheme = listen<string>("floatory-theme-changed", (event) => {
       document.documentElement.setAttribute("data-theme", event.payload);
-      localStorage.setItem("floast-theme", event.payload);
+      localStorage.setItem("floatory-theme", event.payload);
     });
-    const unlistenFeatures = listen<string[]>("floast-features-changed", (event) => {
+    const unlistenFeatures = listen<string[]>("floatory-features-changed", (event) => {
       setEnabledFeatureIds(event.payload);
     });
-    const unlistenDedupMode = listen<DedupMode>("floast-dedup-mode-changed", (event) => {
+    const unlistenDedupMode = listen<DedupMode>("floatory-dedup-mode-changed", (event) => {
       setDedupModeState(event.payload);
     });
-    const unlistenMd5Length = listen<Md5Length>("floast-md5-length-changed", (event) => {
+    const unlistenMd5Length = listen<Md5Length>("floatory-md5-length-changed", (event) => {
       setMd5LengthState(event.payload);
     });
-    const unlistenNumberingStyle = listen<NumberingStyle>("floast-numbering-style-changed", (event) => {
+    const unlistenNumberingStyle = listen<NumberingStyle>("floatory-numbering-style-changed", (event) => {
       setNumberingStyleState(event.payload);
     });
-    const unlistenTtsConfig = listen<TtsConfig>("floast-tts-config-changed", (event) => {
+    const unlistenTtsConfig = listen<TtsConfig>("floatory-tts-config-changed", (event) => {
       setTtsConfigState(event.payload);
     });
-    const unlistenClearOptions = listen<string[]>("floast-clear-options-changed", (event) => {
+    const unlistenClearOptions = listen<string[]>("floatory-clear-options-changed", (event) => {
       setEnabledClearIds(event.payload);
     });
     return () => {

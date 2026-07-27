@@ -100,7 +100,7 @@ let result = service.call("请用一句话回答：1+1等于几？", None).await
 
 - [ ] **Step 4: 编译验证**
 
-Run: `cd D:\projects\Programs\floast_service\src-tauri && cargo check 2>&1`
+Run: `cd D:\projects\Programs\Floatory\src-tauri && cargo check 2>&1`
 Expected: 编译成功（可能有 call_ai 命令处的参数不匹配警告，下一任务修复）
 
 - [ ] **Step 5: Commit**
@@ -146,7 +146,7 @@ pub async fn call_ai(
 
 - [ ] **Step 2: 编译验证**
 
-Run: `cd D:\projects\Programs\floast_service\src-tauri && cargo check 2>&1`
+Run: `cd D:\projects\Programs\Floatory\src-tauri && cargo check 2>&1`
 Expected: 编译成功，无警告
 
 - [ ] **Step 3: Commit**
@@ -451,7 +451,7 @@ commands::replace_selection,
 
 - [ ] **Step 8: 编译验证**
 
-Run: `cd D:\projects\Programs\floast_service\src-tauri && cargo check 2>&1`
+Run: `cd D:\projects\Programs\Floatory\src-tauri && cargo check 2>&1`
 Expected: 编译成功
 
 - [ ] **Step 9: Commit**
@@ -1190,7 +1190,7 @@ import "./Settings.css";
 function Settings() {
   const [autoStart, setAutoStart] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
-    return (localStorage.getItem("floast-theme") as "light" | "dark") || "light";
+    return (localStorage.getItem("floatory-theme") as "light" | "dark") || "light";
   });
 
   // AI 配置
@@ -1204,7 +1204,7 @@ function Settings() {
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("floast-theme", theme);
+    localStorage.setItem("floatory-theme", theme);
   }, [theme]);
 
   // 加载 AI 配置
@@ -1229,7 +1229,7 @@ function Settings() {
 
   return (
     <div className="settings-container">
-      <h1>Floast Service 设置</h1>
+      <h1>Floatory 设置</h1>
 
       <div className="settings-section">
         <h2>通用设置</h2>
@@ -1317,7 +1317,7 @@ function Settings() {
 
       <div className="settings-section">
         <h2>关于</h2>
-        <p>Floast Service v0.1.0</p>
+        <p>Floatory v0.1.0</p>
         <p>Windows 浮窗工具 - 选中文字后显示工具栏</p>
       </div>
     </div>
@@ -1440,12 +1440,12 @@ git commit -m "feat: Settings 页新增 AI 配置区域"
 
 - [ ] **Step 1: 后端编译验证**
 
-Run: `cd D:\projects\Programs\floast_service\src-tauri && cargo check 2>&1`
+Run: `cd D:\projects\Programs\Floatory\src-tauri && cargo check 2>&1`
 Expected: 编译成功，无错误
 
 - [ ] **Step 2: 前端编译验证**
 
-Run: `cd D:\projects\Programs\floast_service && npx tsc --noEmit 2>&1`
+Run: `cd D:\projects\Programs\Floatory && npx tsc --noEmit 2>&1`
 Expected: TypeScript 类型检查通过
 
 - [ ] **Step 3: 修复编译中发现的问题**
@@ -1454,7 +1454,7 @@ Expected: TypeScript 类型检查通过
 
 - [ ] **Step 4: 应用启动测试**
 
-Run: `cd D:\projects\Programs\floast_service && npm run tauri dev 2>&1`
+Run: `cd D:\projects\Programs\Floatory && npm run tauri dev 2>&1`
 Expected: 应用正常启动，悬浮球可见，设置页可打开
 
 - [ ] **Step 5: 功能手动验证**

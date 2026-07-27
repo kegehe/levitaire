@@ -12,9 +12,14 @@ export default defineConfig({
     watch: {
       ignored: ["**/src-tauri/**"],
     },
+    fs: {
+      // 禁止 Vite 访问 src-tauri 目录，避免扫描 Rust 编译产物导致 EMFILE
+      deny: ["**/src-tauri/**"],
+    },
   },
   optimizeDeps: {
-    exclude: ["src-tauri"],
+    // 显式指定入口，避免 Vite 用 **/*.html glob 扫描到 src-tauri/target/doc/ 下的 Rust 文档 HTML 导致 EMFILE
+    entries: ["index.html"],
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {

@@ -105,6 +105,8 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             // A full-screen or edge-to-edge recording has no safe location for
             // overlay controls. Keep these controls global and outside capture.
             let in_recording = crate::hooks::mouse::is_recording_mode();
+            let in_screenshot = crate::hooks::mouse::is_screenshot_mode()
+                || crate::commands::is_screenshot_starting();
             let ctrl_pressed = (GetKeyState(VK_CONTROL.0 as i32) as u16) & 0x8000 != 0;
             let shift_pressed = (GetKeyState(VK_SHIFT.0 as i32) as u16) & 0x8000 != 0;
             if in_recording && ctrl_pressed && shift_pressed && (vk_code == 0x53 || vk_code == 0x50)
@@ -154,8 +156,6 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             // 截图/录制模式：监听 Esc 全局退出（不依赖 overlay 焦点，可靠退出）
             // VK_ESCAPE = 0x1B
             if vk_code == 0x1B {
-                let in_screenshot = crate::hooks::mouse::is_screenshot_mode()
-                    || crate::commands::is_screenshot_starting();
                 if in_screenshot {
                     // 防抖：连按 Esc 只触发一次退出线程（cancel 幂等，但避免无谓并发）
                     if KB_STATE
@@ -182,38 +182,58 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         .map(|state| state.is_finishing())
                         .unwrap_or(false)
                 {
-                    // 录制模式 Esc：通知前端取消录制
+                    // 录制模式 Esc：后端直接清理 + 通知前端重置 UI。
+                    // 后端清理不依赖前端监听器，避免前端未挂载时 recording_mode 残留。
                     if let Some(app) = KB_STATE.app_handle.get() {
+                        let app_clone = app.clone();
+                        // 防抖：与 cancelling 共用互斥锁，避免连按 Esc 创建多个清理线程
+                        if KB_STATE
+                            .cancelling
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            std::thread::spawn(move || {
+                                if let Some(state) =
+                                    app_clone.try_state::<crate::recording::RecordingState>()
+                                {
+                                    if state.is_running() {
+                                        let _ = state.cancel();
+                                    }
+                                }
+                                let _ = crate::commands::cancel_recording_select(app_clone.clone());
+                                KB_STATE.cancelling.store(false, Ordering::SeqCst);
+                            });
+                        }
+                        // 同时通知前端（如果已挂载则重置 UI，未挂载也无害）
                         let _ = app.emit("recording-esc-cancel", ());
                     }
                 }
                 // 不吞键，继续传递，前端 keydown 也能收到
             }
 
-            // 妫€娴?Ctrl+C
-            if vk_code == 0x43 {
-                let ctrl_pressed = (GetKeyState(VK_CONTROL.0 as i32) as u16) & 0x8000 != 0;
-                if ctrl_pressed {
-                    // #4: 鐢?AtomicBool 鍋?debounce锛岄槻姝㈠揩閫熻繛鎸夊垱寤哄ぇ閲忕嚎绋?
-                    if KB_STATE
-                        .processing
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-                    {
-                        let foreground = GetForegroundWindow();
-                        let fg_hwnd = foreground.0 as isize;
-                        // 在钩子回调中立即保存剪贴板快照，
-                        // 确保快照早于前台 app 处理 Ctrl+C（避免线程调度延迟导致竞态）
-                        let old_clipboard = read_clipboard_snapshot();
-                        if let Some(app) = KB_STATE.app_handle.get() {
-                            let app_clone = app.clone();
-                            std::thread::spawn(move || {
-                                handle_ctrl_c(app_clone, fg_hwnd, old_clipboard);
-                                KB_STATE.processing.store(false, Ordering::SeqCst);
-                            });
-                        } else {
+            // Ctrl+C detection — only trigger outside screenshot/recording modes.
+            // In those modes the overlay consumes selection; popping up the text
+            // toolbar would interfere with the active tool.
+            if vk_code == 0x43 && !in_recording && !in_screenshot && ctrl_pressed {
+                // #4: 用 AtomicBool 做 debounce，防止快速连按创建大量线程
+                if KB_STATE
+                    .processing
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let foreground = GetForegroundWindow();
+                    let fg_hwnd = foreground.0 as isize;
+                    // 在钩子回调中立即保存剪贴板快照，
+                    // 确保快照早于前台 app 处理 Ctrl+C（避免线程调度延迟导致竞态）
+                    let old_clipboard = read_clipboard_snapshot();
+                    if let Some(app) = KB_STATE.app_handle.get() {
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            handle_ctrl_c(app_clone, fg_hwnd, old_clipboard);
                             KB_STATE.processing.store(false, Ordering::SeqCst);
-                        }
+                        });
+                    } else {
+                        KB_STATE.processing.store(false, Ordering::SeqCst);
                     }
                 }
             }
