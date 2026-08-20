@@ -63,6 +63,7 @@ import {
   CornerDownLeft,
   Eraser,
   Languages,
+  RefreshCw,
 } from "lucide-react";
 import type { LucideProps } from "lucide-react";
 
@@ -131,6 +132,7 @@ const ICON_MAP = {
   CornerDownLeft,
   Eraser,
   Languages,
+  RefreshCw,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;

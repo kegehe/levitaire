@@ -228,6 +228,12 @@ src-tauri/binaries/
 src-tauri/gen/
 src-tauri/libs/
 
+# Tauri updater 签名私钥（绝不可入库）
+.tauri/
+*.key
+*.key.pub
+*tarius-signing-key*
+
 # Debug log (written by app at runtime)
 levitaire-debug.log
 

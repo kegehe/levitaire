@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { emit } from "@tauri-apps/api/event";
 import Icon from "./Icon";
 import type { IconName } from "./Icon";
@@ -96,6 +97,7 @@ import {
   type ThemePreferences,
   type ThemeSchemeId,
 } from "../styles/themePreferences";
+import { useUpdater } from "../hooks/useUpdater";
 import "./Settings.css";
 import TitleBar from "./TitleBar";
 
@@ -1161,6 +1163,17 @@ function Settings() {
     }
   };
 
+  // 在线更新：检查/下载/安装，由 tauri-plugin-updater 提供
+  const updater = useUpdater();
+  const [appVersion, setAppVersion] = useState("0.0.0");
+
+  // 读取当前应用运行版本（用于「在线更新」区块展示）
+  useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch((err) => console.error("Failed to get app version:", err));
+  }, []);
+
   return (
     <div className="settings-shell">
       <TitleBar />
@@ -1375,6 +1388,71 @@ function Settings() {
                     恢复失败
                   </span>
                 )}
+              </div>
+
+              <hr className="settings-divider" />
+              <h3 className="settings-subsection-title">在线更新</h3>
+              <div className="settings-item">
+                <div className="settings-updater-row">
+                  <span className="settings-label">版本</span>
+                  <span className="settings-updater-current">{appVersion}</span>
+                </div>
+                <div className="settings-updater-actions">
+                  {updater.status === "idle" && (
+                    <button className="settings-save-btn" onClick={updater.checkForUpdate}>
+                      <Icon name="RefreshCw" size={14} /> 检查更新
+                    </button>
+                  )}
+                  {updater.status === "checking" && (
+                    <span className="settings-hint">
+                      <Icon name="Loader2" size={14} className="settings-save-spinner" /> 正在检查…
+                    </span>
+                  )}
+                  {updater.status === "upToDate" && (
+                    <span className="settings-hint">
+                      <Icon name="Check" size={14} /> 已是最新版本
+                    </span>
+                  )}
+                  {updater.status === "available" && (
+                    <div className="settings-updater-available">
+                      <span className="settings-hint">
+                        发现新版本 <b>{updater.availableVersion}</b>
+                      </span>
+                      <button
+                        className="settings-save-btn"
+                        onClick={updater.downloadAndInstall}
+                      >
+                        <Icon name="Download" size={14} /> 下载并安装
+                      </button>
+                    </div>
+                  )}
+                  {updater.status === "downloading" && (
+                    <span className="settings-hint">
+                      <Icon name="Loader2" size={14} className="settings-save-spinner" /> 下载中
+                      {updater.progress != null ? ` ${updater.progress}%` : "…"}
+                    </span>
+                  )}
+                  {updater.status === "installing" && (
+                    <span className="settings-hint">
+                      <Icon name="Loader2" size={14} className="settings-save-spinner" /> 正在安装，稍后会自动重启…
+                    </span>
+                  )}
+                  {updater.status === "error" && (
+                    <div className="settings-updater-error">
+                      <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        <Icon name="X" size={14} /> 检查更新失败
+                      </span>
+                      {updater.errorMessage && (
+                        <span className="settings-hint" title={updater.errorMessage}>
+                          {updater.errorMessage.slice(0, 120)}
+                        </span>
+                      )}
+                      <button className="settings-toggle-btn" onClick={updater.reset} title="重试">
+                        <Icon name="RotateCcw" size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </>
           )}

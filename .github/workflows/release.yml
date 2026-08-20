@@ -1,0 +1,141 @@
+name: Build & Release Levitaire (0.1.0+ updater)
+
+# 手动触发：填写版本号（格式 x.y.z，不可为 0.0.0）后运行。
+# 工作流会用新版本号 bump 前端/Rust/tauri 版本，构建 NSIS 安装包并发布到 GitHub Release。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本号（x.y.z）"
+        required: true
+        type: string
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate version input
+        shell: bash
+        run: |
+          [[ "${{ github.event.inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::版本号格式必须为 x.y.z (如 0.1.1)"; exit 1; }
+          not_ok="0.0.0"
+          if [ "${{ github.event.inputs.version }}" = "$not_ok" ]; then
+            echo "::error::版本号不能为 0.0.0"; exit 1; fi
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Enable MSVC toolchain (cached)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Download resource bundle (ffmpeg + onnxruntime)
+        shell: bash
+        run: |
+          set -e
+          base="https://github.com/${{ github.repository }}/releases/download/resource-pack"
+          mkdir -p src-tauri/binaries src-tauri/libs
+          echo "downloading ffmpeg.exe ..."
+          curl -fL -o src-tauri/binaries/ffmpeg.exe "$base/ffmpeg.exe" || {
+            echo "::error::未找到资源包 (release tag='resource-pack'，assets 需含 ffmpeg.exe)。请先手工上传 ffmpeg.exe 与 onnxruntime.dll 到该 Release。"; exit 1; }
+          echo "downloading onnxruntime.dll ..."
+          curl -fL -o src-tauri/libs/onnxruntime.dll "$base/onnxruntime.dll" || {
+            echo "::error::未找到资源包 (release tag='resource-pack'，assets 需含 onnxruntime.dll)。请先手工上传。"; exit 1; }
+          ls -lh src-tauri/binaries/ffmpeg.exe src-tauri/libs/onnxruntime.dll
+
+      - name: Inject signing key (from repo secrets)
+        shell: bash
+        run: |
+          echo "${{ secrets.LEVITAIRE_SIGNING_PRIVATE_KEY }}" > .tauri-signing.key
+          test -s .tauri-signing.key || { echo "::error::Secret LEVITAIRE_SIGNING_PRIVATE_KEY 未配置"; exit 1; }
+
+      - name: Bump version to ${{ github.event.inputs.version }}
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.version }}"
+          node -e '
+            const fs=require("fs");
+            const j=JSON.parse(fs.readFileSync("package.json","utf8"));j.version=process.argv[1];fs.writeFileSync("package.json",JSON.stringify(j,null,2)+"\n");' "$V"
+          node -e '
+            const fs=require("fs");
+            const p="src-tauri/tauri.conf.json";const j=JSON.parse(fs.readFileSync(p,"utf8"));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n");' "$V"
+          # Rust 清单 + 锁文件中的 levitaire 版本（保持三者一致）
+          sed -i -E "s/^version = \".+\"/version = \"$V\"/" src-tauri/Cargo.toml
+          perl -0pi -e "s/(name = \"levitaire\"\nversion = \")[^\"]+/\\1$V/g" src-tauri/Cargo.lock
+          echo "--- package.json ---"; grep '"version"' package.json
+          echo "--- Cargo.toml ---"; grep '^version' src-tauri/Cargo.toml
+          echo "--- Cargo.lock ---"; grep -A1 'name = "levitaire"' src-tauri/Cargo.lock | tail -1
+
+      - name: Build release bundle (NSIS + updater signature)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_PATH: .tauri-signing.key
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.LEVITAIRE_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npm run tauri build -- --bundles nsis
+          echo "=== artifacts ==="
+          ls -lh src-tauri/target/release/bundle/nsis/
+          ls -lh src-tauri/target/release/bundle/nsis/*.sig 2>/dev/null || echo "no .sig at bundle dir"
+
+      - name: Produce updater signature + latest.json
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_PATH: .tauri-signing.key
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.LEVITAIRE_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -e
+          V="${{ github.event.inputs.version }}"
+          BUNDLE=src-tauri/target/release/bundle/nsis
+          EXE=$(ls "$BUNDLE"/Levitaire_*_x64-setup.exe)
+          echo "exe: $EXE"
+          # tauri build 不生成 .sig，需单独对安装包签名（签名链确认见下）
+          LSIG="$EXE.sig"
+          npx @tauri-apps/cli signer sign "$EXE"
+          test -f "$LSIG" || { echo "::error::签名文件 $LSIG 未生成"; exit 1; }
+          SIGNATURE=$(cat "$LSIG")
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          URL="https://github.com/${{ github.repository }}/releases/download/v$V/$(basename "$EXE")"
+          node -e '
+            const fs=require("fs");
+            const [url,sig,pub,ver] = process.argv.slice(1);
+            const j={version:ver,notes:"",pub_date:pub,platforms:{"windows-x86_64":{signature:sig,url}}};
+            fs.writeFileSync("latest.json", JSON.stringify(j,null,2));' "$URL" "$SIGNATURE" "$PUB_DATE" "$V"
+          echo "=== latest.json ==="
+          cat latest.json
+
+      - name: Publish GitHub Release v${{ github.event.inputs.version }}
+        shell: bash
+        run: |
+          set -e
+          V="${{ github.event.inputs.version }}"
+          BUNDLE=src-tauri/target/release/bundle/nsis
+          EXE=$(ls "$BUNDLE"/Levitaire_*_x64-setup.exe)
+          LSIG="$EXE.sig"
+          # 上传安装包、其签名 .sig（供人工校验）与更新清单 latest.json
+          gh release create "v$V" "$EXE" "$LSIG" latest.json \
+            --repo "${{ github.repository }}" \
+            --title "Levitaire v$V" \
+            --notes "自动构建发布 v$V（NSIS + 在线更新）"
+          echo "release created: v$V"

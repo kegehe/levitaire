@@ -713,3 +713,46 @@
 .settings-pos-actions .settings-hint {
   margin-bottom: 0;
 }
+
+/* ── 在线更新 ──────────────────────────────────── */
+.settings-updater-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-updater-current {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-fg);
+  font-weight: 500;
+}
+
+.settings-updater-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.settings-updater-actions .settings-hint {
+  margin-bottom: 0;
+}
+
+.settings-updater-available {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.settings-updater-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-updater-error .settings-hint {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

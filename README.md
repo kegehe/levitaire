@@ -122,6 +122,36 @@ npm run tauri build
 
 构建产物位于 `src-tauri/target/release/bundle/`，含 `.msi` 安装包与独立 `.exe`。
 
+### 在线更新与发布（0.1.0+）
+
+Levitaire 已接入 Tauri Updater：设置页 → 通用 → 在线更新 可手动检查、下载并安装新版本（安装包为 NSIS，`installMode: passive` 静默安装后自动重启）。版本检查地址、签名公钥见 `src-tauri/tauri.conf.json` 的 `plugins.updater`。
+
+#### 发布一次新版本（CI 自动构建 + 发布 GitHub Release）
+
+> 前置条件（首次一次性配置，见下）已就绪时，发布只需两步。
+
+1. 可触发：仓库 **Actions → `Build & Release Levitaire` → Run workflow**，填入版本号（如 `0.1.1`）。
+2. 工作流会自动：bump `package.json` / `tauri.conf.json` / `Cargo.toml` / `Cargo.lock` → 下载资源包 → 用签名密钥构建 NSIS 安装包 → 生成 `latest.json` 更新清单 → 创建 GitHub Release `v<版本>` 并上传安装包、`.sig`、`latest.json`。
+
+用户安装旧版本后，在设置页「检查更新」即可发现并升级到新版本。
+
+#### 首次一次性配置
+
+1. **签名密钥**：本机 `C:\Users\<你>\.tauri\levitaire.key` 与 `levitaire.key.pub` 已生成（密码在 `levitaire-key-password.txt`）。请妥善备份私钥与密码——丢失将无法再签名更新包。在 **GitHub → 仓库 → Settings → Secrets and variables → Actions** 新增两个 secret：
+
+   - `LEVITAIRE_SIGNING_PRIVATE_KEY`：填写 `levitaire.key` 的**文件完整内容**（含 `untrusted comment:` 行）
+   - `LEVITAIRE_SIGNING_PRIVATE_KEY_PASSWORD`：`levitaire-key-password.txt` 的内容
+
+2. **资源包 Release**（ffmpeg 与 onnxruntime 未入库，因超 GitHub 单文件 100MB 限制）：在仓库创建 tag `resource-pack` 的 Release，上传两个 asset：
+   - `ffmpeg.exe`（本地 `src-tauri/binaries/ffmpeg.exe`）
+   - `onnxruntime.dll`（本地 `src-tauri/libs/onnxruntime.dll`）
+
+   CI 每次构建会从该 Release 下载这两个文件。
+
+3. 私钥与密码**严禁**提交到仓库（已由 `.gitignore` 忽略 `.tauri/`、`*.key` 等）。
+
+> 说明：当前发布基线为 `v0.1.0`。Updater 仅在「服务器版本 > 本地已装版本」时提示更新，因此后续补丁需递增版本号（如 `v0.1.1`）。
+
 ---
 
 ## 📖 使用指南

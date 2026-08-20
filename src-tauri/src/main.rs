@@ -61,6 +61,9 @@ fn main() {
                 let _ = window.set_focus();
             }
         }))
+        // 在线更新：由 tauri-plugin-updater 提供，版本检查 endpoint 与签名公钥
+        // 见 tauri.conf.json 的 plugins.updater。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // 清理上次运行遗留的贴图临时文件
             crate::screenshot::pin::cleanup_stale_temp_files();
