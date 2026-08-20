@@ -77,6 +77,11 @@
     "active": true,
     "targets": "all",
     "publisher": "Levitaire",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
     "resources": {
       "binaries/ffmpeg.exe": "ffmpeg.exe",
       "libs/onnxruntime.dll": "onnxruntime.dll"
