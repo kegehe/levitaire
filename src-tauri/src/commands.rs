@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
@@ -14,6 +16,38 @@ static SCREENSHOT_STARTING: AtomicBool = AtomicBool::new(false);
 static SCREENSHOT_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static SCREENSHOT_SESSION: AtomicU64 = AtomicU64::new(0);
 static MONITOR_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
+static POMODORO_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// 截图/录屏会话开始前 orb 的可见状态。
+/// 会话清理（取消截图/录屏）时按此状态恢复 orb，而不是无条件 show：
+/// 否则用户通过托盘「显示/隐藏浮球」已隐藏的 orb 会被强制弹出，
+/// 与托盘开关相互矛盾。仅在真正进入会话时写入，会话结束后由下个会话覆盖。
+static ORB_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(true);
+
+/// 截图/录屏会话是否活跃。进入 start_screenshot / start_recording_select 时置 true，
+/// 会话清理（cleanup_screenshot_session_inner / cancel_recording_select）时置 false。
+/// 用于区分「正在清理会话」（按会话前状态恢复 orb）与「空闲清理」
+/// （如仅关闭工具开关，不应动 orb）。相比隐式推断 `is_screenshot_mode()/is_recording_mode()`
+/// 的可靠性：录制「编码/预览」阶段 recording_mode 已被清除但 `is_finishing()` 仍为 true，
+/// 此时清理仍应恢复 orb，故用显式标记覆盖整个会话生命周期。
+static CAPTURE_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 恢复默认位置时抑制对应窗口 onMoved 保存的截止时间戳（窗口 id → 截止毫秒）。
+/// 程序化 set_position 会触发 onMoved → 前端在 300ms 后再次 set_window_position，
+/// 若不抑制会把刚恢复的默认位置重新记忆。此窗口期内仅忽略该窗口的保存请求，
+/// 不影响其他悬浮窗的正常拖动记忆。
+static POSITION_SAVE_SUPPRESS_UNTIL_MS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+fn position_save_suppress() -> &'static Mutex<HashMap<String, u64>> {
+    POSITION_SAVE_SUPPRESS_UNTIL_MS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// 保护 settings 窗口"检查+创建+注册关闭拦截"的异步互斥锁，防止快速双击导致竞态
 /// 使用 tokio::sync::Mutex 而非 std::sync::Mutex，避免在 async 函数中持有同步锁导致死锁
@@ -40,6 +74,11 @@ impl Drop for ScreenshotStartGuard {
 
 /// End a screenshot session from every exit path without destroying the configured overlay.
 fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
+    // 仅会话进行中被隐藏的 orb 才按会话前状态恢复，避免把用户经托盘已隐藏的 orb
+    // 强制弹出（托盘「显示/隐藏浮球」与清理逻辑相互矛盾）。
+    // 用会话活跃标记区分「正在清理会话」与「空闲清理」（如仅关闭工具开关），
+    // 空闲清理不应动 orb。必须在 set_screenshot_mode(false) 之前读取。
+    let session_active = CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst);
     crate::hooks::mouse::set_screenshot_mode(false);
     // 如果录制模式也处于活跃状态（例如 overlay 显示了 ScreenshotTool 但实际是录制模式），
     // 一并清理，避免 recording_mode 残留导致后续状态不一致
@@ -58,10 +97,15 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
             *guard = None;
         }
     }
-    if let Some(orb) = app.get_webview_window("orb") {
-        let _ = orb.show();
-        let _ = orb.set_always_on_top(true);
+    // 仅当确有会话被清理且会话前 orb 可见时才恢复显示，避免强制弹出托盘已隐藏的 orb
+    if session_active && ORB_VISIBLE_BEFORE_SESSION.load(Ordering::SeqCst) {
+        if let Some(orb) = app.get_webview_window("orb") {
+            let _ = orb.show();
+            let _ = orb.set_always_on_top(true);
+        }
     }
+    // 会话结束，复位活跃标记，避免泄漏到后续空闲清理误判
+    CAPTURE_SESSION_ACTIVE.store(false, Ordering::SeqCst);
 }
 
 pub fn cleanup_screenshot_session(app: &tauri::AppHandle) {
@@ -77,7 +121,10 @@ pub fn is_screenshot_starting() -> bool {
     SCREENSHOT_STARTING.load(Ordering::SeqCst)
 }
 
-pub fn cleanup_screenshot_session_if_current(app: &tauri::AppHandle, session: u64) {
+/// 若指定的 session 是当前截图会话则清理，并返回是否实际清理。
+/// 返回 false 表示该 session 已过期（已有更新的会话接管），调用方据此判断
+/// 不应向当前活跃会话发出「已取消」通知，避免误重置新会话的前端状态。
+pub fn cleanup_screenshot_session_if_current(app: &tauri::AppHandle, session: u64) -> bool {
     if SCREENSHOT_SESSION
         .compare_exchange(
             session,
@@ -88,6 +135,9 @@ pub fn cleanup_screenshot_session_if_current(app: &tauri::AppHandle, session: u6
         .is_ok()
     {
         cleanup_screenshot_session_inner(app);
+        true
+    } else {
+        false
     }
 }
 
@@ -183,10 +233,16 @@ pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
                 "settings",
                 WebviewUrl::App("index.html".into()),
             )
-            .title("Floatory Settings")
+            .title("Levitaire Settings")
             .inner_size(780.0, 560.0)
             .center()
             .visible(false)
+            // 自绘标题栏：去掉原生装饰，由前端渲染标题栏并跟随主题/主题色。
+            // 失去 Windows 原生边框/阴影，由 CSS border 负责窗口边界（见 .settings-shell）。
+            .decorations(false)
+            .shadow(false)
+            .resizable(true)
+            .min_inner_size(520.0, 420.0)
             .build()
             .map_err(|e| format!("创建 settings 窗口失败: {}", e))?;
             win
@@ -272,6 +328,9 @@ pub async fn call_ai_stream(
     }
 
     let app_handle = app.clone();
+    // 发起新流式调用前重置取消标志（防止上一次取消影响本次请求），
+    // 前端「取消」通过 cancel_ai_stream 命令置位，call_stream 每帧检测后提前终止。
+    ai_service.reset_cancel();
     let result = ai_service
         .call_stream(&prompt, system_prompt.as_deref(), move |chunk| {
             let _ = app_handle.emit(
@@ -287,6 +346,8 @@ pub async fn call_ai_stream(
             Ok(())
         }
         Err(e) => {
+            // 用户取消导致的提前终止同样回传消息，前端取消时已移除监听器，无副作用；
+            // 若取消后重新发起了新请求，则该 error 事件被新请求的监听器屏蔽（requestId 校验）。
             let _ = app.emit(
                 "ai-stream",
                 serde_json::json!({ "type": "error", "data": &e }),
@@ -294,6 +355,12 @@ pub async fn call_ai_stream(
             Err(e)
         }
     }
+}
+
+/// 请求取消当前流式 AI 调用（前端点取消时调用）
+#[tauri::command]
+pub fn cancel_ai_stream(ai_service: State<'_, crate::ai::AiService>) {
+    ai_service.request_cancel();
 }
 
 /// 获取当前 AI 配置
@@ -319,6 +386,21 @@ pub fn update_ai_config(
     Ok(())
 }
 
+#[tauri::command]
+pub fn get_theme_preferences(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<crate::config::ThemePreferences, String> {
+    config_manager.get_theme_preferences()
+}
+
+#[tauri::command]
+pub fn set_theme_preferences(
+    preferences: crate::config::ThemePreferences,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_theme_preferences(preferences)
+}
+
 /// 替换选中文字
 #[tauri::command]
 pub async fn replace_selection(text: String) -> Result<(), String> {
@@ -338,16 +420,67 @@ pub async fn replace_selection(text: String) -> Result<(), String> {
         .map_err(|e| format!("替换任务执行失败: {}", e))?
 }
 
-/// 打开 URL（用默认浏览器）
+/// 允许通过 open_url 打开的 URL scheme 白名单。
+/// 仅放行浏览器/常见协议，阻止 file://、脚本协议等可能被构造用于命令注入的 scheme。
+const ALLOWED_URL_SCHEMES: &[&str] = &["http", "https", "mailto"];
+
+/// 校验 URL 是否为允许的 scheme（大小写不敏感）。
+/// 返回规范化后的小写 scheme。
+fn validate_url_scheme(url: &str) -> Result<String, String> {
+    // 去除首部空白与控制字符，避免 \r\n 等被用于注入
+    let trimmed = url.trim_start_matches(|c: char| c.is_whitespace() || c.is_control());
+    let scheme = trimmed
+        .split(':')
+        .next()
+        .ok_or_else(|| "URL 缺少 scheme".to_string())?
+        .trim_end_matches(|c: char| c.is_whitespace() || c.is_control())
+        .to_lowercase();
+    if scheme.is_empty() {
+        return Err("URL scheme 为空".to_string());
+    }
+    // scheme 仅允许字母数字，杜绝 scheme 内嵌入特殊字符
+    if !scheme.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(format!("非法 URL scheme: {}", scheme));
+    }
+    if !ALLOWED_URL_SCHEMES.contains(&scheme.as_str()) {
+        return Err(format!("不允许的 URL scheme: {}", scheme));
+    }
+    Ok(scheme)
+}
+
+/// 打开 URL（用默认浏览器）。
+/// 通过校验 scheme 白名单 + ShellExecuteW 直接打开，避免 cmd /C start 的命令注入风险。
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     crate::utils::logger::log("commands", &format!("open_url: {}", url));
+    validate_url_scheme(&url)?;
+
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &url])
-            .spawn()
-            .map_err(|e| format!("打开浏览器失败: {}", e))?;
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        // 将 URL 编码为 UTF-16，ShellExecuteW 以 "open" 动词交给系统默认处理程序
+        let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0u16)).collect();
+        let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0u16)).collect();
+
+        // SAFETY: verb 与 file 均为以 NUL 结尾的 UTF-16 字符串指针，参数符合 ShellExecuteW 签名。
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(url_wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW 返回 HINSTANCE；当 HINSTANCE <= 32 时表示失败
+        let hinst = result.0 as usize;
+        if hinst <= 32 {
+            return Err(format!("打开浏览器失败 (code: {})", hinst));
+        }
     }
     Ok(())
 }
@@ -492,6 +625,21 @@ pub fn set_toolbar_features(
     config_manager.update_toolbar_features(features)
 }
 
+/// 获取搜索引擎配置（空串表示未设置，前端取默认 Bing）
+#[tauri::command]
+pub fn get_search_engine(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
+    config_manager.get_search_engine()
+}
+
+/// 更新搜索引擎配置并持久化
+#[tauri::command]
+pub fn set_search_engine(
+    engine: String,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_search_engine(engine)
+}
+
 /// 获取去重粒度配置（JSON 字符串，空串表示未设置）
 #[tauri::command]
 pub fn get_dedup_mode(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
@@ -569,16 +717,22 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
                 "palette",
                 WebviewUrl::App("index.html".into()),
             )
-            .title("Floatory Tools")
-            .inner_size(360.0, 340.0)
+            .title("Levitaire Tools")
+            .inner_size(360.0, 260.0)
             .resizable(false)
             .transparent(true)
             .decorations(false)
-            .shadow(true)
+            // 由 palette-container 的 CSS 阴影负责视觉层级。Windows 原生阴影会在
+            // 透明圆角的外侧参与合成，深色主题下会显出浅色边缘。
+            .shadow(false)
             .always_on_top(true)
             .skip_taskbar(true)
             .focusable(true)
             .visible(false)
+            // WebView2 默认背景为不透明白色 (255,255,255,255)，
+            // 在 border-radius 圆角裁剪区域外会露出白边（深色模式下尤为明显）。
+            // 显式设为完全透明，使圆角外区域真正透明。
+            .background_color(tauri::webview::Color(0, 0, 0, 0))
             .build()
             .map_err(|e| format!("创建 palette 窗口失败: {}", e))?;
             win
@@ -602,14 +756,15 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     // 注册完成后释放初始化锁，后续定位和 show 不需要在锁内执行
     drop(_init_guard);
 
-    // palette 物理尺寸（inner_size() 已返回物理像素，无需再乘 scale）
-    // 首次创建时 inner_size() 可能返回 0，使用 WebviewWindowBuilder 中指定的逻辑尺寸乘 scale_factor 作为 fallback
+    // palette 物理尺寸：宽度固定 360，高度由前端自适应调整（fit-content + setSize）。
+    // 首次创建时 inner_size() 可能返回 0，使用 WebviewWindowBuilder 中指定的逻辑尺寸乘 scale_factor 作为 fallback。
+    // 高度取 inner_size()（非首次时已是前端上次调整的值），首次创建 fallback 用初始值。
     let scale = palette.scale_factor().unwrap_or(1.0);
     let inner = palette.inner_size().unwrap_or_else(|_| {
-        tauri::PhysicalSize::new((360.0 * scale) as u32, (340.0 * scale) as u32)
+        tauri::PhysicalSize::new((360.0 * scale) as u32, (260.0 * scale) as u32)
     });
     let pw = if inner.width > 0 { inner.width as i32 } else { (360.0 * scale) as i32 };
-    let ph = if inner.height > 0 { inner.height as i32 } else { (340.0 * scale) as i32 };
+    let ph = if inner.height > 0 { inner.height as i32 } else { (260.0 * scale) as i32 };
 
     // 锚点：优先用 orb 窗口位置；失败则用鼠标位置
     let (mut x, mut y, anchor_hwnd) = if let Some(orb) = app.get_webview_window("orb") {
@@ -682,6 +837,9 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     let _ = palette.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
         x, y,
     )));
+    // set_size 使用 inner_size() 的当前值（非首次时已是前端上次调整的值），
+    // 前端 useLayoutEffect 会在渲染后按实际内容高度再次 setSize 修正，
+    // 两者之间可能有一帧微调，可接受。
     let _ = palette.set_size(tauri::PhysicalSize::new(pw, ph));
 
     palette.show().map_err(|e| e.to_string())?;
@@ -695,6 +853,13 @@ pub fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("palette") {
         window.hide().map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// 退出应用（悬浮球右键菜单「退出」入口，与托盘菜单 quit 等价）
+#[tauri::command]
+pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
     Ok(())
 }
 
@@ -759,12 +924,11 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
             "screenshot-overlay 窗口未加载".to_string()
         })?;
     crate::utils::logger::log("screenshot", "overlay 窗口已获取，准备截屏缓存");
-    // 对照：查 orb/toolbar/palette/voice-overlay 窗口的 hwnd 是否就绪
+    // 对照：查 orb/toolbar/palette/monitor-overlay 窗口的 hwnd 是否就绪
     for (label, win) in [
         ("orb", app.get_webview_window("orb")),
         ("toolbar", app.get_webview_window("toolbar")),
         ("palette", app.get_webview_window("palette")),
-        ("voice-overlay", app.get_webview_window("voice-overlay")),
         ("monitor-overlay", app.get_webview_window("monitor-overlay")),
     ] {
         match win {
@@ -811,20 +975,33 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         .is_ok()
     {
         let app_on_close = app.clone();
-        overlay.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        overlay.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 cleanup_screenshot_session(&app_on_close);
             }
+            // 前端每次进入截图/录屏前都会先销毁再重建 overlay 窗口，
+            // 窗口销毁后其上的监听器随之失效。此处监听 Destroyed 复位
+            // 注册标记，使新窗口能重新注册关闭拦截；否则第二次起在遮罩上
+            // Alt+F4 会直接关窗而不清理截图状态，导致截图模式卡死。
+            tauri::WindowEvent::Destroyed => {
+                SCREENSHOT_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
         });
     }
     let cache = app.state::<crate::screenshot::ScreenCache>();
-    crate::hooks::mouse::set_screenshot_mode(true);
     // 隐藏所有浮动 UI，避免被截入全屏缓存
     let orb_was_visible = app
         .get_webview_window("orb")
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false);
+    // 记录会话前 orb 可见性 + 会话活跃标记，供会话清理（取消截图）时按原状态恢复，
+    // 不强制弹出用户经托盘已隐藏的 orb。先记录再置 screenshot_mode，
+    // 避免并发清理读到「模式已置但标记未更新」的半状态。
+    ORB_VISIBLE_BEFORE_SESSION.store(orb_was_visible, Ordering::SeqCst);
+    CAPTURE_SESSION_ACTIVE.store(true, Ordering::SeqCst);
+    crate::hooks::mouse::set_screenshot_mode(true);
     let toolbar_was_visible = app
         .get_webview_window("toolbar")
         .map(|w| w.is_visible().unwrap_or(false))
@@ -1133,8 +1310,9 @@ pub fn clipboard_set_image(
 }
 
 /// 对屏幕区域执行 OCR 识别，返回文本
+/// async：模型懒加载与识别在 spawn_blocking 阻塞池执行，避免首次使用时阻塞 UI 主线程
 #[tauri::command]
-pub fn ocr_region(
+pub async fn ocr_region(
     cache: tauri::State<'_, crate::screenshot::ScreenCache>,
     left: i32,
     top: i32,
@@ -1151,29 +1329,33 @@ pub fn ocr_region(
         &format!("ocr_region: ({},{}) {}x{}", left, top, w, h),
     );
     let bgra = capture_from_cache(&cache, left, top, w, h)?;
-    let result = crate::ocr::get_ocr_service()
-        .ok_or_else(|| "OCR 服务未初始化".to_string())?
-        .lock()
-        .map_err(|e| format!("OCR 服务锁失败: {}", e))?
-        .recognize_bgra(&bgra, w, h);
-    match result {
-        Ok(result) => {
-            crate::utils::logger::log(
-                "ocr",
-                &format!(
-                    "ocr_region completed: engine={}, chars={}, elapsed={}ms",
-                    result.engine,
-                    result.text.chars().count(),
-                    result.elapsed_ms
-                ),
-            );
-            Ok(result.text)
+    tokio::task::spawn_blocking(move || {
+        let result = crate::ocr::ensure_ocr_service()
+            .ok_or_else(|| "OCR 服务初始化失败".to_string())?
+            .lock()
+            .map_err(|e| format!("OCR 服务锁失败: {}", e))?
+            .recognize_bgra(&bgra, w, h);
+        match result {
+            Ok(result) => {
+                crate::utils::logger::log(
+                    "ocr",
+                    &format!(
+                        "ocr_region completed: engine={}, chars={}, elapsed={}ms",
+                        result.engine,
+                        result.text.chars().count(),
+                        result.elapsed_ms
+                    ),
+                );
+                Ok(result.text)
+            }
+            Err(error) => {
+                crate::utils::logger::log("ocr", &format!("ocr_region failed: {}", error));
+                Err(error.to_string())
+            }
         }
-        Err(error) => {
-            crate::utils::logger::log("ocr", &format!("ocr_region failed: {}", error));
-            Err(error.to_string())
-        }
-    }
+    })
+    .await
+    .map_err(|e| format!("OCR 任务执行失败: {}", e))?
 }
 
 /// 将截图钉在桌面（创建贴图窗口），返回 pin id
@@ -1355,6 +1537,22 @@ pub fn tts_get_state(app: tauri::AppHandle) -> Result<serde_json::Value, String>
     }))
 }
 
+/// 查询朗读进度：(positionMs, durationMs, paused)。
+/// durationMs 为 0 表示总时长未知（无限时长，实时流等场景）。
+/// 无 player 返回 Err，前端忽略即可。
+#[tauri::command]
+pub fn tts_get_progress(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let state = app.state::<crate::tts::TtsState>();
+    match crate::tts::get_progress(&state) {
+        Some((pos_ms, dur_ms, paused)) => Ok(serde_json::json!({
+            "positionMs": pos_ms,
+            "durationMs": dur_ms,
+            "paused": paused,
+        })),
+        None => Err("当前没有正在朗读的音频".to_string()),
+    }
+}
+
 /// 获取 TTS 朗读配置（JSON 字符串，空串表示未设置，前端取默认值）
 #[tauri::command]
 pub fn get_tts_config(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
@@ -1370,294 +1568,154 @@ pub fn set_tts_config(
     config_manager.update_tts_config(config)
 }
 
-// ─── 语音输入（STT） ─────────────────────────────────────────────
-
-/// 录音浮层显示前记录的前台窗口 HWND，供粘贴前恢复焦点
-static VOICE_FOREGROUND_HWND: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
-
-/// 显示录音浮层窗口（跟随鼠标，多显示器边界翻转）
-#[tauri::command]
-pub fn show_voice_window(app: tauri::AppHandle) -> Result<(), String> {
-    // 记录当前前台窗口，供识别后粘贴前恢复焦点
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-        let hwnd = unsafe { GetForegroundWindow() };
-        if !hwnd.is_invalid() {
-            if let Ok(mut g) = VOICE_FOREGROUND_HWND.lock() {
-                *g = Some(hwnd.0 as isize);
-            }
-        }
-    }
-
-    let win = app
-        .get_webview_window("voice-overlay")
-        .ok_or_else(|| "voice-overlay 窗口未找到".to_string())?;
-    let win_on_close = win.clone();
-    let app_on_close = app.clone();
-    win.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            if let Some(state) = app_on_close.try_state::<crate::stt::SttState>() {
-                state.cancel();
-            }
-            let _ = win_on_close.destroy();
-        }
-    });
-    let inner = win.inner_size().unwrap_or_default();
-    let ww = inner.width as i32;
-    let wh = inner.height as i32;
-
-    // 锚点：鼠标位置，偏移 8px
-    let (mut x, mut y) = if let Ok(cur) = crate::automation::get_mouse_position() {
-        (cur.x + 8, cur.y + 8)
-    } else {
-        (100, 100)
-    };
-
-    // 边界翻转：不超过当前鼠标所在屏工作区
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        };
-        let pt = POINT { x, y };
-        let monitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool() {
-            let rc = mi.rcWork;
-            if x + ww > rc.right {
-                x = rc.right - ww;
-            }
-            if y + wh > rc.bottom {
-                y = rc.bottom - wh;
-            }
-            if x < rc.left {
-                x = rc.left;
-            }
-            if y < rc.top {
-                y = rc.top;
-            }
-        }
-    }
-
-    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-        x, y,
-    )));
-    win.show().map_err(|e| e.to_string())?;
-    win.set_focus().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// 隐藏录音浮层
-#[tauri::command]
-pub fn hide_voice_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(state) = app.try_state::<crate::stt::SttState>() {
-        state.cancel();
-    }
-    if let Some(window) = app.get_webview_window("voice-overlay") {
-        window.destroy().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// 识别语音：audio 为 base64 编码的音频字节（webm/wav/mp3），mime 为其 MIME 类型。
-/// 调用云端 OpenAI 兼容接口识别，返回文本。
-#[tauri::command]
-pub async fn stt_transcribe(
-    app: tauri::AppHandle,
-    audio: String,
-    mime: String,
-    config_manager: State<'_, ConfigManager>,
-    state: State<'_, crate::stt::SttState>,
-) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let bytes = STANDARD
-        .decode(audio.trim())
-        .map_err(|e| format!("base64 解码失败: {}", e))?;
-    if bytes.is_empty() {
-        return Err("音频数据为空".into());
-    }
-
-    // 从 config 解析云端配置
-    let stt_config_raw = config_manager.get_stt_config().unwrap_or_default();
-    let api_key = config_manager.get_stt_api_key().unwrap_or_default();
-    let (base_url, model) = parse_stt_cloud_config(&stt_config_raw);
-    let cloud_config = crate::stt::SttCloudConfig {
-        api_key,
-        base_url,
-        model,
-        language: "zh".to_string(),
-    };
-
-    // 文件名扩展名按 mime 推断
-    let ext = match mime.as_str() {
-        "audio/wav" => "wav",
-        "audio/mp3" | "audio/mpeg" => "mp3",
-        "audio/ogg" => "ogg",
-        _ => "webm",
-    };
-    let filename = format!("recording.{}", ext);
-
-    let cancellation = state.begin_request();
-    crate::stt::emit_transcribing(&app);
-    crate::stt::transcribe_cloud(&app, cancellation, &cloud_config, bytes, &mime, &filename).await
-}
-
-/// 取消进行中的识别
-#[tauri::command]
-pub fn stt_cancel(state: State<'_, crate::stt::SttState>) -> Result<(), String> {
-    state.cancel();
-    Ok(())
-}
-
-/// 从 stt_config JSON 解析 base_url 和 model，缺省回退默认值
-fn parse_stt_cloud_config(raw: &str) -> (String, String) {
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) {
-        let base_url = json
-            .get("baseUrl")
-            .and_then(|v| v.as_str())
-            .unwrap_or("https://api.openai.com")
-            .to_string();
-        let model = json
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("whisper-1")
-            .to_string();
-        (base_url, model)
-    } else {
-        (
-            "https://api.openai.com".to_string(),
-            "whisper-1".to_string(),
-        )
-    }
-}
-
-/// 获取 STT API Key（明文，供设置页回显占位；实际值已加密存储）
-#[tauri::command]
-pub fn get_stt_api_key(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
-    config_manager.get_stt_api_key()
-}
-
-/// 设置 STT API Key（加密存储）
-#[tauri::command]
-pub fn set_stt_api_key(
-    api_key: String,
-    config_manager: State<'_, ConfigManager>,
-) -> Result<(), String> {
-    config_manager.update_stt_api_key(api_key)
-}
-
-/// 将识别文本粘贴到原前台窗口：写剪贴板 + 恢复焦点 + 模拟 Ctrl+V
-#[tauri::command]
-pub async fn stt_paste_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Err("识别结果为空".into());
-    }
-    let clipboard = app.state::<ClipboardManager>();
-    clipboard.copy(&text).map_err(|e| e.to_string())?;
-
-    // 取出记录的前台 HWND
-    let foreground = VOICE_FOREGROUND_HWND
-        .lock()
-        .map_err(|e| format!("锁失败: {}", e))?
-        .take();
-
-    tokio::task::spawn_blocking(move || {
-        unsafe {
-            use windows::Win32::Foundation::HWND;
-            use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-            // 恢复前台焦点到录音前的窗口
-            if let Some(h) = foreground {
-                if h != 0 {
-                    let hwnd = HWND(h as *mut std::ffi::c_void);
-                    let _ = SetForegroundWindow(hwnd);
-                    std::thread::sleep(std::time::Duration::from_millis(60));
-                }
-            }
-            // 释放修饰键（防热键 Ctrl+Shift+S 的 S/修饰键卡住导致 Ctrl+Shift+V）
-            crate::automation::clipboard_selection::release_all_modifiers();
-            // 模拟 Ctrl+V
-            if !crate::automation::clipboard_selection::simulate_paste() {
-                return Err("模拟 Ctrl+V 失败".to_string());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(150));
-        }
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| format!("粘贴任务失败: {}", e))?
-}
-
-/// 获取语音输入快捷键（空串表示未设置）
-#[tauri::command]
-pub fn get_stt_hotkey(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
-    config_manager.get_stt_hotkey()
-}
-
-/// 设置语音输入快捷键：解析、注册全局热键（带冲突检测）、持久化。空串则反注册并清除。
-#[tauri::command]
-pub fn set_stt_hotkey(
-    hotkey: String,
-    config_manager: State<'_, ConfigManager>,
-) -> Result<(), String> {
-    let trimmed = hotkey.trim().to_string();
-    let slot = crate::hooks::hotkey::HotkeySlotId::Voice;
-    if trimmed.is_empty() {
-        crate::hooks::hotkey::unregister_hotkey(slot);
-        return config_manager.update_stt_hotkey(String::new());
-    }
-    crate::hooks::hotkey::register_hotkey(slot, &trimmed)?;
-    config_manager.update_stt_hotkey(trimmed)
-}
-
-/// 获取语音输入工具启用状态
-#[tauri::command]
-pub fn get_stt_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
-    config_manager.get_stt_enabled()
-}
-
-/// 设置语音输入工具启用状态（仅启用时热键才触发），同时持久化
-#[tauri::command]
-pub fn set_stt_enabled(
-    enabled: bool,
-    app: tauri::AppHandle,
-    config_manager: State<'_, ConfigManager>,
-) -> Result<(), String> {
-    crate::hooks::hotkey::set_slot_enabled(crate::hooks::hotkey::HotkeySlotId::Voice, enabled);
-    if !enabled {
-        if let Some(state) = app.try_state::<crate::stt::SttState>() {
-            state.cancel();
-        }
-        if let Some(window) = app.get_webview_window("voice-overlay") {
-            let _ = window.destroy();
-        }
-    }
-    config_manager.update_stt_enabled(enabled)
-}
-
-/// 获取语音输入配置（JSON 字符串，空串表示未设置）
-#[tauri::command]
-pub fn get_stt_config(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
-    config_manager.get_stt_config()
-}
-
-/// 更新语音输入配置并持久化
-#[tauri::command]
-pub fn set_stt_config(
-    config: String,
-    config_manager: State<'_, ConfigManager>,
-) -> Result<(), String> {
-    config_manager.update_stt_config(config)
-}
-
 // ─── 系统监控 ───────────────────────────────────────────────────
 
-/// 显示系统监控悬浮窗（跟随鼠标，多显示器边界翻转）并启动采集线程
+/// 将物理坐标裁剪到该点所在显示器的工作区内，防止窗口在显示器布局/分辨率变化后跑到屏幕外。
+/// 返回裁剪后的坐标。
+#[cfg(target_os = "windows")]
+pub fn clamp_position_to_workarea(x: i32, y: i32, win_w: i32, win_h: i32) -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    let mut x = x;
+    let mut y = y;
+    let pt = POINT { x, y };
+    let monitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool() {
+        let rc = mi.rcWork;
+        if x + win_w > rc.right {
+            x = rc.right - win_w;
+        }
+        if y + win_h > rc.bottom {
+            y = rc.bottom - win_h;
+        }
+        if x < rc.left {
+            x = rc.left;
+        }
+        if y < rc.top {
+            y = rc.top;
+        }
+    }
+    (x, y)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn clamp_position_to_workarea(x: i32, y: i32, _win_w: i32, _win_h: i32) -> (i32, i32) {
+    (x, y)
+}
+
+/// 计算浮球（orb）的默认位置：主屏工作区右下角（与启动时未记忆的回退定位一致）。
+fn default_orb_position(win_w: i32, win_h: i32) -> Option<(i32, i32)> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        };
+        let margin = 20.0f64;
+        // SPI_GETWORKAREA 在 DPI-aware 进程下返回物理像素，与 PhysicalPosition 单位一致
+        let mut rc = RECT::default();
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut rc as *mut _ as *mut std::ffi::c_void),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+            .is_ok()
+        };
+        if ok {
+            let x = rc.right as f64 - win_w as f64 - margin;
+            let y = rc.bottom as f64 - win_h as f64 - margin;
+            return Some((x as i32, y as i32));
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (win_w, win_h);
+    }
+    None
+}
+
+/// 计算悬浮窗的默认（未记忆）位置。
+/// - orb：主屏工作区右下角
+/// - monitor-overlay：跟随鼠标（偏移 8px，多显示器边界钳制）
+/// - pomodoro-overlay：创建时默认的左上角 (100, 100)
+///
+/// 其余未知窗口一律回退 (100, 100)。
+fn default_window_position(window_id: &str, win_w: i32, win_h: i32) -> (i32, i32) {
+    match window_id {
+        "orb" => default_orb_position(win_w, win_h).unwrap_or((100, 100)),
+        "monitor-overlay" => {
+            if let Ok(cur) = crate::automation::get_mouse_position() {
+                clamp_position_to_workarea(cur.x + 8, cur.y + 8, win_w, win_h)
+            } else {
+                (100, 100)
+            }
+        }
+        _ => (100, 100),
+    }
+}
+
+/// 记忆悬浮窗位置（由前端在窗口拖动结束后调用），应用重启后恢复到上次位置。
+/// window_id 如 "orb"、"monitor-overlay"、"pomodoro-overlay"
+#[tauri::command]
+pub fn set_window_position(
+    id: String,
+    x: i32,
+    y: i32,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    // 恢复默认位置期间：程序化 set_position 会触发 onMoved → 前端在 300ms 后再次
+    // set_window_position，若不忽略会把刚恢复的默认位置重新记忆。仅忽略对应窗口。
+    if let Ok(suppress) = position_save_suppress().lock() {
+        if let Some(until) = suppress.get(&id) {
+            if now_ms() < *until {
+                return Ok(());
+            }
+        }
+    }
+    config_manager.set_window_position(&id, crate::config::WindowPosition { x, y })
+}
+
+/// 恢复悬浮窗默认位置：清除记忆位置，并将窗口移动到默认定位。
+/// window_id 如 "orb"、"monitor-overlay"、"pomodoro-overlay"
+#[tauri::command]
+pub fn reset_window_position(
+    id: String,
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.reset_window_position(&id)?;
+
+    let win = match id.as_str() {
+        "orb" => app.get_webview_window("orb"),
+        "monitor-overlay" => app.get_webview_window("monitor-overlay"),
+        "pomodoro-overlay" => app.get_webview_window("pomodoro-overlay"),
+        _ => None,
+    };
+    // 对已存在窗口统一移动到默认定位（隐藏窗口 set_position 同样生效，下次显示即默认位置）。
+    // monitor 下次显示时按未记忆逻辑跟随鼠标重新定位；pomodoro 无记忆时保持此位置。
+    if let Some(win) = win {
+        let inner = win.inner_size().unwrap_or_default();
+        let (x, y) = default_window_position(&id, inner.width as i32, inner.height as i32);
+        // 抑制程序化移动触发的 onMoved 保存（前端 300ms 后调用 set_window_position）
+        if let Ok(mut suppress) = position_save_suppress().lock() {
+            suppress.insert(id.clone(), now_ms() + 1500);
+        }
+        win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 显示系统监控悬浮窗（优先恢复到上次记忆位置，未记忆时跟随鼠标，多显示器边界翻转）
+/// 并启动采集线程
 #[tauri::command]
 pub fn show_monitor_window(
     app: tauri::AppHandle,
@@ -1677,60 +1735,49 @@ pub fn show_monitor_window(
     win.set_size(tauri::LogicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
     // 拦截关闭：停止采集并隐藏，保留窗口实例供下次打开复用。
-    // 窗口复用后监听器也会保留，因此只注册一次。
-    if !MONITOR_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
+    // 前端现复用窗口（不再每次销毁重建），监听器随窗口长期有效，故只注册一次；
+    // 若窗口仍被真正销毁（异常路径），其上的监听器随之失效，此处监听 Destroyed
+    // 复位注册标记，使新建窗口能重新注册拦截——否则 Alt+F4 会直接关窗而不停采，
+    // 后台采集线程空跑。与 screenshot overlay 的关闭拦截处理方式一致。
+    if MONITOR_CLOSE_HANDLER_REGISTERED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
         let win_on_close = win.clone();
         let app_on_close = app.clone();
-        win.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        win.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if let Some(state) = app_on_close.try_state::<crate::monitor::MonitorState>() {
                     state.stop();
                 }
                 let _ = win_on_close.hide();
             }
+            tauri::WindowEvent::Destroyed => {
+                MONITOR_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
         });
     }
     let inner = win.inner_size().unwrap_or_default();
     let ww = inner.width as i32;
     let wh = inner.height as i32;
 
-    // 锚点：鼠标位置，偏移 8px
-    let (mut x, mut y) = if let Ok(cur) = crate::automation::get_mouse_position() {
+    // 锚点：优先恢复上次拖拽后的记忆位置，未记忆时跟随鼠标，偏移 8px
+    let saved = config_manager
+        .get_window_position("monitor-overlay")
+        .ok()
+        .flatten();
+    let (mut x, mut y) = if let Some(pos) = saved {
+        (pos.x, pos.y)
+    } else if let Ok(cur) = crate::automation::get_mouse_position() {
         (cur.x + 8, cur.y + 8)
     } else {
         (100, 100)
     };
 
-    // 边界翻转：不超过当前鼠标所在屏工作区
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        };
-        let pt = POINT { x, y };
-        let monitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool() {
-            let rc = mi.rcWork;
-            if x + ww > rc.right {
-                x = rc.right - ww;
-            }
-            if y + wh > rc.bottom {
-                y = rc.bottom - wh;
-            }
-            if x < rc.left {
-                x = rc.left;
-            }
-            if y < rc.top {
-                y = rc.top;
-            }
-        }
-    }
+    // 边界翻转：不超过该点所在显示器工作区
+    (x, y) = clamp_position_to_workarea(x, y, ww, wh);
 
     let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
         x, y,
@@ -1815,34 +1862,242 @@ pub fn set_system_monitor_config(
     config_manager.update_system_monitor_config(config)
 }
 
+// ─── 番茄钟 ────────────────────────────────────────────────────
+
+/// 显示番茄钟悬浮窗。关闭拦截仅隐藏窗口、不停计时（窗口隐藏后倒计时继续，
+/// 到点提醒由后端完成，不依赖窗口可见）。
+#[tauri::command]
+pub fn show_pomodoro_window(
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window("pomodoro-overlay")
+        .ok_or_else(|| "pomodoro-overlay 窗口未找到".to_string())?;
+    // Use the saved mode before showing so the window never flashes at the wrong size.
+    let is_mini = config_manager
+        .get_pomodoro_config()
+        .ok()
+        .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok())
+        .and_then(|config| config.get("displayMode")?.as_str().map(str::to_owned))
+        .is_some_and(|mode| mode == "mini");
+    let (width, height) = if is_mini { (150.0, 182.0) } else { (240.0, 260.0) };
+    win.set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+    // 拦截关闭：仅隐藏，不停计时。窗口复用后监听器也会保留，因此只注册一次。
+    if !POMODORO_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
+        let win_on_close = win.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = win_on_close.hide();
+            }
+        });
+    }
+    // 恢复上次拖拽后的记忆位置（窗口销毁重建后仍保持），未记忆时使用创建默认值。
+    // 仅窗口隐藏时恢复，避免覆盖用户已摆好/正在拖动的位置；裁剪到显示器工作区，
+    // 防止分辨率/显示器布局变化后窗口跑到屏幕外
+    if !win.is_visible().unwrap_or(true) {
+        if let Ok(Some(pos)) = config_manager.get_window_position("pomodoro-overlay") {
+            let inner = win.inner_size().unwrap_or_default();
+            let (x, y) =
+                clamp_position_to_workarea(pos.x, pos.y, inner.width as i32, inner.height as i32);
+            win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, y,
+            )))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 隐藏番茄钟悬浮窗。计时不停止（与系统监控不同）。
+#[tauri::command]
+pub fn hide_pomodoro_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("pomodoro-overlay") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 获取番茄钟当前状态（窗口重开/初始化时拉取，前端据此恢复渲染）
+#[tauri::command]
+pub fn get_pomodoro_state(
+    state: State<'_, crate::pomodoro::PomodoroState>,
+) -> Result<crate::pomodoro::PomodoroStatePayload, String> {
+    Ok(state.payload())
+}
+
+/// 开始/继续番茄钟倒计时
+#[tauri::command]
+pub fn start_pomodoro(
+    app: tauri::AppHandle,
+    state: State<'_, crate::pomodoro::PomodoroState>,
+) -> Result<(), String> {
+    state.start(&app);
+    Ok(())
+}
+
+/// 暂停番茄钟倒计时（保留剩余时间）
+#[tauri::command]
+pub fn pause_pomodoro(
+    app: tauri::AppHandle,
+    state: State<'_, crate::pomodoro::PomodoroState>,
+) -> Result<(), String> {
+    state.pause();
+    let _ = app.emit("pomodoro-tick", state.payload());
+    Ok(())
+}
+
+/// 重置当前阶段倒计时
+#[tauri::command]
+pub fn reset_pomodoro(
+    app: tauri::AppHandle,
+    state: State<'_, crate::pomodoro::PomodoroState>,
+) -> Result<(), String> {
+    state.reset();
+    let _ = app.emit("pomodoro-tick", state.payload());
+    Ok(())
+}
+
+/// 跳过当前阶段进入下一阶段（计时中则继续计时新阶段）
+#[tauri::command]
+pub fn skip_pomodoro(
+    app: tauri::AppHandle,
+    state: State<'_, crate::pomodoro::PomodoroState>,
+) -> Result<(), String> {
+    let was_running = state.skip();
+    if was_running {
+        state.start(&app);
+    } else {
+        let _ = app.emit("pomodoro-tick", state.payload());
+    }
+    Ok(())
+}
+
+/// 获取番茄钟工具启用状态
+#[tauri::command]
+pub fn get_pomodoro_enabled(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<bool, String> {
+    config_manager.get_pomodoro_enabled()
+}
+
+/// 设置番茄钟工具启用状态并持久化。禁用时停止计时并隐藏窗口。
+#[tauri::command]
+pub fn set_pomodoro_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    if !enabled {
+        if let Some(state) = app.try_state::<crate::pomodoro::PomodoroState>() {
+            state.stop();
+            // 通知番茄钟窗口同步停止状态（窗口隐藏时 JS 仍在运行，可收到事件；
+            // 否则重新打开后 UI 会停留在旧的运行态）
+            let _ = app.emit("pomodoro-tick", state.payload());
+        }
+        if let Some(window) = app.get_webview_window("pomodoro-overlay") {
+            let _ = window.hide();
+        }
+    }
+    config_manager.update_pomodoro_enabled(enabled)
+}
+
+/// 获取番茄钟配置（JSON 字符串，空串表示未设置，前端取默认值）
+#[tauri::command]
+pub fn get_pomodoro_config(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<String, String> {
+    config_manager.get_pomodoro_config()
+}
+
+/// 更新番茄钟配置并持久化。解析成功时即时同步到计时状态（不中断计时）。
+#[tauri::command]
+pub fn set_pomodoro_config(
+    config: String,
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    if let Ok(parsed) = serde_json::from_str::<crate::pomodoro::PomodoroConfig>(&config) {
+        if let Some(state) = app.try_state::<crate::pomodoro::PomodoroState>() {
+            state.set_config(parsed);
+        }
+    }
+    config_manager.update_pomodoro_config(config)
+}
+
 // ─── OCR 引擎管理 ─────────────────────────────────────────────────
 
 /// 获取可用 OCR 引擎列表及当前激活引擎
+/// async：懒加载在 spawn_blocking 阻塞池执行，避免首次打开设置页时阻塞 UI 主线程
 #[tauri::command]
-pub fn get_ocr_engines() -> Result<serde_json::Value, String> {
-    let svc = crate::ocr::get_ocr_service().ok_or("OCR 服务未初始化")?;
-    let guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
-    let engines: Vec<&str> = guard
-        .available_engines()
-        .iter()
-        .map(|e| e.as_str())
-        .collect();
-    Ok(serde_json::json!({
-        "active": guard.active_engine_name(),
-        "available": engines,
-    }))
+pub async fn get_ocr_engines() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let svc = crate::ocr::ensure_ocr_service().ok_or("OCR 服务初始化失败")?;
+        let guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
+        let engines: Vec<&str> = guard
+            .available_engines()
+            .iter()
+            .map(|e| e.as_str())
+            .collect();
+        Ok(serde_json::json!({
+            "active": guard.active_engine_name(),
+            "available": engines,
+        }))
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {}", e))?
 }
 
-/// 切换 OCR 引擎
+/// 切换 OCR 引擎，并将用户偏好持久化到配置（重启后保持所选引擎）
 #[tauri::command]
-pub fn set_ocr_engine(engine: String) -> Result<(), String> {
-    let svc = crate::ocr::get_ocr_service().ok_or("OCR 服务未初始化")?;
-    let mut guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
+pub async fn set_ocr_engine(
+    engine: String,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
     let id = crate::ocr::EngineId::from_str(&engine)
         .ok_or_else(|| format!("无效的引擎标识: {}", engine))?;
-    if !guard.switch_engine(id) {
-        return Err(format!("引擎 '{}' 不可用", engine));
+
+    // 在阻塞池切换引擎（加载模型/初始化可能耗时）。
+    // 返回切换前的激活引擎，供持久化失败时回滚，保证内存引擎与 UI 显示一致。
+    let previous = tokio::task::spawn_blocking(move || -> Result<crate::ocr::EngineId, String> {
+        let svc = crate::ocr::ensure_ocr_service().ok_or("OCR 服务初始化失败")?;
+        let mut guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
+        let previous = guard.active_engine;
+        if !guard.switch_engine(id) {
+            return Err(format!("引擎 '{}' 不可用", id.as_str()));
+        }
+        Ok(previous)
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {}", e))??;
+
+    // 持久化用户偏好（写入规范化引擎 ID）；失败时回滚内存引擎，避免 UI 显示与实际引擎脱节
+    if let Err(error) = config_manager.update_ocr_engine(id.as_str().to_string()) {
+        let rollback = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let svc = crate::ocr::ensure_ocr_service().ok_or("OCR 服务初始化失败")?;
+            let mut guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
+            // 仅当内存引擎仍是我这次设置的才回滚，避免覆盖并发更新的引擎选择
+            if guard.active_engine == id {
+                let _ = guard.switch_engine(previous);
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(rollback_err) = rollback {
+            crate::utils::logger::log(
+                "ocr",
+                &format!("OCR 引擎持久化失败后回滚出错: {}", rollback_err),
+            );
+        }
+        return Err(error);
     }
+
+    // 同步全局偏好变量（防御：服务当前不会重建，但若未来出现重建路径偏好仍正确）
+    crate::ocr::set_preferred_engine(Some(id));
     Ok(())
 }
 
@@ -1893,6 +2148,20 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     }
 
     // 复用截图 overlay 进入选区模式
+    // 记录会话前 orb 可见性 + 会话活跃标记，再置 recording_mode，
+    // 供取消选区时按原状态恢复，不强制弹出托盘已隐藏的 orb。
+    // 若会话已活跃（截图→录屏转换、或录制预览后重新选区），保留首次进入时的
+    // 会话前 orb 可见性：此时 orb 可能仍被本会话隐藏（如预览阶段），直接读 is_visible()
+    // 会把它误记为「托盘隐藏」，导致会话结束后不恢复。
+    if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst) {
+        ORB_VISIBLE_BEFORE_SESSION.store(
+            app.get_webview_window("orb")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false),
+            Ordering::SeqCst,
+        );
+        CAPTURE_SESSION_ACTIVE.store(true, Ordering::SeqCst);
+    }
     crate::hooks::mouse::set_recording_mode(true);
 
     // 隐藏浮动 UI，避免被截入
@@ -1976,8 +2245,8 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
         .is_ok()
     {
         let app_on_close = app.clone();
-        overlay.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        overlay.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if crate::hooks::mouse::is_recording_mode() {
                     if let Some(state) = app_on_close.try_state::<crate::recording::RecordingState>() {
@@ -1989,6 +2258,12 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
                     cleanup_screenshot_session(&app_on_close);
                 }
             }
+            // 窗口被前端销毁重建时复位注册标记，确保新窗口重新注册关闭拦截
+            //（与 start_screenshot_inner 中相同，见其注释）
+            tauri::WindowEvent::Destroyed => {
+                SCREENSHOT_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
         });
     }
 
@@ -2191,7 +2466,8 @@ pub fn is_recording_select_active() -> bool {
     crate::hooks::mouse::is_recording_mode()
 }
 
-/// GIF 复制到剪贴板（将 GIF 解码为 PNG 后写入剪贴板，因为 Windows 剪贴板不支持 GIF 格式）
+/// 复制 GIF 到剪贴板
+/// 写入注册的 "GIF" 格式保留完整动画，同时写入 CF_DIB 位图（首帧）作为通用兼容回退
 #[tauri::command]
 pub fn clipboard_set_gif(
     base64_data: String,
@@ -2206,14 +2482,7 @@ pub fn clipboard_set_gif(
     let bytes = STANDARD
         .decode(raw)
         .map_err(|e| format!("base64 解码失败: {}", e))?;
-    // 将 GIF 解码为 PNG 再写入剪贴板（Windows 剪贴板原生支持 PNG/BMP）
-    let gif_img = image::load_from_memory(&bytes)
-        .map_err(|e| format!("GIF 解码失败: {}", e))?;
-    let mut png_buf = std::io::Cursor::new(Vec::new());
-    gif_img
-        .write_to(&mut png_buf, image::ImageFormat::Png)
-        .map_err(|e| format!("PNG 编码失败: {}", e))?;
-    clipboard.copy_image(&png_buf.into_inner()).map_err(|e| e.to_string())
+    clipboard.copy_gif(&bytes).map_err(|e| e.to_string())
 }
 
 /// 保存 GIF 文件
@@ -2292,54 +2561,6 @@ async fn save_gif_with_dialog(
     .map_err(|e| format!("任务执行失败: {}", e))?
 }
 
-/// 保存视频文件
-/// 如果配置了录屏保存路径，直接保存到该目录（自动生成带时间戳的文件名）；
-/// 否则弹出文件保存对话框让用户选择位置
-#[tauri::command]
-pub async fn save_video(
-    app: tauri::AppHandle,
-    base64_data: String,
-    filename: String,
-) -> Result<bool, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let raw = if let Some(idx) = base64_data.find(',') {
-        &base64_data[idx + 1..]
-    } else {
-        &base64_data
-    };
-    let bytes = STANDARD
-        .decode(raw)
-        .map_err(|e| format!("base64 解码失败: {}", e))?;
-
-    // 检查是否配置了录屏保存路径
-    let config_manager = app.state::<ConfigManager>();
-    let save_path = config_manager.get_recording_save_path()?;
-    if !save_path.is_empty() {
-        let dir = std::path::Path::new(&save_path);
-        if dir.is_dir() {
-            let now = chrono::Local::now();
-            let timestamp = now.format("%Y%m%d_%H%M%S");
-            let millis = now.timestamp_subsec_millis();
-            let ext = std::path::Path::new(&filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("mp4");
-            let auto_filename = format!("recording_{}_{}.{}", timestamp, millis, ext);
-            let full_path = dir.join(&auto_filename);
-            tokio::task::spawn_blocking(move || {
-                std::fs::write(&full_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
-                Ok(true)
-            })
-            .await
-            .map_err(|e| format!("任务执行失败: {}", e))?
-        } else {
-            save_video_with_dialog(&app, &bytes, &filename).await
-        }
-    } else {
-        save_video_with_dialog(&app, &bytes, &filename).await
-    }
-}
-
 /// 保存已编码的临时视频文件，避免把大体积 MP4 通过 IPC/base64 往返传输。
 #[tauri::command]
 pub async fn save_video_file(
@@ -2355,7 +2576,7 @@ pub async fn save_video_file(
         .canonicalize()
         .map_err(|e| format!("读取视频文件失败: {}", e))?;
     let recording_temp_dir = std::env::temp_dir()
-        .join("floatory-recording")
+        .join("levitaire-recording")
         .canonicalize()
         .map_err(|e| format!("读取录屏临时目录失败: {}", e))?;
     if !source.starts_with(&recording_temp_dir) {
@@ -2406,32 +2627,6 @@ async fn save_video_file_with_dialog(
         match dialog.save_file() {
             Some(path) => {
                 std::fs::copy(&source, &path).map_err(|e| format!("写入文件失败: {}", e))?;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {}", e))?
-}
-
-/// 弹出文件保存对话框保存视频
-async fn save_video_with_dialog(
-    app: &tauri::AppHandle,
-    bytes: &[u8],
-    filename: &str,
-) -> Result<bool, String> {
-    let mut dialog = rfd::FileDialog::new()
-        .set_file_name(filename)
-        .add_filter("MP4 视频", &["mp4"]);
-    if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
-        dialog = dialog.set_parent(&overlay);
-    }
-    let bytes = bytes.to_vec();
-    tokio::task::spawn_blocking(move || {
-        match dialog.save_file() {
-            Some(path) => {
-                std::fs::write(&path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
                 Ok(true)
             }
             None => Ok(false),
@@ -2588,6 +2783,11 @@ pub fn set_tools_autostart(
 /// 退出录制选区模式（前端选区取消时调用）
 #[tauri::command]
 pub fn cancel_recording_select(app: tauri::AppHandle) -> Result<(), String> {
+    // 仅会话进行中被隐藏的 orb 才按会话前状态恢复，避免把用户经托盘已隐藏的 orb
+    // 强制弹出（托盘「显示/隐藏浮球」与清理逻辑相互矛盾）。
+    // 用会话活跃标记覆盖整个会话生命周期（含录制编码/预览阶段 recording_mode 已被清除
+    // 但仍属会话延长状态，此时清理也应恢复 orb）；空闲清理（如仅关闭工具开关）不动 orb。
+    let session_active = CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst);
     crate::hooks::mouse::set_recording_mode(false);
     let _ = finish_recording_controls(app.clone());
     // 清理可能残留的 ScreenCache（录制模式启动时可能清空了但未恢复）
@@ -2599,11 +2799,186 @@ pub fn cancel_recording_select(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
         let _ = overlay.hide();
     }
-    if let Some(orb) = app.get_webview_window("orb") {
-        let _ = orb.show();
-        let _ = orb.set_always_on_top(true);
+    if session_active && ORB_VISIBLE_BEFORE_SESSION.load(Ordering::SeqCst) {
+        if let Some(orb) = app.get_webview_window("orb") {
+            let _ = orb.show();
+            let _ = orb.set_always_on_top(true);
+        }
     }
+    // 会话结束，复位活跃标记，避免泄漏到后续空闲清理误判
+    CAPTURE_SESSION_ACTIVE.store(false, Ordering::SeqCst);
     // 通知前端恢复截图模式
     let _ = app.emit_to("screenshot-overlay", "recording-select-cancel", ());
+    Ok(())
+}
+
+// ─── 快速输入转盘工具 ────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_quick_input_enabled(config: State<'_, ConfigManager>) -> Result<bool, String> {
+    config.get_quick_input_enabled()
+}
+
+#[tauri::command]
+pub fn set_quick_input_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config.update_quick_input_enabled(enabled)?;
+    // 启用时先确保转盘 overlay 窗口已创建（隐藏），再让触发键生效，
+    // 避免「触发键已生效但窗口尚未建好」的窗口期内按下触发键时 begin_wheel
+    // emit_to 静默失败且 QUICK_INPUT_ACTIVE 卡在 true（会导致鼠标点击被吞）。
+    if enabled {
+        crate::quick_input::ensure_window(&app)?;
+    } else {
+        // 禁用时若转盘正处于激活态，先退出并复位。否则 QUICK_INPUT_ACTIVE 会停留
+        // 在 true，且 vk 已被置 0 无法再通过触发键 toggle 恢复，导致鼠标左键被持续吞掉。
+        // end_wheel(None) 即“取消”语义，前端收到后会收起转盘并复位状态。
+        if crate::quick_input::is_active() {
+            crate::quick_input::end_wheel(&app, None);
+        }
+    }
+    // 同步触发键到 keyboard hook（启用且配置了有效键才生效）
+    sync_quick_input_trigger(&config)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_quick_input_trigger_key(config: State<'_, ConfigManager>) -> Result<String, String> {
+    let key = config.get_quick_input_trigger_key()?;
+    if key.is_empty() {
+        Ok("CapsLock".to_string())
+    } else {
+        Ok(key)
+    }
+}
+
+#[tauri::command]
+pub fn set_quick_input_trigger_key(
+    key: String,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    // 校验键名可解析
+    let vk = match crate::quick_input::parse_trigger_key(&key) {
+        Some(vk) => vk,
+        None => return Err(format!("无法识别的触发键: {}", key)),
+    };
+    // 阻止会把全局键盘输入都吞掉的键（字母/数字/编辑导航区），避免影响所有程序的输入
+    if crate::quick_input::is_dangerous_trigger_vk(vk) {
+        return Err("该键在日常输入中会频繁用到，被设为触发键会中断正常打字。请选用功能键、CapsLock、ScrollLock 等锁定键作为触发键。".to_string());
+    }
+    config.update_quick_input_trigger_key(key)?;
+    sync_quick_input_trigger(&config)?;
+    Ok(())
+}
+
+/// 获取快速输入转盘触发模式（"click" 单击切换 | "hold" 按住唤起）
+#[tauri::command]
+pub fn get_quick_input_mode(config: State<'_, ConfigManager>) -> Result<String, String> {
+    let mode = config.get_quick_input_mode()?;
+    if mode.is_empty() {
+        Ok("click".to_string())
+    } else {
+        Ok(mode)
+    }
+}
+
+/// 设置快速输入转盘触发模式（"click" 单击切换 | "hold" 按住唤起）
+#[tauri::command]
+pub fn set_quick_input_mode(
+    mode: String,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let normalized = mode.trim().to_lowercase();
+    if normalized != "click" && normalized != "hold" {
+        return Err(format!("无法识别的触发模式: {}", mode));
+    }
+    config.update_quick_input_mode(normalized)?;
+    sync_quick_input_trigger(&config)?;
+    Ok(())
+}
+
+/// 前端在转盘内移动鼠标时同步当前高亮扇区索引（-1 = 无选中），
+/// 供「按住唤起」模式在松开触发键时读取并作为选中项。
+#[tauri::command]
+pub fn set_quick_input_highlight(index: i32) -> Result<(), String> {
+    crate::quick_input::set_highlight(index);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_quick_input_snippets(config: State<'_, ConfigManager>) -> Result<String, String> {
+    config.get_quick_input_snippets()
+}
+
+#[tauri::command]
+pub fn set_quick_input_snippets(
+    snippets: String,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config.update_quick_input_snippets(snippets)
+}
+
+#[tauri::command]
+pub fn get_quick_input_history() -> Result<Vec<crate::quick_input::ClipboardHistoryItem>, String> {
+    Ok(crate::quick_input::get_history())
+}
+
+#[tauri::command]
+pub fn clear_quick_input_history() -> Result<(), String> {
+    crate::quick_input::clear_history();
+    Ok(())
+}
+
+/// 选中某项后输入文本到当前焦点输入框（写剪贴板 + 模拟 Ctrl+V + 恢复原内容）
+#[tauri::command]
+pub fn quick_input_paste(text: String) -> Result<(), String> {
+    crate::quick_input::type_text_async(text);
+    Ok(())
+}
+
+/// 点击切换快速输入转盘：当前已激活则关闭（取消），否则打开并定位到鼠标处。
+/// 供前端（悬浮工具面板点击「快速输入」卡片）唤起转盘，语义与触发键单击一致。
+/// 打开前先确保 overlay 窗口已创建，避免运行时启用后立即点击唤起时窗口尚未就绪而静默失败。
+#[tauri::command]
+pub fn toggle_quick_input_wheel(app: tauri::AppHandle) -> Result<(), String> {
+    // 若窗口不存在则先创建（隐藏），保证 begin_wheel 的 emit_to 有目标可投递
+    crate::quick_input::ensure_window(&app)?;
+    crate::quick_input::toggle_wheel(&app);
+    Ok(())
+}
+
+
+/// 预创建快速输入转盘窗口（隐藏）。工具启用时由前端调用一次；
+/// 应用启动时也会在 main.rs 的 setup 中调用（quick_input::ensure_window），
+/// 确保重启后键盘钩子触发时 emit_to 能找到目标窗口。
+/// 窗口透明、无边框、置顶、不可聚焦（绝不抢焦点，目标输入框需保持焦点）。
+#[tauri::command]
+pub async fn ensure_quick_input_window(app: tauri::AppHandle) -> Result<(), String> {
+    crate::quick_input::ensure_window(&app)
+}
+
+/// 根据当前配置同步触发键与触发模式到 keyboard hook。
+/// 触发键：启用且键有效时设置 vk_code，否则置 0。
+/// 触发模式：无论是否启用都同步（切换模式时生效），便于运行时临时切换。
+fn sync_quick_input_trigger(config: &ConfigManager) -> Result<(), String> {
+    let enabled = config.get_quick_input_enabled()?;
+    let key = config.get_quick_input_trigger_key()?;
+    let key = if key.is_empty() { "CapsLock" } else { &key };
+    let vk = if enabled {
+        crate::quick_input::parse_trigger_key(key).unwrap_or(0)
+    } else {
+        0
+    };
+    crate::quick_input::set_trigger_vk(vk);
+    // 同步触发模式：仅有效值才应用，非法值回退「单击切换」
+    let mode = config.get_quick_input_mode()?;
+    let mode_code = if mode == "hold" {
+        crate::quick_input::MODE_HOLD
+    } else {
+        crate::quick_input::MODE_CLICK
+    };
+    crate::quick_input::set_mode(mode_code);
     Ok(())
 }

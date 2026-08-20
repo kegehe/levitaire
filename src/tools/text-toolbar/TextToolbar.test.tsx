@@ -3,6 +3,7 @@ import { render, screen, act, fireEvent, waitFor } from "@testing-library/react"
 import { invoke } from "@tauri-apps/api/core";
 import FloatingToolbar from "./TextToolbar";
 import { emitMockEvent, clearMockListeners, mockHide } from "../../test/tauri-mock";
+import { CLEAR_OPTIONS } from "../../constants/clearConfig";
 import type { SelectionInfo } from "../../types";
 
 // Mock qrcode 库（命名导出，匹配生产代码的动态 import("qrcode") 方式）
@@ -35,7 +36,12 @@ describe("FloatingToolbar 搜索功能", () => {
     // mock checkAiConfig 默认返回有效配置
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "open_url") {
         return Promise.resolve();
@@ -86,6 +92,46 @@ describe("FloatingToolbar 搜索功能", () => {
 
     expect(mockInvoke).toHaveBeenCalledWith("open_url", {
       url: "https://www.bing.com/search?q=hello%20world",
+    });
+  });
+
+  it("配置为百度时，搜索使用百度 URL", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_search_engine") {
+        return Promise.resolve("baidu");
+      }
+      return Promise.resolve();
+    });
+    render(<FloatingToolbar />);
+    await showToolbar("你好世界");
+
+    const searchBtn = screen.getByRole("button", { name: "搜索" });
+    await act(async () => {
+      fireEvent.click(searchBtn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("open_url", {
+      url: "https://www.baidu.com/s?wd=%E4%BD%A0%E5%A5%BD%E4%B8%96%E7%95%8C",
+    });
+  });
+
+  it("设置窗口广播 levitaire-search-engine-changed 后，搜索实时使用新引擎", async () => {
+    render(<FloatingToolbar />);
+    // 先 flush 等待挂载时的 fetchSearchEngine（默认 Bing）resolve，
+    // 避免其异步 setState 覆盖事件设置的值
+    await flush();
+    await act(async () => {
+      emitMockEvent("levitaire-search-engine-changed", "google");
+    });
+    await showToolbar("hello world");
+
+    const searchBtn = screen.getByRole("button", { name: "搜索" });
+    await act(async () => {
+      fireEvent.click(searchBtn);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("open_url", {
+      url: "https://www.google.com/search?q=hello%20world",
     });
   });
 
@@ -198,7 +244,12 @@ describe("FloatingToolbar 搜索功能", () => {
   it("open_url 失败时工具栏不隐藏（catch 分支）", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "", model: "", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "",
+          model: "",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "open_url") {
         return Promise.reject("浏览器打开失败");
@@ -374,10 +425,15 @@ describe("FloatingToolbar 去重功能", () => {
     vi.clearAllMocks();
     clearMockListeners();
     // 重置去重配置为默认（按行），避免上一用例通过事件写入的配置污染本用例
-    localStorage.removeItem("floatory-dedup-mode");
+    localStorage.removeItem("levitaire-dedup-mode");
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.resolve();
@@ -562,7 +618,12 @@ describe("FloatingToolbar 去重功能", () => {
   it("replace_selection 失败时显示错误信息", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "", model: "", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "",
+          model: "",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.reject("替换失败");
@@ -722,7 +783,7 @@ describe("FloatingToolbar 去重功能", () => {
   const setDedupMode = async (mode: { granularity: string; charSubMode: string }) => {
     await flush();
     await act(async () => {
-      emitMockEvent("floatory-dedup-mode-changed", mode);
+      emitMockEvent("levitaire-dedup-mode-changed", mode);
     });
   };
 
@@ -811,7 +872,12 @@ describe("FloatingToolbar Base64 功能", () => {
     clearMockListeners();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.resolve();
@@ -1035,7 +1101,7 @@ describe("FloatingToolbar Base64 功能", () => {
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
-      text: 'Y29uc29sZS5sb2coImhlbGxvIik=',
+      text: "Y29uc29sZS5sb2coImhlbGxvIik=",
     });
   });
 
@@ -1143,14 +1209,21 @@ describe("FloatingToolbar Base64 功能", () => {
       fireEvent.click(btn);
     });
 
-    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as { text: string };
+    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as {
+      text: string;
+    };
     expect(encoded.text).toBe("aGVsbG8=");
 
     // 第二次：用编码结果作为选区，点击解码
     mockInvoke.mockClear();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.resolve();
@@ -1178,13 +1251,20 @@ describe("FloatingToolbar Base64 功能", () => {
       fireEvent.click(btn);
     });
 
-    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as { text: string };
+    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as {
+      text: string;
+    };
     expect(encoded.text).toBe("5L2g5aW95LiW55WM");
 
     mockInvoke.mockClear();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       return Promise.resolve();
     });
@@ -1296,7 +1376,12 @@ describe("FloatingToolbar Base64 功能", () => {
   it("编码 replace_selection 失败时显示错误信息", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "", model: "", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "",
+          model: "",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.reject("替换失败");
@@ -1319,7 +1404,12 @@ describe("FloatingToolbar Base64 功能", () => {
   it("解码 replace_selection 失败时显示错误信息", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "", model: "", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "",
+          model: "",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.reject(new Error("无法替换"));
@@ -1428,7 +1518,12 @@ describe("FloatingToolbar 二维码功能", () => {
     mockToDataURL.mockResolvedValue("data:image/png;base64,mock-qr-data");
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       return Promise.resolve();
     });
@@ -1509,11 +1604,14 @@ describe("FloatingToolbar 二维码功能", () => {
       fireEvent.click(btn);
     });
 
-    expect(mockToDataURL).toHaveBeenCalledWith("hello world", expect.objectContaining({
-      width: 256,
-      margin: 2,
-      errorCorrectionLevel: "M",
-    }));
+    expect(mockToDataURL).toHaveBeenCalledWith(
+      "hello world",
+      expect.objectContaining({
+        width: 256,
+        margin: 2,
+        errorCorrectionLevel: "M",
+      }),
+    );
   });
 
   it("生成成功后显示二维码图片", async () => {
@@ -1621,7 +1719,10 @@ describe("FloatingToolbar 二维码功能", () => {
       fireEvent.click(btn);
     });
 
-    expect(mockToDataURL).toHaveBeenCalledWith("https://example.com/path?q=1#frag", expect.anything());
+    expect(mockToDataURL).toHaveBeenCalledWith(
+      "https://example.com/path?q=1#frag",
+      expect.anything(),
+    );
   });
 
   it("JSON 字符串生成二维码", async () => {
@@ -1810,12 +1911,15 @@ describe("FloatingToolbar 二维码功能", () => {
       fireEvent.click(btn);
     });
 
-    expect(mockToDataURL).toHaveBeenCalledWith("test", expect.objectContaining({
-      color: {
-        dark: "#000000",
-        light: "#ffffff",
-      },
-    }));
+    expect(mockToDataURL).toHaveBeenCalledWith(
+      "test",
+      expect.objectContaining({
+        color: {
+          dark: "#000000",
+          light: "#ffffff",
+        },
+      }),
+    );
   });
 
   it("使用中等纠错级别", async () => {
@@ -1827,9 +1931,12 @@ describe("FloatingToolbar 二维码功能", () => {
       fireEvent.click(btn);
     });
 
-    expect(mockToDataURL).toHaveBeenCalledWith("test", expect.objectContaining({
-      errorCorrectionLevel: "M",
-    }));
+    expect(mockToDataURL).toHaveBeenCalledWith(
+      "test",
+      expect.objectContaining({
+        errorCorrectionLevel: "M",
+      }),
+    );
   });
 
   it("二维码宽度为 256", async () => {
@@ -1841,9 +1948,12 @@ describe("FloatingToolbar 二维码功能", () => {
       fireEvent.click(btn);
     });
 
-    expect(mockToDataURL).toHaveBeenCalledWith("test", expect.objectContaining({
-      width: 256,
-    }));
+    expect(mockToDataURL).toHaveBeenCalledWith(
+      "test",
+      expect.objectContaining({
+        width: 256,
+      }),
+    );
   });
 
   // ── 复制功能 ──────────────────────────────────────────────
@@ -1882,7 +1992,12 @@ describe("FloatingToolbar 二维码功能", () => {
   it("点击下载按钮调用 save_image 命令", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "save_image") {
         return Promise.resolve(true);
@@ -1912,7 +2027,12 @@ describe("FloatingToolbar 二维码功能", () => {
   it("下载成功后二维码预览保持显示", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "save_image") {
         return Promise.resolve(true);
@@ -1941,7 +2061,12 @@ describe("FloatingToolbar 二维码功能", () => {
   it("用户取消保存对话框时二维码预览保持显示", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "save_image") {
         return Promise.resolve(false); // 用户取消
@@ -1969,7 +2094,12 @@ describe("FloatingToolbar 二维码功能", () => {
   it("保存失败时显示错误提示", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "save_image") {
         return Promise.reject(new Error("写入文件失败"));
@@ -2093,7 +2223,12 @@ describe("FloatingToolbar MD5 加密功能", () => {
     clearMockListeners();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.resolve();
@@ -2149,9 +2284,11 @@ describe("FloatingToolbar MD5 加密功能", () => {
       fireEvent.click(screen.getByRole("button", { name: "MD5" }));
     });
 
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
-      text: "5d41402abc4b2a76b9719d911017c592",
-    }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("replace_selection", {
+        text: "5d41402abc4b2a76b9719d911017c592",
+      }),
+    );
   });
 
   it("16 位：切换位数后输出 32 位结果的第 9~24 位", async () => {
@@ -2160,7 +2297,7 @@ describe("FloatingToolbar MD5 加密功能", () => {
 
     // 广播 16 位配置变更
     await act(async () => {
-      emitMockEvent("floatory-md5-length-changed", "16");
+      emitMockEvent("levitaire-md5-length-changed", "16");
     });
     await flush();
 
@@ -2180,7 +2317,7 @@ describe("FloatingToolbar MD5 加密功能", () => {
     await showToolbar("中文测试");
 
     await act(async () => {
-      emitMockEvent("floatory-md5-length-changed", "16");
+      emitMockEvent("levitaire-md5-length-changed", "16");
     });
     await flush();
 
@@ -2214,7 +2351,12 @@ describe("FloatingToolbar Unicode 功能", () => {
     clearMockListeners();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.resolve();
@@ -2512,13 +2654,20 @@ describe("FloatingToolbar Unicode 功能", () => {
       fireEvent.click(encBtn);
     });
 
-    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as { text: string };
+    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as {
+      text: string;
+    };
     expect(encoded.text).toMatch(/^(\\u[0-9A-F]{4})+$/);
 
     mockInvoke.mockClear();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       return Promise.resolve();
     });
@@ -2600,13 +2749,20 @@ describe("FloatingToolbar Unicode 功能", () => {
       fireEvent.click(btn);
     });
 
-    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as { text: string };
+    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as {
+      text: string;
+    };
     expect(encoded.text).toBe("\\u4F60\\u597D\\u4E16\\u754C");
 
     mockInvoke.mockClear();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       return Promise.resolve();
     });
@@ -2631,7 +2787,9 @@ describe("FloatingToolbar Unicode 功能", () => {
       fireEvent.click(btn);
     });
 
-    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as { text: string };
+    const encoded = mockInvoke.mock.calls.find((c) => c[0] === "replace_selection")![1] as {
+      text: string;
+    };
 
     mockInvoke.mockClear();
     await showToolbar(encoded.text);
@@ -2690,7 +2848,12 @@ describe("FloatingToolbar Unicode 功能", () => {
   it("编码 replace_selection 失败时显示错误信息", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "", model: "", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "",
+          model: "",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.reject("替换失败");
@@ -2713,7 +2876,12 @@ describe("FloatingToolbar Unicode 功能", () => {
   it("解码 replace_selection 失败时显示错误信息", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "", model: "", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "",
+          model: "",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.reject(new Error("无法替换"));
@@ -2768,7 +2936,12 @@ describe("FloatingToolbar 字符统计功能", () => {
     clearMockListeners();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       // get_md5_length / get_dedup_mode / get_toolbar_features / get_clear_options 返回 undefined → 前端取默认值
       return Promise.resolve();
@@ -2829,9 +3002,20 @@ describe("FloatingToolbar 字符统计功能", () => {
       if (cmd === "get_toolbar_features") {
         // 禁用 char-count，其余取默认全量
         return Promise.resolve([
-          "copy", "search", "translate", "optimize", "uppercase", "lowercase",
-          "dedup", "base64-encode", "base64-decode", "unicode-encode", "unicode-decode",
-          "md5-encrypt", "qrcode", "clear",
+          "copy",
+          "search",
+          "translate",
+          "optimize",
+          "uppercase",
+          "lowercase",
+          "dedup",
+          "base64-encode",
+          "base64-decode",
+          "unicode-encode",
+          "unicode-decode",
+          "md5-encrypt",
+          "qrcode",
+          "clear",
         ]);
       }
       return Promise.resolve();
@@ -2843,16 +3027,27 @@ describe("FloatingToolbar 字符统计功能", () => {
     expect(screen.queryByRole("button", { name: "统计" })).not.toBeInTheDocument();
   });
 
-  it("设置窗口广播 floatory-features-changed 后实时隐藏统计按钮", async () => {
+  it("设置窗口广播 levitaire-features-changed 后实时隐藏统计按钮", async () => {
     render(<FloatingToolbar />);
     await showToolbar("hello");
     expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
 
     await act(async () => {
-      emitMockEvent("floatory-features-changed", [
-        "copy", "search", "translate", "optimize", "uppercase", "lowercase",
-        "dedup", "base64-encode", "base64-decode", "unicode-encode", "unicode-decode",
-        "md5-encrypt", "qrcode", "clear",
+      emitMockEvent("levitaire-features-changed", [
+        "copy",
+        "search",
+        "translate",
+        "optimize",
+        "uppercase",
+        "lowercase",
+        "dedup",
+        "base64-encode",
+        "base64-decode",
+        "unicode-encode",
+        "unicode-decode",
+        "md5-encrypt",
+        "qrcode",
+        "clear",
       ]);
     });
 
@@ -2872,7 +3067,19 @@ describe("FloatingToolbar 字符统计功能", () => {
     // 网格容器存在
     expect(document.querySelector(".toolbar-charcount")).toBeInTheDocument();
     // 各统计项标签存在
-    const labels = ["字符数(含空格)", "字符数(不含空格)", "字数", "行数", "非空行", "段落数", "句子数", "字节", "数字串", "标点", "字母"];
+    const labels = [
+      "字符数(含空格)",
+      "字符数(不含空格)",
+      "字数",
+      "行数",
+      "非空行",
+      "段落数",
+      "句子数",
+      "字节",
+      "数字串",
+      "标点",
+      "字母",
+    ];
     for (const label of labels) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
@@ -2962,7 +3169,12 @@ describe("FloatingToolbar 编号功能", () => {
     clearMockListeners();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
-        return Promise.resolve({ api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" });
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
       }
       if (cmd === "replace_selection") {
         return Promise.resolve();
@@ -2993,7 +3205,11 @@ describe("FloatingToolbar 编号功能", () => {
   it("纯图片选区不显示编号按钮", async () => {
     render(<FloatingToolbar />);
     await act(async () => {
-      emitMockEvent("selection-found", { text: "", rect: { x: 0, y: 0, width: 10, height: 10 }, "has-image": true });
+      emitMockEvent("selection-found", {
+        text: "",
+        rect: { x: 0, y: 0, width: 10, height: 10 },
+        "has-image": true,
+      });
     });
 
     expect(screen.queryByRole("button", { name: "编号" })).not.toBeInTheDocument();
@@ -3040,5 +3256,347 @@ describe("FloatingToolbar 编号功能", () => {
     await showToolbar("hello");
 
     expect(screen.queryByRole("button", { name: "编号" })).not.toBeInTheDocument();
+  });
+});
+
+describe("FloatingToolbar 朗读进度", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "tts_get_state") {
+        // 朗读未开始：hasPlayer=false，selection-found 后走 default 分支
+        return Promise.resolve({ hasPlayer: false, paused: false, playing: false });
+      }
+      if (cmd === "tts_get_progress") {
+        return Promise.resolve({ positionMs: 0, durationMs: 0, paused: false });
+      }
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    // 恢复真实 timers，防止 fake timers 泄漏到后续测试（断言失败提前退出时兜底）
+    vi.useRealTimers();
+    document.body.innerHTML = "";
+  });
+
+  /** 进入朗读状态：渲染工具栏 → 点击朗读按钮。
+      fake timers 使轮询 interval 不真实触发，避免测试结束后 setState 警告；afterEach 恢复。 */
+  const startSpeaking = async (text = "hello") => {
+    vi.useFakeTimers();
+    render(<FloatingToolbar />);
+    await showToolbar(text);
+    const speakBtn = screen.getByRole("button", { name: "朗读" });
+    await act(async () => {
+      fireEvent.click(speakBtn);
+    });
+    // flush 首个进度 tick 的微任务
+    await act(async () => {});
+  };
+
+  it("点击朗读调用 tts_speak 并进入 speaking 态显示进度条", async () => {
+    await startSpeaking("hello");
+
+    expect(mockInvoke).toHaveBeenCalledWith("tts_speak", {
+      text: "hello",
+      rate: 1,
+      voiceId: "",
+      volume: 1,
+    });
+    // speaking 态：暂停/停止按钮 + 进度条
+    expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument();
+    expect(document.querySelector(".toolbar-tts-progress")).toBeInTheDocument();
+  });
+
+  it("总时长未知（durationMs=0）时显示 --:-- 且进度条宽度为 0", async () => {
+    await startSpeaking("hello");
+
+    const times = document.querySelectorAll(".toolbar-tts-time");
+    expect(times[0].textContent).toBe("0:00");
+    expect(times[1].textContent).toBe("--:--");
+    const fill = document.querySelector(".toolbar-tts-bar-fill") as HTMLElement;
+    expect(fill.style.width).toBe("0%");
+  });
+
+  it("进度轮询更新已播/总时长与进度条宽度", async () => {
+    vi.useFakeTimers();
+    let progress = { positionMs: 5000, durationMs: 12000, paused: false };
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "tts_get_state") {
+        return Promise.resolve({ hasPlayer: false, paused: false, playing: false });
+      }
+      if (cmd === "tts_get_progress") {
+        return Promise.resolve(progress);
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "朗读" }));
+    });
+    await act(async () => {});
+
+    const times = document.querySelectorAll(".toolbar-tts-time");
+    expect(times[0].textContent).toBe("0:05");
+    expect(times[1].textContent).toBe("0:12");
+    const fill = document.querySelector(".toolbar-tts-bar-fill") as HTMLElement;
+    expect(parseFloat(fill.style.width)).toBeCloseTo(41.67, 1);
+
+    // 进度推进：500ms 后轮询返回新位置
+    progress = { positionMs: 8000, durationMs: 12000, paused: false };
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    await act(async () => {});
+
+    const timesAfter = document.querySelectorAll(".toolbar-tts-time");
+    expect(timesAfter[0].textContent).toBe("0:08");
+    expect(parseFloat(fill.style.width)).toBeCloseTo(66.67, 1);
+
+    vi.useRealTimers();
+  });
+
+  it("点击暂停调用 tts_pause 并立即显示继续按钮", async () => {
+    vi.useFakeTimers();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "tts_get_state") {
+        return Promise.resolve({ hasPlayer: false, paused: false, playing: false });
+      }
+      if (cmd === "tts_get_progress") {
+        return Promise.resolve({ positionMs: 1000, durationMs: 5000, paused: false });
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "朗读" }));
+    });
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
+
+    // 用户点击暂停 → 前端立即切暂停态，无需等轮询
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("tts_pause");
+    expect(screen.getByRole("button", { name: "继续" })).toBeInTheDocument();
+
+    // 点击继续 → 回到暂停按钮
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("tts_resume");
+    expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
+
+    vi.useRealTimers();
+  });
+
+  it("点击停止调用 tts_stop 并退出 speaking 态", async () => {
+    await startSpeaking("hello");
+    expect(document.querySelector(".toolbar-tts-progress")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    });
+    await act(async () => {});
+
+    expect(mockInvoke).toHaveBeenCalledWith("tts_stop");
+    expect(document.querySelector(".toolbar-tts-progress")).not.toBeInTheDocument();
+    // 回到默认按钮行
+    expect(screen.getByRole("button", { name: "朗读" })).toBeInTheDocument();
+  });
+
+  it("tts-finished 事件退出 speaking 态并重置进度", async () => {
+    await startSpeaking("hello");
+    expect(document.querySelector(".toolbar-tts-progress")).toBeInTheDocument();
+
+    await act(async () => {
+      emitMockEvent("tts-finished", undefined);
+    });
+
+    expect(document.querySelector(".toolbar-tts-progress")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "朗读" })).toBeInTheDocument();
+  });
+});
+
+describe("FloatingToolbar 清除功能", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "replace_selection") {
+        return Promise.resolve();
+      }
+      // get_clear_options 返回 undefined → 前端取默认全量
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  // ── 配置层：图标互不相同 ──────────────────────────────
+
+  it("每个清除项配置的图标互不相同", () => {
+    const icons = CLEAR_OPTIONS.map((o) => o.icon);
+    expect(new Set(icons).size).toBe(icons.length);
+  });
+
+  // ── 子菜单渲染 ──────────────────────────────────────
+
+  it("点击清除进入子菜单并渲染全部清除项", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("测试文本");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "清除" }));
+    });
+
+    // 返回按钮 + 全部清除项
+    const buttons = screen.getAllByRole("button");
+    expect(buttons).toHaveLength(1 + CLEAR_OPTIONS.length);
+
+    for (const option of CLEAR_OPTIONS) {
+      expect(screen.getByRole("button", { name: option.label })).toBeInTheDocument();
+    }
+  });
+
+  it("清除子菜单各项渲染各自的图标", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("测试文本");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "清除" }));
+    });
+
+    // 返回按钮 + 全部清除项
+    const buttons = screen.getAllByRole("button");
+    expect(buttons).toHaveLength(1 + CLEAR_OPTIONS.length);
+
+    // 各项图标（SVG）互不相同——修复前全部为 RemoveFormatting，外联路径完全一致
+    const icons = buttons.map((b) => b.querySelector(".toolbar-button-icon svg")?.outerHTML ?? "");
+    expect(new Set(icons).size).toBe(icons.length);
+  });
+});
+
+// ── Esc 快捷键（Rust 全局钩子转发 toolbar-esc）──────────────────
+// 工具栏窗口 focusable=false，页面内 DOM keydown 收不到按键，
+// Rust 侧在工具栏可见时经全局键盘钩子转发 toolbar-esc 事件，前端据此执行原有 Esc 逻辑。
+
+describe("FloatingToolbar Esc 事件转发", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockToDataURL.mockResolvedValue("data:image/png;base64,mock-qr-data");
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("默认状态收到 toolbar-esc 后隐藏工具栏", async () => {
+    mockHide.mockResolvedValue(undefined);
+    render(<FloatingToolbar />);
+    await showToolbar("test");
+
+    await act(async () => {
+      emitMockEvent("toolbar-esc", undefined);
+    });
+    await flush();
+
+    expect(mockInvoke).toHaveBeenCalledWith("hide_toolbar");
+    expect(screen.queryByRole("button", { name: "搜索" })).not.toBeInTheDocument();
+  });
+
+  it("子菜单状态收到 toolbar-esc 后返回默认态而非隐藏", async () => {
+    mockHide.mockResolvedValue(undefined);
+    render(<FloatingToolbar />);
+    await showToolbar("测试文本");
+
+    // 进入清除子菜单
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "清除" }));
+    });
+    expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
+
+    await act(async () => {
+      emitMockEvent("toolbar-esc", undefined);
+    });
+
+    // 子菜单关闭，工具栏仍在默认态
+    expect(screen.queryByRole("button", { name: "返回" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "搜索" })).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith("hide_toolbar");
+  });
+
+  it("二维码预览状态收到 toolbar-esc 后退出并隐藏", async () => {
+    mockHide.mockResolvedValue(undefined);
+    render(<FloatingToolbar />);
+    await showToolbar("test");
+
+    const qrBtn = screen.getByRole("button", { name: "二维码" });
+    await act(async () => {
+      fireEvent.click(qrBtn);
+    });
+    expect(document.querySelector(".toolbar-qrcode")).toBeInTheDocument();
+
+    await act(async () => {
+      emitMockEvent("toolbar-esc", undefined);
+    });
+    await flush();
+
+    expect(document.querySelector(".toolbar-qrcode")).not.toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("set_qrcode_preview", { active: false });
+    expect(mockInvoke).toHaveBeenCalledWith("hide_toolbar");
   });
 });

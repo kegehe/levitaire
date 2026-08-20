@@ -1,7 +1,12 @@
 /* ── Container ─────────────────────────────────────────── */
+/* 容器占满整个（透明）窗口，作为拖拽/hover 的交互热区：
+   窗口 64×64、视觉球仅 42px，若容器收窄到球本体，
+   圆外一圈透明区将既不触发拖拽也不触发 hover，热区过小。
+   故容器扩到全窗，视觉缩放由 .orb-inner 单独承担。 */
 .orb-container {
   width: 100%;
   height: 100%;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -16,6 +21,7 @@
 }
 
 /* ── Glassmorphism circle ──────────────────────────────── */
+/* 视觉球固定 --orb-size（42px），由父容器 flex 居中，不受窗口/热区尺寸影响 */
 .orb-inner {
   width: var(--orb-size);
   height: var(--orb-size);
@@ -29,12 +35,24 @@
   justify-content: center;
   -webkit-backdrop-filter: var(--orb-backdrop);
   backdrop-filter: var(--orb-backdrop);
-  transition: transform 120ms ease, box-shadow 200ms ease, background 200ms ease;
+  transition:
+    transform var(--transition-fast),
+    box-shadow var(--transition-normal);
+  /* 呼吸只动 transform（轻微缩放），把 box-shadow 让给 transition，
+     避免 animation 屏蔽 hover/active 的 box-shadow 过渡 */
   animation: orb-breathe 3s ease-in-out infinite;
 }
 
-/* Fallback: 不支持 backdrop-filter 时用更高不透明度模拟 */
+/* Fallback: 不支持 backdrop-filter 时用不透明背景模拟 */
 @supports not (backdrop-filter: blur(10px)) {
+  .orb-inner {
+    background: var(--orb-bg-fallback);
+  }
+}
+
+/* Fallback: 主题渐变用了 color-mix，旧引擎不识别会整段丢弃使背景透明。
+   此时回退到跟随 accent 的不透明渐变（--orb-bg-fallback），保证球始终可见 */
+@supports not (color: color-mix(in oklab, red 50%, transparent)) {
   .orb-inner {
     background: var(--orb-bg-fallback);
   }
@@ -44,14 +62,14 @@
 .orb-icon {
   color: var(--orb-icon-color);
   stroke: var(--orb-icon-color);
-  stroke-width: 1.2;
+  stroke-width: 1;
   filter: drop-shadow(0 0.5px 1px oklch(0 0 0 / 0.25));
-  transition: transform 120ms ease;
+  transition: transform var(--transition-fast);
 }
 
 /* ── Hover: enlarge + glow ──────────────────────────────── */
 .orb-container:hover .orb-inner {
-  transform: scale(1.08);
+  transform: scale(1.05);
   box-shadow: var(--orb-shadow-hover);
   animation: none;
 }
@@ -72,11 +90,13 @@
 }
 
 /* ── Breathing animation ──────────────────────────────── */
+/* 只动 transform，box-shadow 交给 transition 处理，避免动画屏蔽过渡 */
 @keyframes orb-breathe {
-  0%, 100% {
-    box-shadow: var(--orb-shadow-breathe-start);
+  0%,
+  100% {
+    transform: scale(1);
   }
   50% {
-    box-shadow: var(--orb-shadow-breathe-end);
+    transform: scale(1.03);
   }
 }

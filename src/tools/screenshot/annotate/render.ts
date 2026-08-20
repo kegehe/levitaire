@@ -143,11 +143,7 @@ function drawBrush(ctx: CanvasRenderingContext2D, a: Annotation) {
   ctx.restore();
 }
 
-function drawText(
-  ctx: CanvasRenderingContext2D,
-  a: Annotation,
-  baseImg: HTMLImageElement | null,
-) {
+function drawText(ctx: CanvasRenderingContext2D, a: Annotation, baseImg: HTMLImageElement | null) {
   if (a.kind !== "text" || !a.text) return;
   const t = a as TextAnnotation;
   // 估算文字包围盒宽高用于采样底色

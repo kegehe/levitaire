@@ -6,16 +6,42 @@
 .monitor-body {
   width: 100%;
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
   background: var(--color-bg-elevated);
   color: var(--color-fg);
+  border: 1px solid var(--color-border);
   border-radius: 12px;
+  /* 四周均匀留白 10px。标题栏按钮 tooltip 改为向下悬浮（见 .monitor-titlebar
+     的覆盖规则），无需再为 tooltip 向上弹出预留顶部大段空白，从而去除
+     full 模式顶部多余的空区域、给内容区腾出高度。
+     不用 box-shadow：.monitor-body 占满窗口，box-shadow 会被 body
+     overflow:hidden 裁切；改用 1px border 提供视觉边界，不被裁切。 */
   padding: 10px;
   box-sizing: border-box;
   font-size: 12px;
+  /* full 模式允许溢出：tooltip 向下落在内容区（padding box 内），
+     visible 不裁切它；内容滚动由 .monitor-content（overflow-y:auto）负责，
+     footer 固定在底部不会被滚走。mini 模式由 .is-mini 覆盖为 hidden。 */
+  overflow: visible;
+}
+
+/* 可滚动内容区：metrics + sections。flex:1 占满 titlebar 与 footer 之间，
+   overflow-y:auto 处理多磁盘等极端溢出的兜底（正常机器在自适应窗口高度下不会滚动）。 */
+.monitor-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   overflow-y: auto;
+}
+
+/* mini 模式内容固定（仅 metrics，无 sections/footer），禁用滚动避免空滚动条 */
+.monitor-body.is-mini .monitor-content {
+  overflow: visible;
 }
 
 .monitor-titlebar {
@@ -24,16 +50,19 @@
   gap: 6px;
   padding-bottom: 4px;
   border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
   cursor: default;
 }
 
 .monitor-title {
   flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
 }
 
 .monitor-icon-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -43,15 +72,67 @@
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--color-fg);
+  color: var(--color-fg-muted);
   cursor: pointer;
-  opacity: 0.7;
+  flex-shrink: 0;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
 }
 
 .monitor-icon-btn:hover {
-  opacity: 1;
   background: var(--button-hover-bg);
+  color: var(--color-fg);
 }
+
+.monitor-icon-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* CSS-only tooltip — mirrors ToolbarButton.css convention。
+   full/mini 统一向下悬浮（titlebar 上方无需预留 tooltip 空间，去掉顶部空区）。 */
+.monitor-icon-btn[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--tooltip-text);
+  background: var(--tooltip-bg);
+  border: 1px solid var(--tooltip-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 1000;
+}
+
+.monitor-icon-btn[data-tooltip]:hover::after,
+.monitor-icon-btn[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  display: block;
+}
+
+/* 标题栏按钮靠窗口右侧，居中定位的 tooltip 会溢出窗口右边缘被截断。
+   改为右对齐：tooltip 右边贴齐按钮右边，向左延伸，落在标题栏区域内。
+   right: 4px 让 tooltip 右边略内移，避开 .monitor-body 的 border-radius
+   圆角裁切区（padding box 圆角半径约 11px，按钮右边距 padding box 右
+   边约 10px，内移 4px 后距 14px > 11px，安全）。 */
+.monitor-titlebar .monitor-icon-btn[data-tooltip]::after {
+  left: auto;
+  right: 4px;
+  transform: none;
+}
+
+/* 标题栏按钮依赖 CSS tooltip（data-tooltip）统一提示，full/mini 行为一致，
+   不单独禁用 mini：mini 的 overflow:hidden 只裁切 padding box 之外的
+   absolute 元素，向下悬浮的 tooltip 落在内容区内，不会被裁切。 */
 
 .metrics {
   display: flex;
@@ -79,6 +160,7 @@
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: var(--color-bg-sunken);
+  align-self: stretch;
 }
 
 .is-mini .metric-value {
@@ -97,23 +179,29 @@
   flex-direction: column;
   gap: 2px;
   padding: 4px 0;
+  min-width: 0;
 }
 
 .metric-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  gap: 6px;
 }
 
 .metric-label {
   font-size: 11px;
-  opacity: 0.7;
+  color: var(--color-fg-muted);
 }
 
 .metric-value {
   font-size: 14px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sparkline {
@@ -123,9 +211,10 @@
 
 .metric-extra {
   font-size: 10px;
-  opacity: 0.55;
+  color: var(--color-fg-subtle);
   line-height: 1.3;
-  word-break: break-all;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .section {
@@ -138,7 +227,7 @@
 
 .section-label {
   font-size: 11px;
-  opacity: 0.7;
+  color: var(--color-fg-muted);
 }
 
 .disk-row {
@@ -146,15 +235,21 @@
   align-items: center;
   gap: 6px;
   font-size: 10px;
+  min-width: 0;
 }
 
 .disk-mount {
-  width: 36px;
+  min-width: 36px;
+  max-width: 80px;
   flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .disk-bar {
   flex: 1;
+  min-width: 24px;
   height: 6px;
   border-radius: 3px;
   background: var(--color-bg-sunken);
@@ -168,8 +263,12 @@
 }
 
 .disk-text {
-  flex-shrink: 0;
-  opacity: 0.7;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-fg-muted);
   font-variant-numeric: tabular-nums;
 }
 
@@ -199,10 +298,11 @@
 }
 
 .footer {
+  flex-shrink: 0;
   margin-top: auto;
   padding-top: 4px;
   border-top: 1px solid var(--color-border);
   font-size: 10px;
-  opacity: 0.55;
+  color: var(--color-fg-subtle);
   font-variant-numeric: tabular-nums;
 }

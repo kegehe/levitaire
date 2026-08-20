@@ -23,7 +23,7 @@
 }
 
 .rec-mode-panel {
-  background: var(--bg-solid, #fff);
+  background: var(--color-bg-elevated);
   border-radius: 12px;
   padding: 24px;
   min-width: 360px;
@@ -37,7 +37,7 @@
 .rec-mode-title {
   font-size: 16px;
   font-weight: 600;
-  color: var(--text-primary, #1a1a2e);
+  color: var(--color-fg);
 }
 
 .rec-mode-options {
@@ -52,16 +52,16 @@
   gap: 8px;
   padding: 20px 28px;
   border-radius: 10px;
-  border: 2px solid var(--border, #e2e2e8);
-  background: var(--bg-subtle, #f7f7fa);
+  border: 2px solid var(--color-border);
+  background: var(--color-bg-sunken);
   cursor: pointer;
-  transition: all 0.15s;
-  color: var(--text-primary, #1a1a2e);
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+  color: var(--color-fg);
 }
 
 .rec-mode-btn:hover {
-  border-color: #4a90d9;
-  background: var(--bg-hover, #eef3fb);
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
 }
 
 .rec-mode-btn-label {
@@ -71,21 +71,21 @@
 
 .rec-mode-btn-desc {
   font-size: 11px;
-  color: var(--text-secondary, #666);
+  color: var(--color-fg-muted);
 }
 
 .rec-mode-cancel {
   padding: 6px 20px;
   border-radius: 6px;
-  border: 1px solid var(--border, #e2e2e8);
+  border: 1px solid var(--color-border);
   background: transparent;
   cursor: pointer;
   font-size: 13px;
-  color: var(--text-secondary, #666);
+  color: var(--color-fg-muted);
 }
 
 .rec-mode-cancel:hover {
-  background: var(--bg-subtle, #f7f7fa);
+  background: var(--color-bg-sunken);
 }
 
 /* ─── 区域选择 ───────────────────────────────────────────────── */
@@ -106,7 +106,7 @@
   transform: translateX(-50%);
   display: flex;
   gap: 4px;
-  background: var(--bg-solid, #fff);
+  background: var(--color-bg-elevated);
   border-radius: 8px;
   padding: 4px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
@@ -123,17 +123,17 @@
   background: transparent;
   cursor: pointer;
   font-size: 13px;
-  color: var(--text-secondary, #666);
-  transition: all 0.15s;
+  color: var(--color-fg-muted);
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
 }
 
 .rec-area-tab.active {
-  background: #4a90d9;
-  color: #fff;
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
 }
 
 .rec-area-tab:hover:not(.active) {
-  background: var(--bg-subtle, #f7f7fa);
+  background: var(--color-bg-sunken);
 }
 
 .rec-area-cancel {
@@ -143,18 +143,18 @@
   background: transparent;
   cursor: pointer;
   font-size: 13px;
-  color: var(--text-secondary, #666);
+  color: var(--color-fg-muted);
   margin-left: 4px;
 }
 
 .rec-area-cancel:hover {
-  color: #e74c3c;
+  color: var(--color-danger);
 }
 
 /* 录制选区框（绿色虚线，区别于截图的蓝色实线） */
 .rec-selection-box {
   position: absolute;
-  border: 2px dashed #22c55e;
+  border: 2px dashed var(--green-500);
   box-sizing: border-box;
   pointer-events: none;
   z-index: 5;
@@ -167,7 +167,7 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: var(--bg-solid, #fff);
+  background: var(--color-bg-elevated);
   border-radius: 10px;
   padding: 24px;
   text-align: center;
@@ -177,21 +177,27 @@
 
 .rec-fullscreen-panel p {
   margin: 0 0 16px;
-  color: var(--text-primary, #1a1a2e);
+  color: var(--color-fg);
+}
+
+.rec-fullscreen-hint {
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  line-height: 1.7;
 }
 
 .rec-area-confirm {
   padding: 8px 24px;
   border-radius: 6px;
   border: none;
-  background: #4a90d9;
-  color: #fff;
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
   cursor: pointer;
   font-size: 14px;
 }
 
 .rec-area-confirm:hover {
-  background: #3a7bc8;
+  background: var(--color-accent-hover);
 }
 
 /* 窗口列表 */
@@ -203,7 +209,7 @@
   width: 320px;
   max-height: calc(100vh - 80px);
   overflow-y: auto;
-  background: var(--bg-solid, #fff);
+  background: var(--color-bg-elevated);
   border-radius: 10px;
   padding: 8px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
@@ -222,16 +228,17 @@
   cursor: pointer;
   text-align: left;
   transition: background 0.1s;
-  color: var(--text-primary, #1a1a2e);
+  color: var(--color-fg);
 }
 
 .rec-window-item:hover {
-  background: var(--bg-subtle, #f7f7fa);
+  background: var(--color-bg-sunken);
 }
 
 .rec-window-item.selected {
-  background: #eef3fb;
-  outline: 2px solid #4a90d9;
+  background: var(--color-accent-subtle);
+  /* inset box-shadow 跟随 6px 圆角，替代 outline 的直角描边 */
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 .rec-window-item-info {
@@ -250,126 +257,45 @@
 
 .rec-window-item-size {
   font-size: 11px;
-  color: var(--text-secondary, #666);
+  color: var(--color-fg-muted);
 }
 
 .rec-window-empty {
   text-align: center;
-  color: var(--text-secondary, #666);
+  color: var(--color-fg-muted);
   padding: 16px;
   font-size: 13px;
 }
 
-/* ─── 录制控制面板 ───────────────────────────────────────────── */
-
-.rec-controls-panel {
-  position: fixed;
-  top: 50%;
-  right: 16px;
-  transform: translateY(-50%);
-  background: var(--bg-solid, #fff);
-  border-radius: 10px;
-  padding: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  z-index: 30;
-  min-width: 120px;
-}
-
-.rec-controls-info {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
-.rec-indicator {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-}
-
-.rec-indicator.recording {
-  background: #e74c3c;
-  animation: rec-pulse 1.2s infinite;
-}
-
-.rec-indicator.paused {
-  background: #f39c12;
-}
-
+/* ─── 录制中动画 keyframes ────────────────────────────────────── */
 @keyframes rec-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
 }
 
 @keyframes rec-selection-breathe {
-  0%, 100% { border-color: rgba(34, 197, 94, 0.96); }
-  50% { border-color: rgba(34, 197, 94, 0.40); }
+  0%,
+  100% {
+    border-color: rgba(34, 197, 94, 0.96);
+  }
+  50% {
+    border-color: rgba(34, 197, 94, 0.4);
+  }
 }
 
 @keyframes rec-outline-breathe {
-  0%, 100% { outline-color: rgba(34, 197, 94, 0.96); }
-  50% { outline-color: rgba(34, 197, 94, 0.40); }
-}
-
-.rec-timer {
-  font-size: 18px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary, #1a1a2e);
-}
-
-.rec-frames {
-  font-size: 11px;
-  color: var(--text-secondary, #666);
-}
-
-.rec-controls-buttons {
-  display: flex;
-  gap: 8px;
-}
-
-.rec-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: none;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.rec-btn-pause {
-  background: #f39c12;
-  color: #fff;
-}
-
-.rec-btn-pause:hover {
-  background: #e08e0b;
-}
-
-.rec-btn-resume {
-  background: #27ae60;
-  color: #fff;
-}
-
-.rec-btn-resume:hover {
-  background: #219653;
-}
-
-.rec-btn-stop {
-  background: #e74c3c;
-  color: #fff;
-}
-
-.rec-btn-stop:hover {
-  background: #c0392b;
+  0%,
+  100% {
+    outline-color: rgba(34, 197, 94, 0.96);
+  }
+  50% {
+    outline-color: rgba(34, 197, 94, 0.4);
+  }
 }
 
 /* ─── 编码中 ─────────────────────────────────────────────────── */
@@ -379,7 +305,7 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: var(--bg-solid, #fff);
+  background: var(--color-bg-elevated);
   border-radius: 10px;
   padding: 20px 28px;
   display: flex;
@@ -387,7 +313,7 @@
   gap: 12px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
   z-index: 30;
-  color: var(--text-primary, #1a1a2e);
+  color: var(--color-fg);
 }
 
 .rec-spin {
@@ -402,19 +328,23 @@
   height: 28px;
   border: none;
   border-radius: 50%;
-  background: var(--bg-subtle, #f7f7fa);
-  color: var(--text-secondary, #666);
+  background: var(--color-bg-sunken);
+  color: var(--color-fg-muted);
   cursor: pointer;
 }
 
 .rec-encoding-cancel:hover {
-  background: #e2e2e8;
-  color: #e74c3c;
+  background: var(--color-bg-sunken);
+  color: var(--color-danger);
 }
 
 @keyframes rec-spin-anim {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ─── 预览面板 ───────────────────────────────────────────────── */
@@ -424,7 +354,7 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: var(--bg-solid, #fff);
+  background: var(--color-bg-elevated);
   border-radius: 12px;
   padding: 16px;
   max-width: 560px;
@@ -441,7 +371,7 @@
   justify-content: space-between;
   align-items: center;
   font-weight: 600;
-  color: var(--text-primary, #1a1a2e);
+  color: var(--color-fg);
 }
 
 .rec-preview-close {
@@ -449,11 +379,11 @@
   border: none;
   cursor: pointer;
   padding: 4px;
-  color: var(--text-secondary, #666);
+  color: var(--color-fg-muted);
 }
 
 .rec-preview-close:hover {
-  color: #e74c3c;
+  color: var(--color-danger);
 }
 
 .rec-preview-content {
@@ -462,7 +392,7 @@
   max-height: 400px;
   overflow: hidden;
   border-radius: 6px;
-  background: #000;
+  background: var(--neutral-900);
 }
 
 .rec-preview-gif,
@@ -474,8 +404,21 @@
 
 .rec-preview-info {
   font-size: 12px;
-  color: var(--text-secondary, #666);
+  color: var(--color-fg-muted);
   text-align: center;
+}
+
+/* 预览面板内复制/保存等操作失败的临时错误提示 */
+.rec-action-error {
+  padding: 5px 10px;
+  background: var(--color-danger-subtle, #fde7e9);
+  color: var(--color-danger-fg, #c01e3c);
+  border: 1px solid var(--color-danger-fg, #c01e3c);
+  border-radius: var(--radius-sm, 4px);
+  font-size: 12px;
+  box-shadow: var(--shadow-lg);
+  max-width: 360px;
+  word-break: break-all;
 }
 
 .rec-preview-actions {
@@ -490,26 +433,26 @@
   gap: 4px;
   padding: 6px 16px;
   border-radius: 6px;
-  border: 1px solid var(--border, #e2e2e8);
+  border: 1px solid var(--color-border);
   background: transparent;
   cursor: pointer;
   font-size: 13px;
-  color: var(--text-primary, #1a1a2e);
-  transition: all 0.15s;
+  color: var(--color-fg);
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
 }
 
 .rec-action-btn:hover {
-  background: var(--bg-subtle, #f7f7fa);
+  background: var(--color-bg-sunken);
 }
 
 .rec-action-primary {
-  background: #4a90d9;
-  color: #fff;
-  border-color: #4a90d9;
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
+  border-color: var(--color-accent);
 }
 
 .rec-action-primary:hover {
-  background: #3a7bc8;
+  background: var(--color-accent-hover);
 }
 
 /* ─── 录制中 overlay ─────────────────────────────────────────── */
@@ -517,14 +460,14 @@
 /* 半透明遮罩（选区外） */
 .rec-rec-mask {
   position: absolute;
-  background: oklch(0.00 0 0 / 0.35);
+  background: oklch(0 0 0 / 0.35);
   pointer-events: none;
 }
 
 /* 选区框边框（绿色虚线） */
 .rec-rec-selection {
   position: absolute;
-  border: 2px dashed #22c55e;
+  border: 2px dashed var(--green-500);
   box-sizing: border-box;
   pointer-events: none;
   z-index: 5;
@@ -534,19 +477,24 @@
 /* 录制中非全屏选区框：使用 outline 向外延伸（不被 BitBlt 截到）+ 呼吸动画 */
 .rec-rec-selection-outline {
   border: none;
-  outline: 2px dashed #22c55e;
+  outline: 2px dashed var(--green-500);
   animation: rec-outline-breathe 1.4s ease-in-out infinite;
 }
 
 /* A full-screen selection has no outside space for an outline. */
 .rec-rec-selection-fullscreen {
-  box-shadow: inset 0 0 0 3px #16a34a;
+  box-shadow: inset 0 0 0 3px var(--green-600);
   animation: rec-fullscreen-border-pulse 1.4s ease-in-out infinite;
 }
 
 @keyframes rec-fullscreen-border-pulse {
-  0%, 100% { box-shadow: inset 0 0 0 3px rgba(22, 163, 74, 0.96); }
-  50% { box-shadow: inset 0 0 0 3px rgba(22, 163, 74, 0.52); }
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 3px rgba(22, 163, 74, 0.96);
+  }
+  50% {
+    box-shadow: inset 0 0 0 3px rgba(22, 163, 74, 0.52);
+  }
 }
 
 /* 选区尺寸标签 */
@@ -554,8 +502,8 @@
   position: absolute;
   top: -22px;
   left: 0;
-  background: rgba(255, 107, 107, 0.9);
-  color: #fff;
+  background: var(--color-danger);
+  color: var(--neutral-0);
   font-size: 11px;
   padding: 2px 6px;
   border-radius: 3px;
@@ -566,7 +514,7 @@
 /* 录制控制面板（选区框右侧） */
 .rec-rec-controls {
   position: fixed;
-  background: var(--bg-solid, #fff);
+  background: var(--color-bg-elevated);
   border-radius: 10px;
   padding: 12px 14px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
@@ -600,24 +548,24 @@
 }
 
 .rec-rec-indicator.recording {
-  background: #e74c3c;
+  background: var(--color-danger);
   animation: rec-pulse 1.2s infinite;
 }
 
 .rec-rec-indicator.paused {
-  background: #f39c12;
+  background: var(--orange-500);
 }
 
 .rec-rec-timer {
   font-size: 20px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  color: var(--text-primary, #1a1a2e);
+  color: var(--color-fg);
 }
 
 .rec-rec-frames {
   font-size: 11px;
-  color: var(--text-secondary, #666);
+  color: var(--color-fg-muted);
 }
 
 .rec-rec-buttons {
@@ -638,40 +586,40 @@
 }
 
 .rec-rec-btn-pause {
-  background: #f39c12;
-  color: #fff;
+  background: var(--orange-500);
+  color: var(--neutral-0);
 }
 
 .rec-rec-btn-pause:hover {
-  background: #e08e0b;
+  background: var(--orange-600);
 }
 
 .rec-rec-btn-resume {
-  background: #27ae60;
-  color: #fff;
+  background: var(--green-600);
+  color: var(--neutral-0);
 }
 
 .rec-rec-btn-resume:hover {
-  background: #219653;
+  background: var(--green-700);
 }
 
 .rec-rec-btn-stop {
-  background: #e74c3c;
-  color: #fff;
+  background: var(--color-danger);
+  color: var(--neutral-0);
 }
 
 .rec-rec-btn-stop:hover {
-  background: #c0392b;
+  background: var(--color-danger-hover);
 }
 
 .rec-rec-btn-cancel {
-  background: var(--bg-subtle, #f7f7fa);
-  color: var(--text-secondary, #666);
+  background: var(--color-bg-sunken);
+  color: var(--color-fg-muted);
 }
 
 .rec-rec-btn-cancel:hover {
-  background: #e2e2e8;
-  color: #e74c3c;
+  background: var(--color-bg-sunken);
+  color: var(--color-danger);
 }
 
 /* ─── 错误面板 ───────────────────────────────────────────────── */
@@ -681,7 +629,7 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: var(--bg-solid, #fff);
+  background: var(--color-bg-elevated);
   border-radius: 10px;
   padding: 20px;
   display: flex;
@@ -690,14 +638,30 @@
   gap: 12px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
   z-index: 30;
-  color: #e74c3c;
+  color: var(--color-danger);
 }
 
 .rec-error-panel button {
   padding: 6px 16px;
   border-radius: 6px;
-  border: 1px solid var(--border, #e2e2e8);
+  border: 1px solid var(--color-border);
   background: transparent;
   cursor: pointer;
-  color: var(--text-primary, #1a1a2e);
+  color: var(--color-fg);
+}
+
+/* ─── 交互元素键盘焦点 ───────────────────────────────────────── */
+.rec-mode-btn:focus-visible,
+.rec-mode-cancel:focus-visible,
+.rec-area-tab:focus-visible,
+.rec-area-cancel:focus-visible,
+.rec-area-confirm:focus-visible,
+.rec-window-item:focus-visible,
+.rec-encoding-cancel:focus-visible,
+.rec-preview-close:focus-visible,
+.rec-action-btn:focus-visible,
+.rec-rec-btn:focus-visible,
+.rec-error-panel button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
 }

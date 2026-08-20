@@ -345,6 +345,13 @@ fn gif_frame_delay_ms(actual: Duration, fallback_ms: u32) -> u32 {
     }
 }
 
+/// 计算最大录制帧数：帧率 × 最长时长（秒），至少 10 帧。
+/// 不再设置额外帧数上限，保证录制时长精确由「最长时长」配置决定；
+/// 帧率与时长已分别由录制线程 clamp / 命令校验限制（组合上限约为 3600 帧）。
+fn max_frames_for(fps: u32, max_duration_sec: u32) -> u32 {
+    (fps * max_duration_sec).max(10)
+}
+
 // ─── GIF 流式录制循环 ─────────────────────────────────────────────
 
 fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
@@ -366,7 +373,7 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
 
     let fps = state.get_fps().max(5).min(30);
     let frame_interval = Duration::from_millis(1000 / fps as u64);
-    let max_frames = (fps * state.max_duration_sec.load(Ordering::SeqCst)).max(10).min(600);
+    let max_frames = max_frames_for(fps, state.max_duration_sec.load(Ordering::SeqCst));
 
     // Large captures prioritize responsiveness over palette precision. NeuQuant's
     // highest sample factor is substantially faster for full-screen GIFs.
@@ -588,6 +595,11 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
 
     let fps = state.get_fps().max(10).min(60);
 
+    // H.264 yuv420p 要求偶数宽高，奇数时 ffmpeg 会裁剪最右一列/最下一行。
+    // 上报前端时使用裁剪后的实际视频尺寸，保证与成片一致。
+    let video_width = region.width - (region.width % 2);
+    let video_height = region.height - (region.height % 2);
+
     crate::utils::logger::log(
         "recording",
         &format!(
@@ -597,7 +609,7 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
     );
 
     // 临时输出文件
-    let temp_dir = std::env::temp_dir().join("floatory-recording");
+    let temp_dir = std::env::temp_dir().join("levitaire-recording");
     let _ = std::fs::create_dir_all(&temp_dir);
     let output_path = temp_dir.join(format!("recording_{}.mp4", gen));
 
@@ -639,7 +651,7 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
     crate::utils::logger::log("recording", "ffmpeg started");
 
     let frame_interval = Duration::from_millis(1000 / fps as u64);
-    let max_frames = (fps * state.max_duration_sec.load(Ordering::SeqCst)).max(10).min(600);
+    let max_frames = max_frames_for(fps, state.max_duration_sec.load(Ordering::SeqCst));
     let mut frame_count: u32 = 0;
     let mut write_error: Option<String> = None;
     let mut last_capture = Instant::now();
@@ -795,8 +807,8 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
             base64: String::new(),
             file_path: Some(video_path.clone()),
             frame_count,
-            width: region.width,
-            height: region.height,
+            width: video_width,
+            height: video_height,
             mode: RecordMode::Video,
         });
     }
@@ -807,8 +819,8 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
             "type": "done",
             "videoPath": video_path,
             "frameCount": frame_count,
-            "width": region.width,
-            "height": region.height,
+            "width": video_width,
+            "height": video_height,
             "sizeBytes": video_bytes_len,
             "elapsedMs": state.elapsed_ms(),
         }),
@@ -824,6 +836,19 @@ mod tests {
     fn gif_frame_delay_uses_the_actual_capture_interval() {
         assert_eq!(gif_frame_delay_ms(Duration::from_millis(1_500), 100), 1_500);
         assert_eq!(gif_frame_delay_ms(Duration::ZERO, 100), 100);
+    }
+
+    #[test]
+    fn max_frames_matches_duration_without_extra_cap() {
+        // 高帧率 × 长时长不应被 600 帧上限截断（修复前会被提前终止）
+        assert_eq!(max_frames_for(30, 60), 1800);
+        assert_eq!(max_frames_for(15, 60), 900);
+        assert_eq!(max_frames_for(30, 30), 900);
+        // 默认组合与低帧率组合
+        assert_eq!(max_frames_for(10, 30), 300);
+        assert_eq!(max_frames_for(5, 60), 300);
+        // 至少 10 帧兜底
+        assert_eq!(max_frames_for(1, 1), 10);
     }
 
     #[test]

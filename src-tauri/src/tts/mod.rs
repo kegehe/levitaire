@@ -363,16 +363,37 @@ pub fn is_paused(state: &TtsState) -> bool {
 }
 
 /// 进度查询：(position_ms, duration_ms, paused)。无 player 返回 None。
-/// 预留接口：当前 speaking 态仅做暂停/继续/停止，未渲染进度条；后续接进度条时启用。
-#[allow(dead_code)]
+/// duration_ms 为 0 表示总时长未知（NaturalDuration 为无限，实时流等场景），
+/// 前端据此只显示已播时长、隐藏进度条比例。
+/// COM 调用放 MTA 线程（同 pause/resume），避免命令线程未初始化 COM 导致调用失败。
 pub fn get_progress(state: &TtsState) -> Option<(u64, u64, bool)> {
-    let guard = state.player.lock().ok()?;
-    let p = guard.as_ref().map(|(_, p)| p)?;
-    let session = p.PlaybackSession().ok()?;
-    let pos_ms = session.Position().ok()?.Duration as u64 / 10_000;
-    let dur_ms = session.NaturalDuration().ok()?.Duration as u64 / 10_000;
+    let player = state.player.lock().ok()?.as_ref().map(|(_, p)| p.clone())?;
+    let res = std::thread::spawn(move || {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let r: Option<(u64, u64)> = (|| {
+            let session = player.PlaybackSession().ok()?;
+            let pos_ms = session.Position().ok()?.Duration as u64 / 10_000;
+            let dur = session.NaturalDuration().ok()?.Duration;
+            // NaturalDuration 对未知时长返回无限（i64::MAX），以 0 表示"未知"，避免前端溢出
+            let dur_ms = if dur < 0 || dur >= i64::MAX / 2 {
+                0
+            } else {
+                dur as u64 / 10_000
+            };
+            Some((pos_ms, dur_ms))
+        })();
+        unsafe {
+            CoUninitialize();
+        }
+        r
+    })
+    .join()
+    .ok()
+    .flatten()?;
     let paused = state.paused.lock().map(|g| *g).unwrap_or(false);
-    Some((pos_ms, dur_ms, paused))
+    Some((res.0, res.1, paused))
 }
 
 /// 当前播放态快照（供前端恢复工具栏 speaking 态）
@@ -430,7 +451,7 @@ mod tests {
     }
 
     /// 真机测试：枚举系统已安装语音。需 Windows 语音包，默认 ignore（CI 无语音环境）。
-    /// 手动验证：cargo test --bin floatory tts::tests::tts_list_voices_real -- --ignored --nocapture
+    /// 手动验证：cargo test --bin levitaire tts::tests::tts_list_voices_real -- --ignored --nocapture
     #[test]
     #[ignore]
     fn tts_list_voices_real() {
@@ -451,7 +472,7 @@ mod tests {
 
     /// 真机测试：验证 WinRT 合成+播放 API 链路（speak 的核心调用，不经 TtsState/回调）。
     /// 会真实发声（朗读"测试"两字约 1 秒）。默认 ignore。
-    /// 手动验证：cargo test --bin floatory tts::tests::tts_synthesize_play_real -- --ignored --nocapture
+    /// 手动验证：cargo test --bin levitaire tts::tests::tts_synthesize_play_real -- --ignored --nocapture
     #[test]
     #[ignore]
     fn tts_synthesize_play_real() {

@@ -1,8 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
+import {
+  applyThemePreferences,
+  getStoredThemePreferences,
+  subscribeThemePreferences,
+} from "../../styles/themePreferences";
 import "./RecordingTool.css";
 
 function RecordingControls() {
@@ -10,22 +15,32 @@ function RecordingControls() {
   const [paused, setPaused] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [frameCount, setFrameCount] = useState(0);
-  const [recordingActive, setRecordingActive] = useState(false);
   const actionPending = useRef(false);
   // 标记窗口是否已被主动隐藏（stop/cancel/编码完成），
-  // 防止残留的 frame 事件将 recordingActive 设回 true 导致窗口重新显示
+  // 防止残留的 frame 事件继续更新已隐藏窗口的状态
   const hiddenRef = useRef(false);
+
+  useLayoutEffect(() => {
+    applyThemePreferences(getStoredThemePreferences());
+  }, []);
+
+  useEffect(() => {
+    const unlistenTheme = subscribeThemePreferences();
+    return () => {
+      unlistenTheme.then((fn) => fn()).catch(console.error);
+    };
+  }, []);
 
   const hideWindow = useCallback(() => {
     hiddenRef.current = true;
-    setRecordingActive(false);
     win.hide().catch(() => {});
   }, [win]);
 
   const syncState = useCallback(() => {
-    invoke<{ running: boolean; paused: boolean; elapsedMs: number; frameCount: number }>("get_recording_state")
+    invoke<{ running: boolean; paused: boolean; elapsedMs: number; frameCount: number }>(
+      "get_recording_state",
+    )
       .then((state) => {
-        setRecordingActive(state.running);
         setPaused(state.paused);
         setElapsedMs(state.elapsedMs);
         setFrameCount(state.frameCount);
@@ -49,21 +64,18 @@ function RecordingControls() {
     const unlisten = Promise.all([
       listen("recording-progress", (event) => {
         const data = event.payload as { type: string; elapsedMs?: number; frameCount?: number };
-        if (data.elapsedMs !== undefined) setElapsedMs(data.elapsedMs);
-        if (data.frameCount !== undefined) setFrameCount(data.frameCount);
-        if (data.type === "frame") {
-          // 窗口已被主动隐藏后，忽略残留的 frame 事件
-          if (!hiddenRef.current) {
-            setRecordingActive(true);
-          }
-        }
+        // 结束类事件：直接隐藏控制窗口
         if (data.type === "encoding" || data.type === "done" || data.type === "error") {
           hideWindow();
+          return;
         }
+        // 窗口已被主动隐藏后，忽略残留的 frame 事件
+        if (hiddenRef.current) return;
+        if (data.elapsedMs !== undefined) setElapsedMs(data.elapsedMs);
+        if (data.frameCount !== undefined) setFrameCount(data.frameCount);
       }),
       listen("recording-controls-started", () => {
         hiddenRef.current = false;
-        setRecordingActive(true);
         syncState();
       }),
       listen("recording-controls-finished", () => {
@@ -77,15 +89,11 @@ function RecordingControls() {
     };
   }, [syncState, hideWindow]);
 
-  useEffect(() => {
-    if (!recordingActive) return;
-    const timer = window.setInterval(syncState, 200);
-    return () => window.clearInterval(timer);
-  }, [recordingActive, syncState]);
-
   const formatTime = (ms: number) => {
     const seconds = Math.floor(ms / 1000);
-    return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
+    return `${Math.floor(seconds / 60)
+      .toString()
+      .padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
   };
 
   const togglePause = async () => {
@@ -132,7 +140,11 @@ function RecordingControls() {
       </div>
       <div className="rec-rec-frames">{frameCount} 帧</div>
       <div className="rec-rec-buttons">
-        <button className={`rec-rec-btn ${paused ? "rec-rec-btn-resume" : "rec-rec-btn-pause"}`} onClick={togglePause} title={paused ? "继续录制" : "暂停录制"}>
+        <button
+          className={`rec-rec-btn ${paused ? "rec-rec-btn-resume" : "rec-rec-btn-pause"}`}
+          onClick={togglePause}
+          title={paused ? "继续录制" : "暂停录制"}
+        >
           <Icon name={paused ? "Play" : "Pause"} size={14} />
         </button>
         <button className="rec-rec-btn rec-rec-btn-stop" onClick={stop} title="停止录制">

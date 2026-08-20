@@ -5,7 +5,7 @@
 //! 2. 使用 `paddle2onnx` 转换为 ONNX 格式
 //! 3. 或从 RapidAI/RapidOCR 获取预转换的 ONNX 模型
 //!
-//! 模型文件放到 `%APPDATA%/floatory/ocr/`:
+//! 模型文件放到 `%APPDATA%/levitaire/ocr/`:
 //! - det.onnx (检测模型)
 //! - rec.onnx (识别模型)
 //! - ppocr_keys_v1.txt (字典)
@@ -570,7 +570,7 @@ fn merge_boxes(boxes: &[TextBox]) -> Vec<TextBox> {
 }
 
 fn get_default_model_dir() -> Option<std::path::PathBuf> {
-    dirs::data_dir().map(|p| p.join("floatory").join("ocr"))
+    dirs::data_dir().map(|p| p.join("levitaire").join("ocr"))
 }
 
 // ─── 测试 ────────────────────────────────────────────────────────

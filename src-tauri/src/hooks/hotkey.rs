@@ -27,12 +27,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// 截图热键 ID
 const HOTKEY_ID_SCREENSHOT: i32 = 9001;
-/// 语音输入热键 ID
-const HOTKEY_ID_VOICE: i32 = 9002;
 /// 录屏热键 ID
 const HOTKEY_ID_RECORDING: i32 = 9003;
 /// 槽位数量
-const SLOT_COUNT: usize = 3;
+const SLOT_COUNT: usize = 2;
 /// 自定义消息：注册热键（lparam = *mut HotkeyRequest）
 const WM_REGISTER_HOTKEY: u32 = WM_USER + 1;
 /// 自定义消息：反注册热键
@@ -42,7 +40,6 @@ const WM_UNREGISTER_HOTKEY: u32 = WM_USER + 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeySlotId {
     Screenshot,
-    Voice,
     Recording,
 }
 
@@ -50,15 +47,13 @@ impl HotkeySlotId {
     fn id(self) -> i32 {
         match self {
             Self::Screenshot => HOTKEY_ID_SCREENSHOT,
-            Self::Voice => HOTKEY_ID_VOICE,
             Self::Recording => HOTKEY_ID_RECORDING,
         }
     }
     fn index(self) -> usize {
         match self {
             Self::Screenshot => 0,
-            Self::Voice => 1,
-            Self::Recording => 2,
+            Self::Recording => 1,
         }
     }
 }
@@ -97,7 +92,7 @@ struct HotkeyState {
     /// 注册后忽略热键触发的截止时间戳（毫秒），避免录入时组合键仍按着导致立即触发
     suppress_until_ms: AtomicU64,
     app_handle: OnceLock<tauri::AppHandle>,
-    /// 多槽位：0=screenshot, 1=voice
+    /// 多槽位：0=screenshot, 1=recording
     slots: [HotkeySlot; SLOT_COUNT],
 }
 
@@ -105,7 +100,7 @@ static HOTKEY_STATE: HotkeyState = HotkeyState {
     hwnd: AtomicU32::new(0),
     suppress_until_ms: AtomicU64::new(0),
     app_handle: OnceLock::new(),
-    slots: [HotkeySlot::new(), HotkeySlot::new(), HotkeySlot::new()],
+    slots: [HotkeySlot::new(), HotkeySlot::new()],
 };
 
 /// 当前时间戳（毫秒）
@@ -142,7 +137,7 @@ fn run_hotkey_message_loop() {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(hotkey_wndproc),
             hInstance: hinst.into(),
-            lpszClassName: w!("FloatoryHotkeySink"),
+            lpszClassName: w!("LevitaireHotkeySink"),
             ..Default::default()
         };
         let _ = RegisterClassExW(&wc);
@@ -150,8 +145,8 @@ fn run_hotkey_message_loop() {
         // 创建仅消息窗口（HWND_MESSAGE，不可见），用于接收 WM_HOTKEY 与注册请求
         let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
-            w!("FloatoryHotkeySink"),
-            w!("FloatoryHotkeySink"),
+            w!("LevitaireHotkeySink"),
+            w!("LevitaireHotkeySink"),
             WS_OVERLAPPED,
             0,
             0,
@@ -193,7 +188,6 @@ unsafe extern "system" fn hotkey_wndproc(
             let id = wparam.0 as i32;
             let slot = match id {
                 HOTKEY_ID_SCREENSHOT => HotkeySlotId::Screenshot,
-                HOTKEY_ID_VOICE => HotkeySlotId::Voice,
                 HOTKEY_ID_RECORDING => HotkeySlotId::Recording,
                 _ => return LRESULT(0),
             };
@@ -223,10 +217,6 @@ unsafe extern "system" fn hotkey_wndproc(
                                 );
                             }
                         });
-                    }
-                    HotkeySlotId::Voice => {
-                        crate::utils::logger::log("hotkey", "voice hotkey triggered");
-                        let _ = app.emit("voice-hotkey-triggered", ());
                     }
                     HotkeySlotId::Recording => {
                         crate::utils::logger::log("hotkey", "recording hotkey triggered");
@@ -263,7 +253,6 @@ unsafe extern "system" fn hotkey_wndproc(
         WM_UNREGISTER_HOTKEY => {
             let slot = match wparam.0 as i32 {
                 HOTKEY_ID_SCREENSHOT => HotkeySlotId::Screenshot,
-                HOTKEY_ID_VOICE => HotkeySlotId::Voice,
                 HOTKEY_ID_RECORDING => HotkeySlotId::Recording,
                 _ => return LRESULT(0),
             };
@@ -589,11 +578,9 @@ mod tests {
     #[test]
     fn test_slot_id_mapping() {
         assert_eq!(HotkeySlotId::Screenshot.id(), HOTKEY_ID_SCREENSHOT);
-        assert_eq!(HotkeySlotId::Voice.id(), HOTKEY_ID_VOICE);
         assert_eq!(HotkeySlotId::Recording.id(), HOTKEY_ID_RECORDING);
         assert_eq!(HotkeySlotId::Screenshot.index(), 0);
-        assert_eq!(HotkeySlotId::Voice.index(), 1);
-        assert_eq!(HotkeySlotId::Recording.index(), 2);
+        assert_eq!(HotkeySlotId::Recording.index(), 1);
     }
 
     #[test]

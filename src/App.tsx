@@ -10,8 +10,9 @@ const FloatingOrb = lazy(() => import("./components/FloatingOrb"));
 const ToolPalette = lazy(() => import("./components/ToolPalette"));
 const ScreenshotTool = lazy(() => import("./tools/screenshot/ScreenshotTool"));
 const RecordingTool = lazy(() => import("./tools/recording/RecordingTool"));
-const VoiceInput = lazy(() => import("./tools/voice-input/VoiceInput"));
 const SystemMonitor = lazy(() => import("./tools/system-monitor/SystemMonitor"));
+const PomodoroTool = lazy(() => import("./tools/pomodoro/PomodoroTool"));
+const QuickInputTool = lazy(() => import("./tools/quick-input/QuickInputTool"));
 const Settings = lazy(() => import("./components/Settings"));
 
 /** screenshot-overlay 窗口的模式切换器 */
@@ -65,7 +66,12 @@ function App() {
   // 非 main 窗口（overlay、controls 等）始终透明背景，
   // 防止 lazy 组件加载期间 Suspense fallback={null} 导致白色闪烁
   useEffect(() => {
-    if (windowLabel !== "toolbar" && windowLabel !== "orb" && windowLabel !== "palette" && windowLabel !== "settings") {
+    if (
+      windowLabel !== "toolbar" &&
+      windowLabel !== "orb" &&
+      windowLabel !== "palette" &&
+      windowLabel !== "settings"
+    ) {
       document.documentElement.style.background = "transparent";
       document.body.style.background = "transparent";
       document.body.style.margin = "0";
@@ -84,10 +90,12 @@ function App() {
     content = <OverlaySwitcher />;
   } else if (windowLabel === "recording-controls") {
     content = <RecordingControls />;
-  } else if (windowLabel === "voice-overlay") {
-    content = <VoiceInput />;
   } else if (windowLabel === "monitor-overlay") {
     content = <SystemMonitor />;
+  } else if (windowLabel === "pomodoro-overlay") {
+    content = <PomodoroTool />;
+  } else if (windowLabel === "quick-input-overlay") {
+    content = <QuickInputTool />;
   } else {
     content = <Settings />;
   }

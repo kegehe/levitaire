@@ -39,7 +39,9 @@ describe("normalizeSystemMonitorConfig", () => {
   });
 
   it("intervalMs 为非数字回退为默认", () => {
-    const r = normalizeSystemMonitorConfig({ intervalMs: "fast" } as unknown as Partial<SystemMonitorConfig>);
+    const r = normalizeSystemMonitorConfig({
+      intervalMs: "fast",
+    } as unknown as Partial<SystemMonitorConfig>);
     expect(r.intervalMs).toBe(DEFAULT_SYSTEM_MONITOR_CONFIG.intervalMs);
   });
 

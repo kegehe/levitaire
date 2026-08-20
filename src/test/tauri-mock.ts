@@ -75,8 +75,18 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     show: vi.fn().mockResolvedValue(undefined),
     setSize: mockSetSize,
     startDragging: mockStartDragging,
+    setFocusable: vi.fn().mockResolvedValue(undefined),
     setAlwaysOnBottom: mockSetAlwaysOnBottom,
     setAlwaysOnTop: mockSetAlwaysOnTop,
+    // 自绘标题栏（TitleBar）用到的窗口控制方法
+    minimize: vi.fn().mockResolvedValue(undefined),
+    maximize: vi.fn().mockResolvedValue(undefined),
+    unmaximize: vi.fn().mockResolvedValue(undefined),
+    toggleMaximize: vi.fn().mockResolvedValue(undefined),
+    isMaximized: vi.fn().mockResolvedValue(false),
+    close: vi.fn().mockResolvedValue(undefined),
+    onResized: vi.fn(() => Promise.resolve(() => {})),
+    onMoved: vi.fn(() => Promise.resolve(() => {})),
   })),
 }));
 
@@ -92,9 +102,46 @@ vi.mock("@tauri-apps/api/dpi", () => ({
   },
 }));
 
+// Mock @tauri-apps/api/menu（FloatingOrb 右键菜单）
+// 模拟 Tauri 的 MenuChannels 全局 id → action 映射，供测试触发菜单项
+const menuState = vi.hoisted(() => {
+  const items = new Map<string, { id: string; action?: (id: string) => void }>();
+  return {
+    items,
+    popup: vi.fn(async () => undefined),
+    registerItem: (opts: { id?: string; action?: (id: string) => void }) => {
+      const item = { id: opts.id ?? "", action: opts.action };
+      items.set(item.id, item);
+      return item;
+    },
+  };
+});
+
+vi.mock("@tauri-apps/api/menu", () => ({
+  MenuItem: {
+    new: vi.fn(async (opts: { id?: string; action?: (id: string) => void }) =>
+      menuState.registerItem(opts),
+    ),
+  },
+  PredefinedMenuItem: {
+    new: vi.fn(async () => ({ id: "__separator__", kind: "predefined" })),
+  },
+  Menu: {
+    new: vi.fn(async (opts: { items?: unknown[] }) => ({
+      items: opts.items ?? [],
+      popup: menuState.popup,
+    })),
+  },
+}));
+
 // 测试辅助：触发 mock 事件
 export function emitMockEvent(event: string, payload: unknown) {
   listeners.get(event)?.forEach((handler) => handler({ payload }));
+}
+
+// 测试辅助：触发某个菜单项的 action（模拟点击原生菜单项）
+export function triggerMenuAction(id: string) {
+  menuState.items.get(id)?.action?.(id);
 }
 
 // 测试辅助：清理所有监听器
@@ -102,4 +149,4 @@ export function clearMockListeners() {
   listeners.clear();
 }
 
-export { mockSetSize, mockHide };
+export { mockSetSize, mockHide, menuState };

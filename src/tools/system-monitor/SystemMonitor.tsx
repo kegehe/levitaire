@@ -4,8 +4,19 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
-import { fetchSystemMonitorConfig, saveSystemMonitorConfig, type SystemMonitorConfig, type SystemMonitorDisplayMode } from "../../constants/systemMonitorConfig";
+import {
+  fetchSystemMonitorConfig,
+  saveSystemMonitorConfig,
+  type SystemMonitorConfig,
+  type SystemMonitorDisplayMode,
+} from "../../constants/systemMonitorConfig";
+import {
+  applyThemePreferences,
+  getStoredThemePreferences,
+  subscribeThemePreferences,
+} from "../../styles/themePreferences";
 import { formatBytes, formatRate, formatUptime } from "../../utils/formatBytes";
+import { persistWindowPositionOnMove } from "../../utils/windowPosition";
 import "./SystemMonitor.css";
 
 /** 后端 monitor-stats 事件 payload（与 Rust MonitorStats 对应） */
@@ -44,10 +55,13 @@ interface SparklineProps {
 
 function SparklineBase({ data, max, color, width = 264, height = 28 }: SparklineProps) {
   // 坐标计算用 useMemo，依赖 data 引用（pushSample 每次产生新数组）与 max
-  const { points, areaPath, gradId } = useMemo(() => {
-    const gradId = `grad-${color.replace("#", "")}`;
+  // color 为 var(--color-chart-xxx) 形式的 CSS 变量，需通过内联 style（非 SVG 表现属性）注入，
+  // 否则 var() 不会在表现属性中被解析，线条/渐变将不可见。
+  const { points, areaPath, safeId } = useMemo(() => {
+    // id 不能含 "#"（linearGradient id 选择器限制），去除 var() 前缀仅做稳定 key
+    const safeId = `grad-${color.replace(/[^a-z0-9]/gi, "")}`;
     if (data.length < 2 || max <= 0) {
-      return { points: "", areaPath: "", gradId };
+      return { points: "", areaPath: "", safeId };
     }
     const stepX = width / (HISTORY_LEN - 1);
     const coords = data.map((v, i) => {
@@ -59,7 +73,7 @@ function SparklineBase({ data, max, color, width = 264, height = 28 }: Sparkline
     const lastX = (data.length - 1) * stepX;
     // 填充区：从左下角 → 各点 → 右下角 → 闭合
     const area = `M0,${height} L ${coords.join(" L ")} L${lastX.toFixed(1)},${height} Z`;
-    return { points: pointsStr, areaPath: area, gradId };
+    return { points: pointsStr, areaPath: area, safeId };
   }, [data, max, color, width, height]);
 
   if (!points) {
@@ -68,13 +82,19 @@ function SparklineBase({ data, max, color, width = 264, height = 28 }: Sparkline
   return (
     <svg width={width} height={height} className="sparkline" aria-hidden>
       <defs>
-        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        <linearGradient id={safeId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" style={{ stopColor: color }} stopOpacity="0.35" />
+          <stop offset="100%" style={{ stopColor: color }} stopOpacity="0" />
         </linearGradient>
       </defs>
-      <path d={areaPath} fill={`url(#${gradId})`} />
-      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+      <path d={areaPath} fill={`url(#${safeId})`} />
+      <polyline
+        points={points}
+        fill="none"
+        style={{ stroke: color }}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -112,7 +132,10 @@ const MetricCard = memo(MetricCardBase);
 
 function SystemMonitor() {
   const [stats, setStats] = useState<MonitorStats | null>(null);
-  const [config, setConfig] = useState<SystemMonitorConfig>({ intervalMs: 1000, displayMode: "full" });
+  const [config, setConfig] = useState<SystemMonitorConfig>({
+    intervalMs: 1000,
+    displayMode: "full",
+  });
   const [, setTick] = useState(0);
   const configRef = useRef<SystemMonitorConfig>({ intervalMs: 1000, displayMode: "full" });
   const configVersionRef = useRef(0);
@@ -124,7 +147,6 @@ function SystemMonitor() {
   const diskIoHistRef = useRef<number[]>([]);
   const rafRef = useRef<number | null>(null);
   const monitorBodyRef = useRef<HTMLDivElement>(null);
-  const miniWindowHeightRef = useRef<number | null>(null);
 
   const pushSample = (s: MonitorStats) => {
     // 返回新数组（不可变），让 Sparkline/memo 的浅比较能检测到变化并重绘
@@ -154,8 +176,7 @@ function SystemMonitor() {
 
   // 独立 WebView 需要自行初始化主题和透明背景，避免首帧闪烁。
   useLayoutEffect(() => {
-    const theme = localStorage.getItem("floatory-theme") || "light";
-    document.documentElement.setAttribute("data-theme", theme);
+    applyThemePreferences(getStoredThemePreferences());
     document.documentElement.style.background = "transparent";
     document.body.style.background = "transparent";
     const root = document.getElementById("root");
@@ -172,10 +193,7 @@ function SystemMonitor() {
 
   // 设置窗口的 localStorage 不应作为运行中跨窗口同步机制。
   useEffect(() => {
-    const unlistenTheme = listen<string>("floatory-theme-changed", (event) => {
-      document.documentElement.setAttribute("data-theme", event.payload);
-      localStorage.setItem("floatory-theme", event.payload);
-    });
+    const unlistenTheme = subscribeThemePreferences();
     return () => {
       unlistenTheme.then((fn) => fn()).catch(console.error);
     };
@@ -184,28 +202,61 @@ function SystemMonitor() {
   const isMini = config.displayMode === "mini";
 
   useLayoutEffect(() => {
-    if (!isMini) {
-      miniWindowHeightRef.current = null;
-      return;
-    }
     const body = monitorBodyRef.current;
     const titlebar = body?.querySelector<HTMLElement>(".monitor-titlebar");
-    const metrics = body?.querySelector<HTMLElement>(".metrics");
-    if (!body || !titlebar || !metrics || metrics.offsetHeight === 0) return;
+    if (!body || !titlebar || titlebar.offsetHeight === 0) return;
 
     const styles = getComputedStyle(body);
     const paddingY =
-      (Number.parseFloat(styles.paddingTop) || 0) +
-      (Number.parseFloat(styles.paddingBottom) || 0);
+      (Number.parseFloat(styles.paddingTop) || 0) + (Number.parseFloat(styles.paddingBottom) || 0);
+    const borderY =
+      (Number.parseFloat(styles.borderTopWidth) || 0) +
+      (Number.parseFloat(styles.borderBottomWidth) || 0);
     const gap = Number.parseFloat(styles.gap) || 0;
-    const height = Math.ceil(paddingY + titlebar.offsetHeight + gap + metrics.offsetHeight);
-    if (miniWindowHeightRef.current === height) return;
 
-    miniWindowHeightRef.current = height;
+    if (isMini) {
+      // mini 模式：标题栏 + 2×2 指标卡，无 sections/footer
+      const metrics = body?.querySelector<HTMLElement>(".metrics");
+      if (!metrics || metrics.offsetHeight === 0) return;
+      const height = Math.ceil(
+        paddingY + borderY + titlebar.offsetHeight + gap + metrics.offsetHeight,
+      );
+      // 与窗口当前高度比较（而非上次 fit 的历史高度）：窗口被外部 setSize
+      // 重置默认尺寸后，仅当实际高度不匹配时才重新 fit，匹配时自然防抖。
+      if (Math.abs(window.innerHeight - height) < 1) return;
+      getCurrentWebviewWindow()
+        .setSize(new LogicalSize(MONITOR_WINDOW_SIZES.mini.width, height))
+        .catch(console.error);
+      return;
+    }
+
+    // full 模式：标题栏 + 内容(metrics+sections) + footer 的自然总高。
+    // 需要等 stats 就绪（磁盘/电池/footer 等 section 才会渲染）再定高，
+    // 否则会在窗口刚打开时就缩成只剩标题+指标卡的矮窗；stats 到达前的
+    // 初始高度沿用后端 show 时设置的 520，待内容齐备后再贴齐。
+    // 直接把 body 置为 height:auto 测一次 offsetHeight，得到不滚动、无空区的
+    // 精确目标高度（content 为 flex:1 + overflow-y:auto，逐个量子元素会
+    // 因 flex 拉伸/收缩而双重计数，用整段自然高最稳）。同步还原避免闪帧。
+    // 依赖 stats（而非 stats !== null）：窗口复用后组件不重新挂载，
+    // 仅凭「首次 stats」不会再次 fit；而采集线程只在窗口显示期间运行
+    // （hide 时 stop），每次重新打开后收到的第一条 stats 恰好代表「窗口
+    // 重新显示」，此时重新测量 fit，覆盖 show_monitor_window 设置的默认
+    // 520 高度，避免底部留白/截断。
+    if (!stats) return;
+    const prevHeight = body.style.height;
+    body.style.height = "auto";
+    const natural = body.offsetHeight;
+    body.style.height = prevHeight;
+    const height = Math.ceil(natural);
+    // 与窗口当前高度比较（而非上次 fit 的历史高度）：窗口复用后每次打开都会被
+    // show_monitor_window 重置为默认 520，若仅与历史 fit 高度比较，窗口被强制
+    // 改高后不会缩回内容高度（历史高度 == 内容自然高度 → 防抖误拦截）。
+    // 窗口实际高度匹配目标时自然防抖，不重复 setSize。
+    if (Math.abs(window.innerHeight - height) < 1) return;
     getCurrentWebviewWindow()
-      .setSize(new LogicalSize(MONITOR_WINDOW_SIZES.mini.width, height))
+      .setSize(new LogicalSize(MONITOR_WINDOW_SIZES.full.width, height))
       .catch(console.error);
-  }, [isMini, stats !== null]);
+  }, [isMini, stats]);
 
   // 加载配置
   useEffect(() => {
@@ -255,13 +306,16 @@ function SystemMonitor() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // 记忆窗口位置：拖动结束后持久化，下次打开恢复上次位置
+  useEffect(() => persistWindowPositionOnMove("monitor-overlay"), []);
+
   const toggleDisplayMode = async () => {
     const nextMode: SystemMonitorDisplayMode = isMini ? "full" : "mini";
     const newConfig = { ...configRef.current, displayMode: nextMode };
     try {
       await saveSystemMonitorConfig(newConfig);
       // 后端只做持久化，不会 emit 事件；需自行通知本窗口监听器刷新 UI + 窗口尺寸
-      emit("floatory-system-monitor-config-changed", newConfig).catch(console.error);
+      emit("levitaire-system-monitor-config-changed", newConfig).catch(console.error);
     } catch (e) {
       console.error("Failed to save monitor config:", e);
     }
@@ -275,12 +329,15 @@ function SystemMonitor() {
   };
 
   useEffect(() => {
-    const unlisten = listen<SystemMonitorConfig>("floatory-system-monitor-config-changed", (event) => {
-      configVersionRef.current += 1;
-      configRef.current = event.payload;
-      setConfig(event.payload);
-      resizeMonitorWindow(event.payload.displayMode);
-    });
+    const unlisten = listen<SystemMonitorConfig>(
+      "levitaire-system-monitor-config-changed",
+      (event) => {
+        configVersionRef.current += 1;
+        configRef.current = event.payload;
+        setConfig(event.payload);
+        resizeMonitorWindow(event.payload.displayMode);
+      },
+    );
     return () => {
       unlisten.then((fn) => fn()).catch(console.error);
     };
@@ -294,14 +351,12 @@ function SystemMonitor() {
   const diskIoHist = diskIoHistRef.current;
   const diskIoMax = diskIoHist.length ? Math.max(...diskIoHist, 1024) : 1024;
 
-  const memPct =
-    stats && stats.mem_total > 0 ? (stats.mem_used / stats.mem_total) * 100 : 0;
-  const memExtra =
-    stats
-      ? `${formatBytes(stats.mem_used)} / ${formatBytes(stats.mem_total)}（可用 ${formatBytes(
-          stats.mem_available,
-        )}）`
-      : "";
+  const memPct = stats && stats.mem_total > 0 ? (stats.mem_used / stats.mem_total) * 100 : 0;
+  const memExtra = stats
+    ? `${formatBytes(stats.mem_used)} / ${formatBytes(stats.mem_total)}（可用 ${formatBytes(
+        stats.mem_available,
+      )}）`
+    : "";
   return (
     <div className="monitor-container">
       <div
@@ -315,36 +370,37 @@ function SystemMonitor() {
           </span>
           <button
             className="monitor-icon-btn"
-            aria-label={isMini ? "标准模式" : "迷你模式"}
-            title={isMini ? "切换到标准模式" : "切换到迷你模式"}
+            aria-label={isMini ? "切换到标准模式" : "切换到迷你模式"}
+            data-tooltip={isMini ? "切换到标准模式" : "切换到迷你模式"}
             onClick={toggleDisplayMode}
           >
             <Icon name={isMini ? "Maximize2" : "Minimize2"} size={14} />
           </button>
           <button
             className="monitor-icon-btn"
-            aria-label="关闭"
+            aria-label="关闭系统监控"
+            data-tooltip="关闭系统监控"
             onClick={() => invoke("hide_monitor_window").catch(console.error)}
           >
             <Icon name="X" size={14} />
           </button>
         </div>
 
-        <div className="metrics">
+        <div className="monitor-content">
+          <div className="metrics">
           <MetricCard
             label="CPU"
             value={stats ? `${stats.cpu_usage_total.toFixed(0)}%` : "--"}
             data={cpuHistRef.current}
             max={100}
-            color="#4f9dff"
+            color="var(--color-chart-cpu)"
             showTrend={!isMini}
             extra={
               stats
                 ? `${stats.cpu_usage_per_core.length} 核${
                     stats.cpu_freq_mhz.length
                       ? ` · ${Math.round(
-                          stats.cpu_freq_mhz.reduce((a, b) => a + b, 0) /
-                            stats.cpu_freq_mhz.length,
+                          stats.cpu_freq_mhz.reduce((a, b) => a + b, 0) / stats.cpu_freq_mhz.length,
                         )} MHz`
                       : ""
                   }`
@@ -356,16 +412,22 @@ function SystemMonitor() {
             value={stats ? `${memPct.toFixed(0)}%` : "--"}
             data={memHistRef.current}
             max={100}
-            color="#7ec873"
+            color="var(--color-chart-mem)"
             showTrend={!isMini}
-            extra={isMini && stats ? `${formatBytes(stats.mem_used)} / ${formatBytes(stats.mem_total)}` : memExtra}
+            extra={
+              isMini && stats
+                ? `${formatBytes(stats.mem_used)} / ${formatBytes(stats.mem_total)}`
+                : memExtra
+            }
           />
           <MetricCard
             label="网络"
-            value={stats ? formatRate(netHistRef.current[netHistRef.current.length - 1] ?? 0) : "--"}
+            value={
+              stats ? formatRate(netHistRef.current[netHistRef.current.length - 1] ?? 0) : "--"
+            }
             data={netHistRef.current}
             max={netMax}
-            color="#e0a84a"
+            color="var(--color-chart-net)"
             showTrend={!isMini}
             extra={
               stats
@@ -378,13 +440,11 @@ function SystemMonitor() {
           <MetricCard
             label="磁盘 I/O"
             value={
-              stats?.disk_io
-                ? formatRate(stats.disk_io.read_rate + stats.disk_io.write_rate)
-                : "--"
+              stats?.disk_io ? formatRate(stats.disk_io.read_rate + stats.disk_io.write_rate) : "--"
             }
             data={diskIoHistRef.current}
             max={diskIoMax}
-            color="#b779d0"
+            color="var(--color-chart-disk)"
             showTrend={!isMini}
             extra={
               stats?.disk_io
@@ -399,8 +459,7 @@ function SystemMonitor() {
           <div className="section">
             <div className="section-label">磁盘</div>
             {stats.disks.map((d) => {
-              const usedPct =
-                d.total > 0 ? ((d.total - d.available) / d.total) * 100 : 0;
+              const usedPct = d.total > 0 ? ((d.total - d.available) / d.total) * 100 : 0;
               return (
                 <div className="disk-row" key={d.mount_point}>
                   <span className="disk-mount">{d.mount_point}</span>
@@ -422,24 +481,20 @@ function SystemMonitor() {
             <div className="section-label">电池</div>
             <div className="battery-row">
               <div className="battery-bar">
-                <div
-                  className="battery-bar-fill"
-                  style={{ width: `${stats.battery.percent}%` }}
-                />
+                <div className="battery-bar-fill" style={{ width: `${stats.battery.percent}%` }} />
               </div>
               <span className="battery-text">
-                {stats.battery.percent}%
-                {stats.battery.charging ? " · 充电中" : " · 使用中"}
+                {stats.battery.percent}%{stats.battery.charging ? " · 充电中" : " · 使用中"}
               </span>
             </div>
           </div>
         )}
 
+        </div>
+
         {/* 运行时间 */}
         {!isMini && stats && (
-          <div className="footer">
-            运行时间 {formatUptime(stats.uptime_secs)}
-          </div>
+          <div className="footer">运行时间 {formatUptime(stats.uptime_secs)}</div>
         )}
       </div>
     </div>

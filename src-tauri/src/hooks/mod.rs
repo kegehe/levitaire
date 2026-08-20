@@ -31,3 +31,7 @@ pub fn start_keyboard_hook(app_handle: tauri::AppHandle) {
 pub fn set_toolbar_visible(visible: bool) {
     mouse::set_toolbar_visible(visible);
 }
+
+pub fn is_toolbar_visible() -> bool {
+    mouse::is_toolbar_visible()
+}

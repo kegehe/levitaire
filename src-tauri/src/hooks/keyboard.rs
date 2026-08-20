@@ -35,7 +35,7 @@ const MAX_CLIPBOARD_U16: usize = 1024 * 1024;
 /// CF_UNICODETEXT 甯搁噺
 const CF_UNICODETEXT: u32 = 13;
 
-/// 安装全局键盘钩子，监听 Ctrl+C 后读取剪贴板并触发选区事件
+/// 安装全局键盘钩子，监听 Ctrl+C 后读取剪贴板并触发选区事件。
 pub fn start_keyboard_hook(app_handle: tauri::AppHandle) {
     KB_STATE
         .app_handle
@@ -88,6 +88,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     if code >= 0 && KB_STATE.enabled.load(Ordering::SeqCst) {
         let msg = wparam.0 as u32;
         let kb_ref = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        let vk_code = kb_ref.vkCode;
 
         if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
             // 跳过程序模拟的按键（SendInput 注入的事件标记为 LLKHF_INJECTED）
@@ -99,8 +100,6 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     lparam,
                 );
             }
-
-            let vk_code = kb_ref.vkCode;
 
             // A full-screen or edge-to-edge recording has no safe location for
             // overlay controls. Keep these controls global and outside capture.
@@ -125,7 +124,9 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                                 let result = if vk_code == 0x53 {
                                     state.stop().map(|_| {
                                         crate::hooks::mouse::set_recording_mode(false);
-                                        let _ = crate::commands::finish_recording_controls(app_clone.clone());
+                                        let _ = crate::commands::finish_recording_controls(
+                                            app_clone.clone(),
+                                        );
                                         let _ = app_clone.emit("recording-stop-requested", ());
                                     })
                                 } else if state.is_paused() {
@@ -207,6 +208,20 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         // 同时通知前端（如果已挂载则重置 UI，未挂载也无害）
                         let _ = app.emit("recording-esc-cancel", ());
                     }
+                } else if crate::hooks::is_toolbar_visible() {
+                    // 文字工具栏可见时，Esc 由全局钩子转发给前端：
+                    // 工具栏窗口 focusable=false，页面内 DOM keydown 收不到按键，
+                    // 组件里为 Esc/子菜单准备的关闭逻辑实际不会触发。
+                    // 只转发不吞键——目标应用仍能收到 Esc（例如取消文本选区），
+                    // 与「点击工具栏外部时透传给目标应用」的语义保持一致。
+                    // WH_KEYBOARD_LL 回调要求在超时内返回，否则 Windows 会静默卸载钩子；
+                    // emit_to 在窗口创建等场景下可能短暂阻塞，因此在独立线程执行。
+                    if let Some(app) = KB_STATE.app_handle.get() {
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            let _ = app_clone.emit_to("toolbar", "toolbar-esc", ());
+                        });
+                    }
                 }
                 // 不吞键，继续传递，前端 keydown 也能收到
             }
@@ -236,6 +251,76 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         KB_STATE.processing.store(false, Ordering::SeqCst);
                     }
                 }
+            }
+        }
+
+        // ── 快速输入转盘：触发键处理（支持两种触发模式）─────────
+        // click 模式：点击唤出/再点击关闭，鼠标点击扇区确认输入；
+        // hold 模式：按住唤出，松开按当前高亮扇区确认输入。
+        // 跳过程序模拟的按键（SendInput 注入的事件标记为 LLKHF_INJECTED）。
+        let trigger_vk = crate::quick_input::trigger_vk();
+        if trigger_vk != 0
+            && vk_code == trigger_vk as u32
+            && kb_ref.flags.0 & 0x10 == 0
+        {
+            // 日志仅做纯内存操作（无 GetWindowTextW 等跨进程调用），
+            // 避免阻塞 WH_KEYBOARD_LL 回调导致钩子被系统静默卸载。
+            crate::utils::logger::log(
+                "keyboard",
+                &format!(
+                    "QUICK-TRIGGER key={} vk=0x{:X} msg=0x{:X} active={}",
+                    crate::quick_input::vk_to_name(vk_code as u16),
+                    vk_code,
+                    msg,
+                    crate::quick_input::is_active(),
+                ),
+            );
+            if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+                // 去重：按住不松时 Windows 会持续送重复 keydown，用 TRIGGER_DOWN 忽略，
+                // 只有「新的一次按下」才处理。松开 keyup 时复位标志。
+                if !crate::quick_input::is_trigger_down() {
+                    crate::quick_input::set_trigger_down(true);
+                    if let Some(app) = KB_STATE.app_handle.get() {
+                        // 重要：在独立线程执行 begin_wheel / toggle_wheel —— begin_wheel 里的 get_mouse_position/emit_to
+                        // 若在设置窗口创建等场景下可能短暂阻塞，而 WH_KEYBOARD_LL 回调要求在超时内返回，
+                        // 否则 Windows 会静默卸载整个键盘钩子。spawn 线程让回调立即返回，避免钩子被系统移除。
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            if crate::quick_input::is_hold_mode() {
+                                // 按住唤起模式：按下即唤起转盘（转盘已激活时保持，松开才确认）
+                                if !crate::quick_input::is_active() {
+                                    crate::quick_input::begin_wheel(&app_clone);
+                                }
+                            } else {
+                                // 单击切换模式：当前已激活则关闭（取消），否则打开
+                                crate::quick_input::toggle_wheel(&app_clone);
+                            }
+                        });
+                    }
+                }
+                // 吞掉 keydown，避免 CapsLock 切换大写
+                return LRESULT(1);
+            } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
+                // 松开触发器时复位按下标志，允许下一次按下再次触发。
+                if crate::quick_input::is_hold_mode() && crate::quick_input::is_active()
+                    && crate::quick_input::is_trigger_down()
+                {
+                    // 按住唤起模式：松开即结束转盘，并按当前高亮扇区确认输入。
+                    // 高亮扇区由前端在转盘中移动鼠标时经 set_quick_input_highlight 同步到后端。
+                    if let Some(app) = KB_STATE.app_handle.get() {
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            let h = crate::quick_input::highlight();
+                            let selected = if h >= 0 { Some(h as usize) } else { None };
+                            crate::quick_input::end_wheel(&app_clone, selected);
+                        });
+                    }
+                }
+                // 单击切换模式：松开仅复位标志，允许下一次点击再次切换，
+                // 不再触发确认——「鼠标点击扇区」才是输入确认语义。
+                crate::quick_input::set_trigger_down(false);
+                // 吞掉 keyup
+                return LRESULT(1);
             }
         }
     }
@@ -316,10 +401,14 @@ mod tests {
 /// 截图模式下 Esc 全局退出：隐藏 overlay + 重置 screenshot_mode
 /// 由全局键盘钩子触发，不依赖 overlay 窗口焦点（解决透明全屏窗口失焦时前端 keydown 收不到的问题）
 fn cancel_screenshot_global(app: tauri::AppHandle, session: u64) {
-    crate::commands::cleanup_screenshot_session_if_current(&app, session);
-    // 通知前端重置 React 状态（选区/图片/繁忙态），避免再次 show 时残留
-    let _ = app.emit_to("screenshot-overlay", "screenshot-cancelled", ());
-    crate::utils::logger::log("keyboard", "Screenshot cancelled by Esc (global hook)");
+    // 返回 true 才表示本次确实取消了当前截图会话（CAS 成功）；
+    // 若返回 false，说明 Esc 时 session 已过期、有更新的活跃会话接管，
+    // 此时不应发 screenshot-cancelled，否则会误重置新会话前端的状态。
+    if crate::commands::cleanup_screenshot_session_if_current(&app, session) {
+        // 通知前端重置 React 状态（选区/图片/繁忙态），避免再次 show 时残留
+        let _ = app.emit_to("screenshot-overlay", "screenshot-cancelled", ());
+        crate::utils::logger::log("keyboard", "Screenshot cancelled by Esc (global hook)");
+    }
 }
 
 /// 剪贴板快照，用于在钩子回调中快速捕获 Ctrl+C 前的剪贴板状态
@@ -328,20 +417,25 @@ struct ClipSnapshot {
     has_image: bool,
 }
 
-/// 在钩子回调线程中一次性读取剪贴板的文本和图片格式状态
-/// 单次 Open/Close 避免两次打开之间的竞态
-/// 重试最多 3 次（间隔 20ms），避免剪贴板被其他进程短暂占用时阻塞钩子回调
+/// 在钩子回调中一次性读取剪贴板的文本和图片格式状态
+/// 单次 Open/Close 避免两次打开之间的竞态。
+///
+/// 重要：此函数在 WH_KEYBOARD_LL 钩子回调内被调用，必须在超时（LowLevelHooksTimeout）
+/// 内返回，否则 Windows 会静默卸载整个键盘钩子（导致 Ctrl+C 选区检测、截图/录屏 Esc
+/// 退出、快速输入触发键等全部失效）。因此这里**不做重试、不 sleep**：
+/// - OpenClipboard 被其他进程暂占用时立即失败并返回保守空快照（后续检测会因
+///   old=None/new=Some 而显示工具栏），绝不 sleep 等待；
+/// - 读取本身（read_clipboard_text_inner / clipboard_has_image_inner）是纯内存操作，
+///   即便剪贴板里有近 1MB 文本也只需毫秒级，不会接近钩子超时阈值。
+/// 若确有剪贴板被长期独占的极端情况，宁愿这次选区检测失败回退，也不冒钩子被卸载的风险。
 unsafe fn read_clipboard_snapshot() -> ClipSnapshot {
-    for _ in 0..3 {
-        if OpenClipboard(None).is_ok() {
-            let text = read_clipboard_text_inner();
-            let has_image = clipboard_has_image_inner();
-            let _ = CloseClipboard();
-            return ClipSnapshot { text, has_image };
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    if OpenClipboard(None).is_ok() {
+        let text = read_clipboard_text_inner();
+        let has_image = clipboard_has_image_inner();
+        let _ = CloseClipboard();
+        return ClipSnapshot { text, has_image };
     }
-    // 3 次均失败，返回空快照（保守：后续检测会因 old=None/new=Some 而显示工具栏）
+    // 单次失败即返回空快照，不重试不 sleep（保守弹工具栏）
     ClipSnapshot {
         text: None,
         has_image: false,
@@ -373,16 +467,9 @@ fn handle_ctrl_c(app: tauri::AppHandle, foreground_hwnd: isize, old_clipboard: C
         return;
     }
 
-    // 文字工具栏已禁用：与鼠标抬起选区路径保持一致，Ctrl+C 也不弹出工具栏
-    if !crate::hooks::mouse::is_text_toolbar_enabled() {
-        crate::utils::logger::log(
-            "keyboard",
-            "Ctrl+C detected but text toolbar disabled, skipping",
-        );
-        return;
-    }
-
     let clipboard_text = new_text.unwrap_or_default();
+    // 剪贴板历史由独立的剪贴板监听器（WM_CLIPBOARDUPDATE）统一记录，
+    // 覆盖 Ctrl+C、右键复制、应用内复制等所有来源，此处不再重复写入。
     crate::utils::logger::log(
         "keyboard",
         &format!(
@@ -391,6 +478,16 @@ fn handle_ctrl_c(app: tauri::AppHandle, foreground_hwnd: isize, old_clipboard: C
             new_has_image
         ),
     );
+
+    // 文字工具栏已禁用：与鼠标抬起选区路径保持一致，Ctrl+C 也不弹出工具栏。
+    // 剪贴板历史已由剪贴板监听器统一记录，此处仅跳过工具栏弹出与图片暂存流程。
+    if !crate::hooks::mouse::is_text_toolbar_enabled() {
+        crate::utils::logger::log(
+            "keyboard",
+            "Ctrl+C detected but text toolbar disabled, skipping toolbar",
+        );
+        return;
+    }
 
     // 如果有图片，暂存图片数据供复制操作使用
     if let Some(img_data) = new_image_data {

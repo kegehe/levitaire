@@ -86,18 +86,14 @@ describe("rateToSpeakingRate", () => {
 
 describe("fetchTtsConfig", () => {
   it("后端返回 JSON 字符串时正确解析并归一化", async () => {
-    mockInvoke.mockResolvedValueOnce(
-      JSON.stringify({ rate: "fast", voiceId: "v1", volume: 0.8 }),
-    );
+    mockInvoke.mockResolvedValueOnce(JSON.stringify({ rate: "fast", voiceId: "v1", volume: 0.8 }));
     const result = await fetchTtsConfig();
     expect(result).toEqual({ rate: "fast", voiceId: "v1", volume: 0.8 });
     expect(mockInvoke).toHaveBeenCalledWith("get_tts_config");
   });
 
   it("后端返回脏数据时归一化（rate 非法→normal）", async () => {
-    mockInvoke.mockResolvedValueOnce(
-      JSON.stringify({ rate: "turbo", voiceId: "v1", volume: 2 }),
-    );
+    mockInvoke.mockResolvedValueOnce(JSON.stringify({ rate: "turbo", voiceId: "v1", volume: 2 }));
     const result = await fetchTtsConfig();
     expect(result).toEqual({ rate: "normal", voiceId: "v1", volume: 1.0 });
   });

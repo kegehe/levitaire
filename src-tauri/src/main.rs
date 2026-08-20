@@ -34,9 +34,11 @@ mod config;
 mod hooks;
 mod monitor;
 mod ocr;
+mod pomodoro;
+mod quick_input;
 mod recording;
 mod screenshot;
-mod stt;
+mod sound;
 mod tts;
 mod utils;
 
@@ -74,17 +76,17 @@ fn main() {
             let mut ai_config = startup_config.ai_config;
 
             if ai_config.api_key.is_empty() {
-                if let Ok(key) = std::env::var("FLOATORY_AI_API_KEY") {
+                if let Ok(key) = std::env::var("LEVITAIRE_AI_API_KEY") {
                     ai_config.api_key = key;
                 }
             }
             if ai_config.base_url.is_empty() {
-                if let Ok(url) = std::env::var("FLOATORY_AI_BASE_URL") {
+                if let Ok(url) = std::env::var("LEVITAIRE_AI_BASE_URL") {
                     ai_config.base_url = url;
                 }
             }
             if ai_config.model.is_empty() {
-                if let Ok(model) = std::env::var("FLOATORY_AI_MODEL") {
+                if let Ok(model) = std::env::var("LEVITAIRE_AI_MODEL") {
                     ai_config.model = model;
                 }
             }
@@ -97,22 +99,51 @@ fn main() {
             // 初始化文字工具栏启用标志（鼠标钩子选区检测时检查）
             hooks::mouse::set_text_toolbar_enabled(startup_config.text_toolbar_enabled);
 
-            // 初始化语音输入启用标志
-            hooks::hotkey::set_slot_enabled(
-                hooks::hotkey::HotkeySlotId::Voice,
-                startup_config.stt_enabled,
-            );
-
             // 初始化录屏启用标志
             hooks::hotkey::set_slot_enabled(
                 hooks::hotkey::HotkeySlotId::Recording,
                 startup_config.recording_enabled,
             );
 
-            app.manage(config_manager);
+            // 初始化快速输入转盘触发键（启用且键有效时设置 vk_code）
+            {
+                // 从本地文件恢复持久化的剪贴板历史（重启后不丢失）
+                quick_input::load_history();
+                let qi_enabled = config_manager.get_quick_input_enabled().unwrap_or(false);
+                let qi_key = config_manager.get_quick_input_trigger_key().unwrap_or_default();
+                let qi_key = if qi_key.is_empty() { "CapsLock".to_string() } else { qi_key };
+                let vk = if qi_enabled {
+                    quick_input::parse_trigger_key(&qi_key).unwrap_or(0)
+                } else {
+                    0
+                };
+                quick_input::set_trigger_vk(vk);
+                // 同步触发模式（默认单击切换：键有效时转盘才被唤起，模式需与配置一致）
+                let qi_mode = config_manager
+                    .get_quick_input_mode()
+                    .unwrap_or_else(|_| "click".to_string());
+                quick_input::set_mode(if qi_mode == "hold" {
+                    quick_input::MODE_HOLD
+                } else {
+                    quick_input::MODE_CLICK
+                });
+                // 启用时预创建转盘 overlay 窗口，确保键盘钩子触发 begin_wheel 时
+                // emit_to("quick-input-overlay") 能找到目标。窗口已存在时为空操作。
+                if qi_enabled {
+                    quick_input::ensure_window(app.handle()).ok();
+                }
+            }
 
+            app.manage(config_manager);
             // 截图全屏画面缓存（进入截图模式时填充，退出时清空）
             app.manage(screenshot::ScreenCache::default());
+
+            // 应用 OCR 引擎偏好：写入 ocr 模块全局变量，OCR 服务懒加载初始化时
+            // 会读取该偏好（见 ocr::ensure_ocr_service）。未设置时 EngineId::from_str 返回 None，
+            // 服务按默认策略自动选择（Windows 平台优先 Windows OCR）。
+            crate::ocr::set_preferred_engine(crate::ocr::EngineId::from_str(
+                &startup_config.ocr_engine,
+            ));
 
             // 初始化钩子管理器
             let hook_manager = hooks::HookManager::new();
@@ -125,26 +156,31 @@ fn main() {
             // 初始化 TTS 朗读状态（持有当前播放的 MediaPlayer）
             app.manage(tts::TtsState::default());
 
-            // 初始化 STT 语音输入状态（仅取消标志，云端方案无常驻资源）
-            app.manage(stt::SttState::default());
-
             // 初始化系统监控状态（采集线程随监控窗口开关启停，此处仅注册 state）
             app.manage(monitor::MonitorState::default());
+
+            // 初始化番茄钟状态（计时线程随 start/stop 启停，此处仅注册 state）。
+            // 启动时从持久化配置恢复用户设置（时长、提醒方式等），避免重启后
+            // 回退默认配置、与设置页显示不一致；配置缺失或损坏时回退默认值。
+            let pomodoro_state = {
+                let state = pomodoro::PomodoroState::default();
+                if let Ok(config_json) = app.state::<config::ConfigManager>().get_pomodoro_config()
+                {
+                    if let Ok(config) =
+                        serde_json::from_str::<pomodoro::PomodoroConfig>(&config_json)
+                    {
+                        state.set_config(config);
+                    }
+                }
+                state
+            };
+            app.manage(pomodoro_state);
 
             // 初始化录屏状态（录制线程随录制开关启停，此处仅注册 state）
             app.manage(recording::RecordingState::default());
 
-            // 初始化 OCR 服务（后台线程，避免阻塞启动）
-            // 模型目录为 %APPDATA%/floatory/ocr
-            // 不使用 catch_unwind：OcrService::new 内部涉及 COM 和 ONNX Runtime，
-            // catch_unwind 无法捕获 C++ 异常导致的 abort，且 panic unwind 后 COM 状态可能不一致。
-            // 让 panic 自然终止线程更安全——线程崩溃后 OCR 功能不可用，但不会留下不一致状态。
-            std::thread::spawn(move || {
-                crate::utils::logger::log("ocr", "后台线程开始初始化 OCR 服务...");
-                let ocr_service = ocr::OcrService::new(None, None);
-                ocr::set_ocr_service(ocr_service);
-                crate::utils::logger::log("ocr", "OCR 服务后台初始化完成");
-            });
+            // OCR 服务改为首次实际使用时懒加载（见 ocr::ensure_ocr_service），
+            // 启动时不再加载模型，避免占用内存与启动开销。
 
             // settings 和 palette 窗口的关闭拦截已移至 show_settings/show_palette 命令中
             // （延迟创建窗口时，在首次 show 时注册关闭拦截）
@@ -181,7 +217,7 @@ fn main() {
             };
             let _tray = TrayIconBuilder::new()
                 .icon(tray_icon)
-                .tooltip("Floatory")
+                .tooltip("Levitaire")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
@@ -233,6 +269,10 @@ fn main() {
                 })
                 .build(app)?;
 
+            // 启动剪贴板监听器（将 Ctrl+C、右键复制、应用内复制等所有来源的
+            // 剪贴板文本变化追加到快速输入转盘历史）
+            clipboard::listener::start_clipboard_listener();
+
             // 启动鼠标钩子
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -277,33 +317,6 @@ fn main() {
                 });
             }
 
-            // 启动时按配置注册语音输入热键
-            let startup_stt_hotkey = startup_config.stt_hotkey;
-            if !startup_stt_hotkey.is_empty() {
-                std::thread::spawn(move || {
-                    for _ in 0..40 {
-                        match hooks::hotkey::register_hotkey(
-                            hooks::hotkey::HotkeySlotId::Voice,
-                            &startup_stt_hotkey,
-                        ) {
-                            Ok(_) => return,
-                            Err(e) if e == "热键线程未就绪" => {
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                continue;
-                            }
-                            Err(e) => {
-                                crate::utils::logger::log(
-                                    "hotkey",
-                                    &format!("启动注册语音热键失败: {}", e),
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    crate::utils::logger::log("hotkey", "启动时注册语音热键超时（热键线程未就绪）");
-                });
-            }
-
             // 启动时按配置注册录屏热键
             let startup_recording_hotkey = startup_config.recording_hotkey;
             if !startup_recording_hotkey.is_empty() {
@@ -331,39 +344,51 @@ fn main() {
                 });
             }
 
-            // 将浮球（orb）窗口定位到主屏右下角
-            // 覆盖 tauri.conf.json 中默认的左上角 (100, 100) 位置
+            // 将浮球（orb）窗口定位：优先恢复上次拖拽后的记忆位置，
+            // 未记忆时回退到主屏右下角（覆盖 tauri.conf.json 默认的左上角 (100, 100)）
             if let Some(orb) = app.get_webview_window("orb") {
-                let margin = 20.0f64;
                 // inner_size() 已返回物理像素，与物理坐标的 workarea 单位一致
                 let inner = orb.inner_size().unwrap_or_default();
-                let win_w = inner.width as f64;
-                let win_h = inner.height as f64;
-
-                // 取主屏工作区（已排除任务栏），避免浮球被任务栏遮挡
-                // SPI_GETWORKAREA 在 DPI-aware 进程下返回物理像素，与 PhysicalPosition 单位一致
-                #[cfg(target_os = "windows")]
-                {
-                    use windows::Win32::Foundation::RECT;
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-                    };
-                    let mut rc = RECT::default();
-                    let ok = unsafe {
-                        SystemParametersInfoW(
-                            SPI_GETWORKAREA,
-                            0,
-                            Some(&mut rc as *mut _ as *mut std::ffi::c_void),
-                            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-                        )
-                        .is_ok()
-                    };
-                    if ok {
-                        let x = rc.right as f64 - win_w - margin;
-                        let y = rc.bottom as f64 - win_h - margin;
-                        let _ = orb.set_position(tauri::Position::Physical(
-                            tauri::PhysicalPosition::new(x as i32, y as i32),
-                        ));
+                let win_w = inner.width as i32;
+                let win_h = inner.height as i32;
+                let saved = app
+                    .state::<config::ConfigManager>()
+                    .get_window_position("orb")
+                    .ok()
+                    .flatten();
+                if let Some(pos) = saved {
+                    // 裁剪到显示器工作区，防止分辨率/显示器布局变化后 orb 跑到屏幕外
+                    let (x, y) = commands::clamp_position_to_workarea(pos.x, pos.y, win_w, win_h);
+                    let _ = orb.set_position(tauri::Position::Physical(
+                        tauri::PhysicalPosition::new(x, y),
+                    ));
+                } else {
+                    let margin = 20.0f64;
+                    // 取主屏工作区（已排除任务栏），避免浮球被任务栏遮挡
+                    // SPI_GETWORKAREA 在 DPI-aware 进程下返回物理像素，与 PhysicalPosition 单位一致
+                    #[cfg(target_os = "windows")]
+                    {
+                        use windows::Win32::Foundation::RECT;
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+                        };
+                        let mut rc = RECT::default();
+                        let ok = unsafe {
+                            SystemParametersInfoW(
+                                SPI_GETWORKAREA,
+                                0,
+                                Some(&mut rc as *mut _ as *mut std::ffi::c_void),
+                                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                            )
+                            .is_ok()
+                        };
+                        if ok {
+                            let x = rc.right as f64 - win_w as f64 - margin;
+                            let y = rc.bottom as f64 - win_h as f64 - margin;
+                            let _ = orb.set_position(tauri::Position::Physical(
+                                tauri::PhysicalPosition::new(x as i32, y as i32),
+                            ));
+                        }
                     }
                 }
             }
@@ -397,10 +422,14 @@ fn main() {
             commands::pin_image,
             commands::close_pin,
             commands::show_settings,
+            commands::exit_app,
             commands::call_ai,
             commands::call_ai_stream,
+            commands::cancel_ai_stream,
             commands::get_ai_config,
             commands::update_ai_config,
+            commands::get_theme_preferences,
+            commands::set_theme_preferences,
             commands::replace_selection,
             commands::get_auto_start,
             commands::set_auto_start,
@@ -415,6 +444,8 @@ fn main() {
             commands::get_text_toolbar_enabled,
             commands::get_toolbar_features,
             commands::set_toolbar_features,
+            commands::get_search_engine,
+            commands::set_search_engine,
             commands::get_dedup_mode,
             commands::set_dedup_mode,
             commands::get_md5_length,
@@ -429,27 +460,28 @@ fn main() {
             commands::tts_resume,
             commands::tts_get_voices,
             commands::tts_get_state,
+            commands::tts_get_progress,
             commands::get_tts_config,
             commands::set_tts_config,
-            commands::show_voice_window,
-            commands::hide_voice_window,
-            commands::stt_transcribe,
-            commands::stt_cancel,
-            commands::stt_paste_text,
-            commands::get_stt_hotkey,
-            commands::set_stt_hotkey,
-            commands::get_stt_enabled,
-            commands::set_stt_enabled,
-            commands::get_stt_config,
-            commands::set_stt_config,
-            commands::get_stt_api_key,
-            commands::set_stt_api_key,
             commands::show_monitor_window,
             commands::hide_monitor_window,
+            commands::set_window_position,
+            commands::reset_window_position,
             commands::get_system_monitor_enabled,
             commands::set_system_monitor_enabled,
             commands::get_system_monitor_config,
             commands::set_system_monitor_config,
+            commands::show_pomodoro_window,
+            commands::hide_pomodoro_window,
+            commands::get_pomodoro_state,
+            commands::start_pomodoro,
+            commands::pause_pomodoro,
+            commands::reset_pomodoro,
+            commands::skip_pomodoro,
+            commands::get_pomodoro_enabled,
+            commands::set_pomodoro_enabled,
+            commands::get_pomodoro_config,
+            commands::set_pomodoro_config,
             commands::get_ocr_engines,
             commands::set_ocr_engine,
             commands::start_recording_select,
@@ -466,7 +498,6 @@ fn main() {
             commands::is_recording_select_active,
             commands::clipboard_set_gif,
             commands::save_gif,
-            commands::save_video,
             commands::save_video_file,
             commands::enumerate_windows,
             commands::get_recording_enabled,
@@ -482,6 +513,20 @@ fn main() {
             commands::pick_folder,
             commands::get_tools_autostart,
             commands::set_tools_autostart,
+            commands::get_quick_input_enabled,
+            commands::set_quick_input_enabled,
+            commands::get_quick_input_trigger_key,
+            commands::set_quick_input_trigger_key,
+            commands::get_quick_input_mode,
+            commands::set_quick_input_mode,
+            commands::set_quick_input_highlight,
+            commands::get_quick_input_snippets,
+            commands::set_quick_input_snippets,
+            commands::get_quick_input_history,
+            commands::clear_quick_input_history,
+            commands::quick_input_paste,
+            commands::ensure_quick_input_window,
+            commands::toggle_quick_input_wheel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

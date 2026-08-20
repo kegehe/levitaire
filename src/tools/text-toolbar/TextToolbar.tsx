@@ -22,11 +22,22 @@ import {
   type TtsConfig,
 } from "../../constants/ttsConfig";
 import { CLEAR_OPTIONS, DEFAULT_CLEAR_IDS, fetchClearOptions } from "../../constants/clearConfig";
+import {
+  DEFAULT_SEARCH_ENGINE,
+  fetchSearchEngine,
+  buildSearchUrl,
+  type SearchEngineId,
+} from "../../constants/searchEngineConfig";
 import { dedup } from "../../utils/dedup";
 import { clearText } from "../../utils/clearText";
 import { charCount } from "../../utils/charCount";
 import { numbering } from "../../utils/numbering";
 import { useAiOptimize } from "../../hooks/useAiOptimize";
+import {
+  applyThemePreferences,
+  getStoredThemePreferences,
+  subscribeThemePreferences,
+} from "../../styles/themePreferences";
 import "./TextToolbar.css";
 
 /** 检测字符串是否为合法的 base64 编码 */
@@ -50,7 +61,30 @@ function isUnicodeEscaped(str: string): boolean {
   return /\\u\{[0-9a-fA-F]{1,6}\}|\\u[0-9a-fA-F]{4}|\bU\+[0-9a-fA-F]{4,6}/.test(str);
 }
 
-type ToolbarState = "default" | "mode-select" | "clear-select" | "loading" | "preview" | "error" | "qrcode-preview" | "charcount-preview" | "speaking";
+/** 将 invoke 抛出的错误规整为可展示的字符串 */
+function toErrorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error ? err.message : typeof err === "string" ? err : fallback;
+}
+
+/** 毫秒数格式化为 m:ss（非法值显示 0:00） */
+function formatTime(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0:00";
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+type ToolbarState =
+  | "default"
+  | "mode-select"
+  | "clear-select"
+  | "loading"
+  | "preview"
+  | "error"
+  | "qrcode-preview"
+  | "charcount-preview"
+  | "speaking";
 
 function FloatingToolbar() {
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
@@ -73,23 +107,31 @@ function FloatingToolbar() {
   const [md5Length, setMd5LengthState] = useState<Md5Length>(DEFAULT_MD5_LENGTH);
 
   // 编号样式配置（默认数字 1. 2. 3.，挂载后从后端异步加载；监听设置窗口的变更事件）
-  const [numberingStyle, setNumberingStyleState] = useState<NumberingStyle>(DEFAULT_NUMBERING_STYLE);
+  const [numberingStyle, setNumberingStyleState] =
+    useState<NumberingStyle>(DEFAULT_NUMBERING_STYLE);
 
   // 朗读配置（默认正常语速/系统默认语音/满音量，挂载后从后端异步加载；监听设置窗口的变更事件）
   const [ttsConfig, setTtsConfigState] = useState<TtsConfig>(DEFAULT_TTS_CONFIG);
   // 朗读运行态：ttsPlaying=有播放任务在跑，ttsPaused=当前暂停
   const [ttsPlaying, setTtsPlaying] = useState(false);
   const [ttsPaused, setTtsPaused] = useState(false);
+  // 朗读进度（毫秒）；ttsDurationMs 为 0 表示总时长未知
+  const [ttsPositionMs, setTtsPositionMs] = useState(0);
+  const [ttsDurationMs, setTtsDurationMs] = useState(0);
 
   // 清除功能启用的清除项 ID 列表（默认全量，挂载后从后端异步加载；监听设置窗口的变更事件）
   const [enabledClearIds, setEnabledClearIds] = useState<string[]>(DEFAULT_CLEAR_IDS);
 
+  // 搜索引擎配置（默认必应，挂载后从后端异步加载；监听设置窗口的变更事件）
+  const [searchEngine, setSearchEngine] = useState<SearchEngineId>(DEFAULT_SEARCH_ENGINE);
+
   useLayoutEffect(() => {
-    const theme = localStorage.getItem("floatory-theme") || "light";
-    document.documentElement.setAttribute("data-theme", theme);
+    applyThemePreferences(getStoredThemePreferences());
     // 工具栏窗口：上方预留 tooltip 空间
     document.body.classList.add("toolbar-window");
-    return () => { document.body.classList.remove("toolbar-window"); };
+    return () => {
+      document.body.classList.remove("toolbar-window");
+    };
   }, []);
 
   // 监听设置窗口的主题和功能配置变更事件
@@ -102,37 +144,45 @@ function FloatingToolbar() {
       fetchNumberingStyle(),
       fetchTtsConfig(),
       fetchClearOptions(),
-    ]).then(([features, dedup, md5, numbering, tts, clear]) => {
+      fetchSearchEngine(),
+    ]).then(([features, dedup, md5, numbering, tts, clear, search]) => {
       if (features.status === "fulfilled") setEnabledFeatureIds(features.value);
       if (dedup.status === "fulfilled") setDedupModeState(dedup.value);
       if (md5.status === "fulfilled") setMd5LengthState(md5.value);
       if (numbering.status === "fulfilled") setNumberingStyleState(numbering.value);
       if (tts.status === "fulfilled") setTtsConfigState(tts.value);
       if (clear.status === "fulfilled") setEnabledClearIds(clear.value);
+      if (search.status === "fulfilled") setSearchEngine(search.value);
     });
 
-    const unlistenTheme = listen<string>("floatory-theme-changed", (event) => {
-      document.documentElement.setAttribute("data-theme", event.payload);
-      localStorage.setItem("floatory-theme", event.payload);
-    });
-    const unlistenFeatures = listen<string[]>("floatory-features-changed", (event) => {
+    const unlistenTheme = subscribeThemePreferences();
+    const unlistenFeatures = listen<string[]>("levitaire-features-changed", (event) => {
       setEnabledFeatureIds(event.payload);
     });
-    const unlistenDedupMode = listen<DedupMode>("floatory-dedup-mode-changed", (event) => {
+    const unlistenDedupMode = listen<DedupMode>("levitaire-dedup-mode-changed", (event) => {
       setDedupModeState(event.payload);
     });
-    const unlistenMd5Length = listen<Md5Length>("floatory-md5-length-changed", (event) => {
+    const unlistenMd5Length = listen<Md5Length>("levitaire-md5-length-changed", (event) => {
       setMd5LengthState(event.payload);
     });
-    const unlistenNumberingStyle = listen<NumberingStyle>("floatory-numbering-style-changed", (event) => {
-      setNumberingStyleState(event.payload);
-    });
-    const unlistenTtsConfig = listen<TtsConfig>("floatory-tts-config-changed", (event) => {
+    const unlistenNumberingStyle = listen<NumberingStyle>(
+      "levitaire-numbering-style-changed",
+      (event) => {
+        setNumberingStyleState(event.payload);
+      },
+    );
+    const unlistenTtsConfig = listen<TtsConfig>("levitaire-tts-config-changed", (event) => {
       setTtsConfigState(event.payload);
     });
-    const unlistenClearOptions = listen<string[]>("floatory-clear-options-changed", (event) => {
+    const unlistenClearOptions = listen<string[]>("levitaire-clear-options-changed", (event) => {
       setEnabledClearIds(event.payload);
     });
+    const unlistenSearchEngine = listen<SearchEngineId>(
+      "levitaire-search-engine-changed",
+      (event) => {
+        setSearchEngine(event.payload);
+      },
+    );
     return () => {
       unlistenTheme.then((fn) => fn());
       unlistenFeatures.then((fn) => fn());
@@ -141,10 +191,18 @@ function FloatingToolbar() {
       unlistenNumberingStyle.then((fn) => fn());
       unlistenTtsConfig.then((fn) => fn());
       unlistenClearOptions.then((fn) => fn());
+      unlistenSearchEngine.then((fn) => fn());
     };
   }, []);
 
-  const { optimize, cancel, isLoading, optimizedText, errorMessage: aiError, checkAiConfig } = useAiOptimize();
+  const {
+    optimize,
+    cancel,
+    isLoading,
+    optimizedText,
+    errorMessage: aiError,
+    checkAiConfig,
+  } = useAiOptimize();
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
 
   // 进入二维码预览时，先用已知最大尺寸扩窗，防止内容被裁切
@@ -243,11 +301,64 @@ function FloatingToolbar() {
     setQrCodeDataUrl(null);
     optimizeInProgressRef.current = false;
     cancel();
+    setTtsPositionMs(0);
+    setTtsDurationMs(0);
     if (errorTimerRef.current) {
       clearTimeout(errorTimerRef.current);
       errorTimerRef.current = null;
     }
   }, [cancel]);
+
+  // Esc 关闭逻辑：默认态隐藏工具栏；子菜单/预览/朗读等态返回默认态；二维码预览态退出并隐藏。
+  // 工具栏窗口 focusable=false，页面内 DOM keydown 收不到按键，该逻辑实际由
+  // Rust 全局键盘钩子转发的 toolbar-esc 事件驱动（DOM 监听保留，窗口未来可聚焦时同样生效）。
+  const handleEscape = useCallback(() => {
+    const currentState = stateRef.current;
+    if (currentState === "qrcode-preview") {
+      invoke("set_qrcode_preview", { active: false }).catch(() => {});
+      hideToolbar();
+    } else if (
+      currentState === "mode-select" ||
+      currentState === "clear-select" ||
+      currentState === "preview" ||
+      currentState === "charcount-preview" ||
+      currentState === "error" ||
+      currentState === "speaking"
+    ) {
+      resetToDefault();
+    } else {
+      hideToolbar();
+    }
+  }, [hideToolbar, resetToDefault]);
+
+  // 错误提示：进入 error 态并安排定时器自动恢复默认状态
+  const showError = useCallback(
+    (message: string, duration = 3000) => {
+      setState("error");
+      setErrorMessage(message);
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = setTimeout(() => {
+        resetToDefault();
+      }, duration);
+    },
+    [resetToDefault],
+  );
+
+  // 写回选区：成功后同步选中文本，失败时统一进入错误提示
+  const replaceSelectionText = useCallback(
+    async (text: string, fallback = "替换失败，请重新选中文本") => {
+      if (!selection) return false;
+      try {
+        await invoke("replace_selection", { text });
+        setSelection({ ...selection, text });
+        return true;
+      } catch (err) {
+        showError(toErrorMessage(err, fallback));
+        return false;
+      }
+    },
+    [selection, showError],
+  );
 
   useEffect(() => {
     const win = getCurrentWebviewWindow();
@@ -265,11 +376,16 @@ function FloatingToolbar() {
       // 状态恢复：工具栏隐藏期间朗读可能仍在进行，按后端真值恢复 speaking 态
       // （朗读生命周期与工具栏窗口解耦——hideToolbar 不停止朗读）
       try {
-        const st = await invoke<{ hasPlayer: boolean; paused: boolean; playing: boolean }>("tts_get_state");
+        const st = await invoke<{ hasPlayer: boolean; paused: boolean; playing: boolean }>(
+          "tts_get_state",
+        );
         if (st.hasPlayer) {
           setState("speaking");
           setTtsPlaying(true);
           setTtsPaused(st.paused);
+          // 进度由 speaking 态轮询即时获取，先清零避免展示上一轮的残留值
+          setTtsPositionMs(0);
+          setTtsDurationMs(0);
         } else {
           setTtsPlaying(false);
           setTtsPaused(false);
@@ -299,43 +415,34 @@ function FloatingToolbar() {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        const currentState = stateRef.current;
-        if (currentState === "qrcode-preview") {
-          invoke("set_qrcode_preview", { active: false }).catch(() => {});
-          hideToolbar();
-        } else if (currentState === "mode-select" || currentState === "clear-select" || currentState === "preview" || currentState === "charcount-preview" || currentState === "error" || currentState === "speaking") {
-          resetToDefault();
-        } else {
-          hideToolbar();
-        }
+        handleEscape();
       }
     };
     document.addEventListener("keydown", handleKeyDown);
+    // 工具栏窗口 focusable=false，DOM keydown 收不到按键；
+    // 由 Rust 全局键盘钩子在工具栏可见时转发 toolbar-esc 事件。
+    const unlistenEsc = win.listen("toolbar-esc", handleEscape);
 
     return () => {
       unlistenSelection.then((fn) => fn());
       unlistenHidden.then((fn) => fn());
       unlistenTtsFinished.then((fn) => fn());
+      unlistenEsc.then((fn) => fn());
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [cancel, hideToolbar, resetToDefault]);
+  }, [cancel, hideToolbar, resetToDefault, handleEscape]);
 
   useEffect(() => {
     if (!isLoading && state === "loading") {
       if (aiError) {
-        setState("error");
-        setErrorMessage(aiError);
-        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-        errorTimerRef.current = setTimeout(() => {
-          resetToDefault();
-        }, 3000);
+        showError(aiError);
       } else if (optimizedText) {
         setState("preview");
       } else {
         resetToDefault();
       }
     }
-  }, [isLoading, aiError, optimizedText, state, resetToDefault]);
+  }, [isLoading, aiError, optimizedText, state, resetToDefault, showError]);
 
   const handleCopy = async () => {
     if (selection) {
@@ -351,8 +458,7 @@ function FloatingToolbar() {
 
   const handleSearch = async () => {
     if (selection) {
-      const query = encodeURIComponent(selection.text.trim());
-      const url = `https://www.bing.com/search?q=${query}`;
+      const url = buildSearchUrl(searchEngine, selection.text.trim());
       try {
         await invoke("open_url", { url });
         hideToolbar();
@@ -364,41 +470,12 @@ function FloatingToolbar() {
 
   const handleUppercase = async () => {
     if (!selection) return;
-    const result = selection.text.toUpperCase();
-    try {
-      await invoke("replace_selection", { text: result });
-      // 保持工具栏显示，更新选中文本为转换结果，便于继续操作
-      setSelection({ ...selection, text: result });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    await replaceSelectionText(selection.text.toUpperCase());
   };
 
   const handleLowercase = async () => {
     if (!selection) return;
-    const result = selection.text.toLowerCase();
-    try {
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    await replaceSelectionText(selection.text.toLowerCase());
   };
 
   const handleBase64Encode = async () => {
@@ -411,28 +488,10 @@ function FloatingToolbar() {
       const binary = Array.from(bytes, (b) => String.fromCharCode(b)).join("");
       result = btoa(binary);
     } catch {
-      setState("error");
-      setErrorMessage("Base64 编码失败");
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
+      showError("Base64 编码失败");
       return;
     }
-    try {
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    await replaceSelectionText(result);
   };
 
   const handleBase64Decode = async () => {
@@ -445,28 +504,10 @@ function FloatingToolbar() {
       const bytes = Uint8Array.from(decoded, (c) => c.charCodeAt(0));
       result = new TextDecoder("utf-8").decode(bytes);
     } catch {
-      setState("error");
-      setErrorMessage("Base64 解码失败");
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
+      showError("Base64 解码失败");
       return;
     }
-    try {
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    await replaceSelectionText(result);
   };
 
   const handleUnicodeEncode = async () => {
@@ -478,26 +519,13 @@ function FloatingToolbar() {
     const result = Array.from(text)
       .map((ch) => {
         const cp = ch.codePointAt(0)!;
-        if (cp > 0xFFFF) {
+        if (cp > 0xffff) {
           return `\\u{${cp.toString(16).toUpperCase()}}`;
         }
         return `\\u${cp.toString(16).toUpperCase().padStart(4, "0")}`;
       })
       .join("");
-    try {
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    await replaceSelectionText(result);
   };
 
   const handleUnicodeDecode = async () => {
@@ -508,34 +536,20 @@ function FloatingToolbar() {
     try {
       result = text
         // \u{XXXXX}（含 BMP 外）
-        .replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, (_, h: string) => String.fromCodePoint(parseInt(h, 16)))
+        .replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, (_, h: string) =>
+          String.fromCodePoint(parseInt(h, 16)),
+        )
         // \uXXXX（BMP）
         .replace(/\\u([0-9a-fA-F]{4})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)))
         // U+XXXX / U+XXXXX 形式（\b 防止 "CPU+4E2D" 被误匹配）
-        .replace(/\bU\+([0-9a-fA-F]{4,6})/g, (_, h: string) => String.fromCodePoint(parseInt(h, 16)));
+        .replace(/\bU\+([0-9a-fA-F]{4,6})/g, (_, h: string) =>
+          String.fromCodePoint(parseInt(h, 16)),
+        );
     } catch {
-      setState("error");
-      setErrorMessage("Unicode 解码失败");
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
+      showError("Unicode 解码失败");
       return;
     }
-    try {
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    await replaceSelectionText(result);
   };
 
   const handleMd5Encrypt = async () => {
@@ -548,18 +562,10 @@ function FloatingToolbar() {
       const { md5 } = await import("js-md5");
       const full = md5(text);
       const result = md5Length === "32" ? full : full.substring(8, 24);
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
+      await replaceSelectionText(result, "MD5 加密失败，请重试");
     } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "MD5 加密失败，请重试";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
+      // 仅动态 import 失败会走到这里（写回失败已在 replaceSelectionText 内处理）
+      showError(toErrorMessage(err, "MD5 加密失败，请重试"));
     }
   };
 
@@ -568,20 +574,7 @@ function FloatingToolbar() {
     const result = dedup(selection.text, dedupMode);
     // 后端 replace_selection 拒绝空字符串，去重结果为空时直接返回
     if (!result) return;
-    try {
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    await replaceSelectionText(result);
   };
 
   // 按当前样式对选中文本编号后写回选区，保持工具栏显示便于连续操作
@@ -590,20 +583,7 @@ function FloatingToolbar() {
     const result = numbering(selection.text, numberingStyle);
     // 后端 replace_selection 拒绝空字符串，结果为空时直接返回
     if (!result) return;
-    try {
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    await replaceSelectionText(result);
   };
 
   // 朗读选中文本：合成在后端 MTA 子线程执行，成功后切 speaking 态
@@ -618,17 +598,11 @@ function FloatingToolbar() {
       });
       setTtsPlaying(true);
       setTtsPaused(false);
+      setTtsPositionMs(0);
+      setTtsDurationMs(0);
       setState("speaking");
     } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "朗读失败";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
+      showError(toErrorMessage(err, "朗读失败"));
     }
   };
 
@@ -662,6 +636,33 @@ function FloatingToolbar() {
     resetToDefault();
   };
 
+  // 朗读进度轮询：speaking 态下每 500ms 查询后端进度刷新进度条与时长显示。
+  // 注意：不在轮询中同步 paused——前端暂停/继续由用户操作驱动，
+  // 轮询读到的 paused 可能与点击瞬间的在途请求竞态，导致按钮短暂闪烁；
+  // 暂停态恢复由 selection-found 时的 tts_get_state 负责。
+  useEffect(() => {
+    if (state !== "speaking" || !ttsPlaying) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const p = await invoke<{ positionMs: number; durationMs: number; paused: boolean }>(
+          "tts_get_progress",
+        );
+        if (cancelled) return;
+        setTtsPositionMs(p.positionMs);
+        setTtsDurationMs(p.durationMs);
+      } catch {
+        // 无朗读进度（可能刚结束/暂无 player），保持现有显示
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [state, ttsPlaying]);
+
   // 进入清除子菜单（与"优化"的 mode-select 同构，无需 AI 配置检查）
   const handleClearClick = () => {
     setState("clear-select");
@@ -676,21 +677,8 @@ function FloatingToolbar() {
       resetToDefault();
       return;
     }
-    try {
-      await invoke("replace_selection", { text: result });
-      setSelection({ ...selection, text: result });
-      setState("default");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "替换失败，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    const ok = await replaceSelectionText(result);
+    if (ok) setState("default");
   };
 
   // 进入字符统计预览：纯前端展示，不修改原文本
@@ -711,7 +699,7 @@ function FloatingToolbar() {
     if (bytes.length > MAX_BYTES) {
       // 回退到有效 UTF-8 边界：跳过尾部不完整的多字节序列
       let end = MAX_BYTES;
-      while (end > 0 && (bytes[end] & 0xC0) === 0x80) {
+      while (end > 0 && (bytes[end] & 0xc0) === 0x80) {
         end--;
       }
       content = new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(0, end));
@@ -731,12 +719,7 @@ function FloatingToolbar() {
       setState("qrcode-preview");
       invoke("set_qrcode_preview", { active: true }).catch(() => {});
     } catch {
-      setState("error");
-      setErrorMessage("生成二维码失败");
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
+      showError("生成二维码失败");
     }
   };
 
@@ -745,13 +728,8 @@ function FloatingToolbar() {
     optimizeInProgressRef.current = true;
     const config = await checkAiConfig();
     if (!config || !config.api_key || config.api_key.trim().length === 0) {
-      setState("error");
-      setErrorMessage("请先配置 AI");
+      showError("请先配置 AI", 5000);
       optimizeInProgressRef.current = false;
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 5000);
       return;
     }
     pendingActionRef.current = "translate";
@@ -772,13 +750,8 @@ function FloatingToolbar() {
 
     const config = await checkAiConfig();
     if (!config || !config.api_key || config.api_key.trim().length === 0) {
-      setState("error");
-      setErrorMessage("请先配置 AI");
+      showError("请先配置 AI", 5000);
       optimizeInProgressRef.current = false;
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 5000);
       return;
     }
     pendingActionRef.current = "optimize";
@@ -800,20 +773,8 @@ function FloatingToolbar() {
 
   const handleReplace = async () => {
     if (!optimizedText) return;
-    try {
-      await invoke("replace_selection", { text: optimizedText });
-      hideToolbar();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message
-        : typeof err === "string" ? err
-        : "无法替换，请重新选中文本";
-      setState("error");
-      setErrorMessage(msg);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
-        resetToDefault();
-      }, 3000);
-    }
+    const ok = await replaceSelectionText(optimizedText, "无法替换，请重新选中文本");
+    if (ok) hideToolbar();
   };
 
   const handleGoSettings = async () => {
@@ -829,12 +790,19 @@ function FloatingToolbar() {
     return null;
   }
 
-  const previewText = optimizedText && optimizedText.length > 500
-    ? optimizedText.slice(0, 500) + "..."
-    : optimizedText;
+  const previewText =
+    optimizedText && optimizedText.length > 500
+      ? optimizedText.slice(0, 500) + "..."
+      : optimizedText;
 
   return (
-    <div ref={containerRef} id="toolbar" className="toolbar-container" role="toolbar" aria-label="文本操作工具栏">
+    <div
+      ref={containerRef}
+      id="toolbar"
+      className="toolbar-container"
+      role="toolbar"
+      aria-label="文本操作工具栏"
+    >
       <div className="toolbar-drag-handle" data-tauri-drag-region aria-hidden="true" />
       {state === "default" && (
         <>
@@ -877,9 +845,10 @@ function FloatingToolbar() {
               {enabledFeatureIds.includes("unicode-encode") && selection.text.trim() && (
                 <ToolbarButton icon="Type" label="转Unicode" onClick={handleUnicodeEncode} />
               )}
-              {enabledFeatureIds.includes("unicode-decode") && isUnicodeEscaped(selection.text.trim()) && (
-                <ToolbarButton icon="Type" label="转中文" onClick={handleUnicodeDecode} />
-              )}
+              {enabledFeatureIds.includes("unicode-decode") &&
+                isUnicodeEscaped(selection.text.trim()) && (
+                  <ToolbarButton icon="Type" label="转中文" onClick={handleUnicodeDecode} />
+                )}
               {enabledFeatureIds.includes("md5-encrypt") && selection.text.trim() && (
                 <ToolbarButton icon="Hash" label="MD5" onClick={handleMd5Encrypt} />
               )}
@@ -919,7 +888,7 @@ function FloatingToolbar() {
           {CLEAR_OPTIONS.filter((o) => enabledClearIds.includes(o.id)).map((option) => (
             <ToolbarButton
               key={option.id}
-              icon="RemoveFormatting"
+              icon={option.icon}
               label={option.label}
               onClick={() => handleClearSelect(option.id)}
             />
@@ -938,7 +907,12 @@ function FloatingToolbar() {
             </div>
           ) : (
             <>
-              <ToolbarButton icon={pendingActionRef.current === "translate" ? "Globe" : "Sparkles"} label={pendingActionRef.current === "translate" ? "翻译中..." : "优化中..."} onClick={() => {}} loading />
+              <ToolbarButton
+                icon={pendingActionRef.current === "translate" ? "Globe" : "Sparkles"}
+                label={pendingActionRef.current === "translate" ? "翻译中..." : "优化中..."}
+                onClick={() => {}}
+                loading
+              />
               <ToolbarButton icon="X" label="取消" onClick={resetToDefault} variant="danger" />
             </>
           )}
@@ -957,104 +931,135 @@ function FloatingToolbar() {
 
       {state === "qrcode-preview" && qrCodeDataUrl && (
         <div className="toolbar-qrcode">
-          <img src={qrCodeDataUrl} alt="二维码" className="toolbar-qrcode-image" onLoad={handleQrImageLoad} />
+          <img
+            src={qrCodeDataUrl}
+            alt="二维码"
+            className="toolbar-qrcode-image"
+            onLoad={handleQrImageLoad}
+          />
           <div className="toolbar-preview-actions">
-            <ToolbarButton icon="Download" label="下载" onClick={async () => {
-              try {
-                await invoke<boolean>("save_image", {
-                  base64Data: qrCodeDataUrl,
-                  filename: "qrcode.png",
-                });
-              } catch (err) {
-                setState("error");
-                setErrorMessage("下载二维码失败");
-                if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-                errorTimerRef.current = setTimeout(() => {
-                  resetToDefault();
-                }, 3000);
-              }
-            }} />
-            <ToolbarButton icon="Copy" label="复制" onClick={async () => {
-              try {
-                const resp = await fetch(qrCodeDataUrl);
-                const blob = await resp.blob();
-                if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
-                  await navigator.clipboard.write([
-                    new ClipboardItem({ "image/png": blob }),
-                  ]);
-                  hideToolbar();
-                } else {
-                  setState("error");
-                  setErrorMessage("当前环境不支持复制图片");
-                  if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-                  errorTimerRef.current = setTimeout(() => {
-                    resetToDefault();
-                  }, 3000);
+            <ToolbarButton
+              icon="Download"
+              label="下载"
+              onClick={async () => {
+                try {
+                  await invoke<boolean>("save_image", {
+                    base64Data: qrCodeDataUrl,
+                    filename: "qrcode.png",
+                  });
+                } catch (_err) {
+                  showError("下载二维码失败");
                 }
-              } catch (err) {
-                console.error("复制二维码失败:", err);
-                setState("error");
-                setErrorMessage("复制二维码失败");
-                if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-                errorTimerRef.current = setTimeout(() => {
-                  resetToDefault();
-                }, 3000);
-              }
-            }} variant="primary" />
-            <ToolbarButton icon="X" label="关闭" onClick={() => {
-              invoke("set_qrcode_preview", { active: false }).catch(() => {});
-              hideToolbar();
-            }} variant="danger" />
+              }}
+            />
+            <ToolbarButton
+              icon="Copy"
+              label="复制"
+              onClick={async () => {
+                try {
+                  const resp = await fetch(qrCodeDataUrl);
+                  const blob = await resp.blob();
+                  if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
+                    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+                    hideToolbar();
+                  } else {
+                    showError("当前环境不支持复制图片");
+                  }
+                } catch (err) {
+                  console.error("复制二维码失败:", err);
+                  showError("复制二维码失败");
+                }
+              }}
+              variant="primary"
+            />
+            <ToolbarButton
+              icon="X"
+              label="关闭"
+              onClick={() => {
+                invoke("set_qrcode_preview", { active: false }).catch(() => {});
+                hideToolbar();
+              }}
+              variant="danger"
+            />
           </div>
         </div>
       )}
 
-      {state === "charcount-preview" && selection?.text && (() => {
-        const stats = charCount(selection.text);
-        const bytesDisplay = stats.bytes >= 1024
-          ? `${(stats.bytes / 1024).toFixed(2)} KB`
-          : `${stats.bytes} B`;
-        const items: { label: string; value: string | number; primary?: boolean }[] = [
-          { label: "字符数(含空格)", value: stats.charsWithSpaces, primary: true },
-          { label: "字符数(不含空格)", value: stats.charsNoSpaces },
-          { label: "字数", value: stats.words },
-          { label: "行数", value: stats.lines },
-          { label: "非空行", value: stats.nonEmptyLines },
-          { label: "段落数", value: stats.paragraphs },
-          { label: "句子数", value: stats.sentences },
-          { label: "字节", value: bytesDisplay },
-          { label: "数字串", value: stats.digits },
-          { label: "标点", value: stats.punctuation },
-          { label: "字母", value: stats.letters },
-        ];
-        return (
-          <div className="toolbar-charcount" role="group" aria-label="文本统计">
-            <div className="toolbar-charcount-grid">
-              {items.map((it) => (
-                <div
-                  className={"toolbar-charcount-item" + (it.primary ? " toolbar-charcount-item--primary" : "")}
-                  key={it.label}
-                >
-                  <span className="toolbar-charcount-label">{it.label}</span>
-                  <span className="toolbar-charcount-value">{it.value}</span>
-                </div>
-              ))}
+      {state === "charcount-preview" &&
+        selection?.text &&
+        (() => {
+          const stats = charCount(selection.text);
+          const bytesDisplay =
+            stats.bytes >= 1024 ? `${(stats.bytes / 1024).toFixed(2)} KB` : `${stats.bytes} B`;
+          const items: { label: string; value: string | number; primary?: boolean }[] = [
+            { label: "字符数(含空格)", value: stats.charsWithSpaces, primary: true },
+            { label: "字符数(不含空格)", value: stats.charsNoSpaces },
+            { label: "字数", value: stats.words },
+            { label: "行数", value: stats.lines },
+            { label: "非空行", value: stats.nonEmptyLines },
+            { label: "段落数", value: stats.paragraphs },
+            { label: "句子数", value: stats.sentences },
+            { label: "字节", value: bytesDisplay },
+            { label: "数字串", value: stats.digits },
+            { label: "标点", value: stats.punctuation },
+            { label: "字母", value: stats.letters },
+          ];
+          return (
+            <div className="toolbar-charcount" role="group" aria-label="文本统计">
+              <div className="toolbar-charcount-grid">
+                {items.map((it) => (
+                  <div
+                    className={
+                      "toolbar-charcount-item" +
+                      (it.primary ? " toolbar-charcount-item--primary" : "")
+                    }
+                    key={it.label}
+                  >
+                    <span className="toolbar-charcount-label">{it.label}</span>
+                    <span className="toolbar-charcount-value">{it.value}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="toolbar-preview-actions">
+                <ToolbarButton icon="X" label="关闭" onClick={resetToDefault} variant="danger" />
+              </div>
             </div>
-            <div className="toolbar-preview-actions">
-              <ToolbarButton icon="X" label="关闭" onClick={resetToDefault} variant="danger" />
-            </div>
-          </div>
-        );
-      })()}
+          );
+        })()}
 
       {state === "speaking" && ttsPlaying && (
         <div className="toolbar-tts">
-          {ttsPaused ? (
-            <ToolbarButton icon="Play" label="继续" onClick={handleTtsResume} variant="primary" />
-          ) : (
-            <ToolbarButton icon="Pause" label="暂停" onClick={handleTtsPause} />
-          )}
-          <ToolbarButton icon="Square" label="停止" onClick={handleTtsStop} variant="danger" />
+          <div className="toolbar-tts-controls">
+            {ttsPaused ? (
+              <ToolbarButton icon="Play" label="继续" onClick={handleTtsResume} variant="primary" />
+            ) : (
+              <ToolbarButton icon="Pause" label="暂停" onClick={handleTtsPause} />
+            )}
+            <ToolbarButton icon="Square" label="停止" onClick={handleTtsStop} variant="danger" />
+          </div>
+          <div className="toolbar-tts-progress" role="group" aria-label="朗读进度">
+            <span className="toolbar-tts-time">{formatTime(ttsPositionMs)}</span>
+            <div
+              className="toolbar-tts-bar"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={ttsDurationMs > 0 ? ttsDurationMs : undefined}
+              aria-valuenow={ttsDurationMs > 0 ? Math.min(ttsPositionMs, ttsDurationMs) : undefined}
+            >
+              <div
+                className="toolbar-tts-bar-fill"
+                style={{
+                  width:
+                    ttsDurationMs > 0
+                      ? `${Math.min((ttsPositionMs / ttsDurationMs) * 100, 100)}%`
+                      : "0%",
+                }}
+              />
+            </div>
+            <span className="toolbar-tts-time">
+              {ttsDurationMs > 0 ? formatTime(ttsDurationMs) : "--:--"}
+            </span>
+          </div>
         </div>
       )}
 
@@ -1063,7 +1068,12 @@ function FloatingToolbar() {
           <Icon name="X" size={14} className="toolbar-error-icon" />
           <span className="toolbar-error-text">{errorMessage}</span>
           {errorMessage === "请先配置 AI" ? (
-            <ToolbarButton icon="Settings" label="设置" onClick={handleGoSettings} variant="primary" />
+            <ToolbarButton
+              icon="Settings"
+              label="设置"
+              onClick={handleGoSettings}
+              variant="primary"
+            />
           ) : (
             <ToolbarButton icon="Undo2" label="返回" onClick={resetToDefault} />
           )}

@@ -18,7 +18,12 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
   const scaleRef = useRef<number>(1);
   const originRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const dragStart = useRef<{ x: number; y: number } | null>(null);
-  const [selection, setSelection] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const [selection, setSelection] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
   const win = getCurrentWebviewWindow();
 
@@ -61,9 +66,12 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
   // 全屏模式：直接使用虚拟桌面边界
   const selectFullscreen = async () => {
     try {
-      const bounds = await invoke<{ originX: number; originY: number; width: number; height: number }>(
-        "get_virtual_desktop_bounds",
-      );
+      const bounds = await invoke<{
+        originX: number;
+        originY: number;
+        width: number;
+        height: number;
+      }>("get_virtual_desktop_bounds");
       onAreaSelected({
         left: bounds.originX,
         top: bounds.originY,
@@ -173,10 +181,32 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
         <>
           {selection && selection.width > 0 && selection.height > 0 && (
             <>
-              <div className="ss-mask" style={{ left: 0, top: 0, width: "100%", height: `${selection.top}px` }} />
-              <div className="ss-mask" style={{ left: 0, top: selection.top + selection.height, width: "100%", bottom: 0 }} />
-              <div className="ss-mask" style={{ left: 0, top: selection.top, width: `${selection.left}px`, height: selection.height }} />
-              <div className="ss-mask" style={{ left: selection.left + selection.width, top: selection.top, right: 0, height: selection.height }} />
+              <div
+                className="ss-mask"
+                style={{ left: 0, top: 0, width: "100%", height: `${selection.top}px` }}
+              />
+              <div
+                className="ss-mask"
+                style={{ left: 0, top: selection.top + selection.height, width: "100%", bottom: 0 }}
+              />
+              <div
+                className="ss-mask"
+                style={{
+                  left: 0,
+                  top: selection.top,
+                  width: `${selection.left}px`,
+                  height: selection.height,
+                }}
+              />
+              <div
+                className="ss-mask"
+                style={{
+                  left: selection.left + selection.width,
+                  top: selection.top,
+                  right: 0,
+                  height: selection.height,
+                }}
+              />
               <div
                 className="rec-selection-box"
                 style={{
@@ -210,6 +240,13 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
       {areaMode === "fullscreen" && (
         <div className="rec-fullscreen-panel" onPointerDown={(e) => e.stopPropagation()}>
           <p>将录制整个屏幕</p>
+          <p className="rec-fullscreen-hint">
+            点击「开始选择」后将立即开始录制
+            <br />
+            全屏录制不显示控制栏与选区框（避免被录进画面）
+            <br />
+            Ctrl+Shift+S 停止 · Ctrl+Shift+P 暂停 · Esc 取消
+          </p>
           <button className="rec-area-confirm" onClick={selectFullscreen}>
             开始选择
           </button>
@@ -231,7 +268,9 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
                 <Icon name="AppWindow" size={16} />
                 <div className="rec-window-item-info">
                   <span className="rec-window-item-title">{w.title}</span>
-                  <span className="rec-window-item-size">{w.width}×{w.height}</span>
+                  <span className="rec-window-item-size">
+                    {w.width}×{w.height}
+                  </span>
                 </div>
               </button>
             ))

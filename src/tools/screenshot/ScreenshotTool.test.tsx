@@ -32,8 +32,7 @@ function stubCanvas() {
     arc: noop,
     closePath: noop,
     measureText: () => ({ width: 10 }) as TextMetrics,
-    getImageData: () =>
-      ({ data: [128, 128, 128, 255] }) as unknown as ImageData,
+    getImageData: () => ({ data: [128, 128, 128, 255] }) as unknown as ImageData,
     set strokeStyle(_v: string) {},
     get strokeStyle() {
       return "";
@@ -53,9 +52,7 @@ function stubCanvas() {
     set textAlign(_v: string) {},
     set imageSmoothingEnabled(_v: boolean) {},
   } as unknown as CanvasRenderingContext2D;
-  return vi
-    .spyOn(HTMLCanvasElement.prototype, "getContext")
-    .mockReturnValue(ctx);
+  return vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(ctx);
 }
 
 class FakeImage {
@@ -230,20 +227,70 @@ describe("ScreenshotTool 标注流程", () => {
 
     // stub canvas toDataURL 返回固定串
     const canvas = document.querySelector("canvas") as HTMLCanvasElement;
-    canvas.toDataURL = vi.fn(
-      () => "data:image/png;base64,FLUSHED_BASE64",
-    ) as never;
+    canvas.toDataURL = vi.fn(() => "data:image/png;base64,FLUSHED_BASE64") as never;
 
     const copyBtn = screen.getByRole("button", { name: "复制" });
     await act(async () => {
       fireEvent.click(copyBtn);
     });
 
-    const calls = mockInvoke.mock.calls.filter(
-      ([cmd]) => cmd === "clipboard_set_image",
-    );
+    const calls = mockInvoke.mock.calls.filter(([cmd]) => cmd === "clipboard_set_image");
     expect(calls).toHaveLength(1);
     expect(calls[0][1]).toMatchObject({ base64Data: "FLUSHED_BASE64" });
+  });
+
+  it("复制到剪贴板失败时显示错误提示，且不退出标注态", async () => {
+    stubCanvas();
+    render(<ScreenshotTool />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const overlay = document.querySelector(".ss-overlay") as HTMLElement;
+    overlay.getBoundingClientRect = vi.fn(() => ({
+      left: 0,
+      top: 0,
+      width: 1920,
+      height: 1080,
+      right: 1920,
+      bottom: 1080,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    })) as never;
+    fireEvent.pointerDown(overlay, { clientX: 100, clientY: 100, pointerId: 1 });
+    fireEvent.pointerMove(overlay, { clientX: 300, clientY: 200, pointerId: 1 });
+    await act(async () => {
+      fireEvent.pointerUp(overlay, { clientX: 300, clientY: 200, pointerId: 1 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // stub canvas toDataURL 返回固定串
+    const canvas = document.querySelector("canvas") as HTMLCanvasElement;
+    canvas.toDataURL = vi.fn(() => "data:image/png;base64,FLUSHED_BASE64") as never;
+
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_virtual_desktop_bounds") {
+        return Promise.resolve({ originX: 0, originY: 0, width: 1920, height: 1080 });
+      }
+      if (cmd === "capture_region") {
+        return Promise.resolve({ pngBase64: "AAAA", width: 100, height: 50 });
+      }
+      if (cmd === "clipboard_set_image") {
+        return Promise.reject(new Error("复制失败"));
+      }
+      return Promise.resolve();
+    });
+
+    const copyBtn = screen.getByRole("button", { name: "复制" });
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+
+    expect(screen.getByText("复制失败")).toBeTruthy();
+    // 失败不退出标注态，工具栏仍在
+    expect(document.querySelector(".ss-annotate-toolbar")).not.toBeNull();
   });
 
   it("点击 OCR 显示可编辑结果，用户选择后才复制", async () => {
@@ -378,5 +425,106 @@ describe("ScreenshotTool 标注流程", () => {
     expect(screen.getByText("未识别到文字")).toBeTruthy();
     expect(mockInvoke).not.toHaveBeenCalledWith("copy_text", expect.anything());
     expect(document.querySelector(".ss-annotate-toolbar")).not.toBeNull();
+  });
+
+  it("窗口识别模式：点击窗口后按窗口区域自动截图并进入标注态", async () => {
+    stubCanvas();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_virtual_desktop_bounds") {
+        return Promise.resolve({ originX: 0, originY: 0, width: 1920, height: 1080 });
+      }
+      if (cmd === "enumerate_windows") {
+        return Promise.resolve([
+          {
+            hwnd: 1,
+            title: "记事本",
+            className: "Notepad",
+            left: 100,
+            top: 50,
+            width: 800,
+            height: 600,
+          },
+          {
+            hwnd: 2,
+            title: "浏览器",
+            className: "Chrome",
+            left: 900,
+            top: 80,
+            width: 700,
+            height: 500,
+          },
+        ]);
+      }
+      if (cmd === "capture_region") {
+        return Promise.resolve({ pngBase64: "AAAA", width: 800, height: 600 });
+      }
+      return Promise.resolve();
+    });
+
+    render(<ScreenshotTool />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 切换到窗口模式
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "窗口" }));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 窗口列表加载完成
+    expect(screen.getByText("记事本")).toBeTruthy();
+    expect(screen.getByText("浏览器")).toBeTruthy();
+
+    // 点击某个窗口
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /记事本/ }));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // capture_region 以窗口物理坐标调用，并进入标注态
+    expect(mockInvoke).toHaveBeenCalledWith("capture_region", {
+      left: 100,
+      top: 50,
+      width: 800,
+      height: 600,
+    });
+    expect(document.querySelector(".ss-annotate-toolbar")).not.toBeNull();
+  });
+
+  it("窗口识别模式：点击取消恢复区域模式并退出截图", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_virtual_desktop_bounds") {
+        return Promise.resolve({ originX: 0, originY: 0, width: 1920, height: 1080 });
+      }
+      if (cmd === "enumerate_windows") {
+        return Promise.resolve([
+          { hwnd: 1, title: "记事本", className: "", left: 0, top: 0, width: 800, height: 600 },
+        ]);
+      }
+      return Promise.resolve();
+    });
+
+    render(<ScreenshotTool />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "窗口" }));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText("记事本")).toBeTruthy();
+
+    // 取消后调用 cancel_screenshot
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    });
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "cancel_screenshot")).toBe(true);
   });
 });

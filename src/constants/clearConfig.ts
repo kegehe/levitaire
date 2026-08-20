@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { IconName } from "../components/Icon";
 
 /** 清除项 ID（与 src/utils/clearText.ts 的 switch 分支一一对应） */
 export type ClearOptionId =
@@ -13,18 +14,20 @@ export type ClearOptionId =
 /** 清除项定义 */
 export interface ClearOption {
   id: ClearOptionId;
+  /** 图标名称（IconName），按操作类型区分 */
+  icon: IconName;
   label: string;
 }
 
 /** 全部清除项（顺序即子菜单展示顺序） */
 export const CLEAR_OPTIONS: ReadonlyArray<ClearOption> = [
-  { id: "clear-spaces", label: "删除空格" },
-  { id: "clear-tabs", label: "删除制表符" },
-  { id: "clear-newlines", label: "删除换行符" },
-  { id: "clear-whitespace", label: "删除所有空白" },
-  { id: "clear-letters", label: "删除所有字母" },
-  { id: "clear-digits", label: "删除所有数字" },
-  { id: "clear-chinese", label: "删除所有中文" },
+  { id: "clear-spaces", icon: "Space", label: "删除空格" },
+  { id: "clear-tabs", icon: "IndentDecrease", label: "删除制表符" },
+  { id: "clear-newlines", icon: "CornerDownLeft", label: "删除换行符" },
+  { id: "clear-whitespace", icon: "Eraser", label: "删除所有空白" },
+  { id: "clear-letters", icon: "CaseUpper", label: "删除所有字母" },
+  { id: "clear-digits", icon: "Hash", label: "删除所有数字" },
+  { id: "clear-chinese", icon: "Languages", label: "删除所有中文" },
 ];
 
 /** 全部清除项 ID（默认全部启用） */

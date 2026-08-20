@@ -105,10 +105,7 @@ export function useAnnotations(): UseAnnotations {
   const canRedo = index < items.length;
   // 序号：取已生效 number 标注的最大 n + 1，保证 undo 中间项后不会产生重复编号
   const nextNumber =
-    committed.reduce(
-      (max, a) => (a.kind === "number" && a.n > max ? a.n : max),
-      0,
-    ) + 1;
+    committed.reduce((max, a) => (a.kind === "number" && a.n > max ? a.n : max), 0) + 1;
 
   return {
     state: { items, index, draft },

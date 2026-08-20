@@ -10,10 +10,9 @@
   overflow: hidden;
 }
 
-
 .ss-mask {
   position: absolute;
-  background: oklch(0.00 0 0 / 0.35);
+  background: oklch(0 0 0 / 0.35);
   pointer-events: none;
 }
 
@@ -25,7 +24,7 @@
      border 起始边落在整数物理像素上，杜绝子像素抗锯齿向选区外渗透。 */
   box-sizing: border-box;
   border: 1px solid var(--color-accent);
-  box-shadow: 0 0 0 1px oklch(1.00 0 0 / 0.4);
+  box-shadow: 0 0 0 1px oklch(1 0 0 / 0.4);
   pointer-events: none;
   z-index: 6;
 }
@@ -35,7 +34,7 @@
 .ss-size-badge {
   position: absolute;
   padding: 2px 6px;
-  background: oklch(0.00 0 0 / 0.85);
+  background: oklch(0 0 0 / 0.85);
   color: #fff;
   font-size: 12px;
   line-height: 1;
@@ -53,12 +52,11 @@
   left: 50%;
   transform: translate(-50%, -50%);
   padding: 8px 16px;
-  background: oklch(0.00 0 0 / 0.6);
+  background: oklch(0 0 0 / 0.6);
   color: #fff;
   font-size: 13px;
   border-radius: 6px;
   pointer-events: none;
-  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
 }
 
 .ss-toolbar-wrap {
@@ -68,7 +66,6 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
 }
 
 .ss-error {
@@ -78,7 +75,6 @@
   border: 1px solid var(--color-danger-fg, #c01e3c);
   border-radius: var(--radius-sm, 4px);
   font-size: 12px;
-  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
   box-shadow: var(--shadow-lg);
   max-width: 360px;
   word-break: break-all;
@@ -93,7 +89,6 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
-  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
 }
 
 .ss-btn {
@@ -224,7 +219,9 @@
   background: var(--color-bg-sunken);
   color: var(--color-fg);
   caret-color: var(--color-accent);
-  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Segoe UI", system-ui, sans-serif;
+  font-family:
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Segoe UI",
+    system-ui, sans-serif;
   font-size: var(--text-md);
   font-weight: 400;
   line-height: var(--leading-relaxed);
@@ -394,10 +391,145 @@
   border: 1px dashed var(--color-accent);
   outline: none;
   resize: none;
-  overflow: visible;
   font-family: sans-serif;
   line-height: 1.2;
   white-space: pre-wrap;
+  overflow-x: hidden;
   overflow-y: auto;
   word-break: break-word;
+  /* 显式继承前景色：不依赖 UA 默认（暗色下避免黑字） */
+  color: inherit;
+}
+
+/* ===== 选区模式切换栏（区域 / 窗口） ===== */
+
+.ss-area-tabs {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  z-index: 20;
+}
+
+.ss-area-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-fg-muted);
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.ss-area-tab.active {
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
+}
+
+.ss-area-tab:hover:not(.active) {
+  background: var(--color-bg-sunken);
+}
+
+.ss-area-cancel {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-fg-muted);
+  margin-left: 4px;
+}
+
+.ss-area-cancel:hover {
+  color: var(--color-danger);
+}
+
+/* 窗口列表 */
+.ss-window-list {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 320px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 8px;
+  box-shadow: var(--shadow-lg);
+  z-index: 20;
+}
+
+.ss-window-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  color: var(--color-fg);
+  transition: background 0.1s;
+}
+
+.ss-window-item:hover {
+  background: var(--color-bg-sunken);
+}
+
+.ss-window-item.selected {
+  background: var(--color-accent-subtle);
+  box-shadow: inset 0 0 0 2px var(--color-accent);
+}
+
+.ss-window-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ss-window-item-title {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ss-window-item-size {
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+
+.ss-window-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--color-fg-muted);
+  font-size: 13px;
+}
+
+/* 选区模式切换栏与窗口列表的键盘焦点 */
+.ss-area-tab:focus-visible,
+.ss-area-cancel:focus-visible,
+.ss-window-item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
 }

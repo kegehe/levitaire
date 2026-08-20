@@ -229,7 +229,7 @@ src-tauri/gen/
 src-tauri/libs/
 
 # Debug log (written by app at runtime)
-floatory-debug.log
+levitaire-debug.log
 
 # Screenshots (不应入库)
 screenshot.png

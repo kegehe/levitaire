@@ -1,0 +1,108 @@
+/* ─── 快速输入转盘样式 ─────────────────────────────────────────── */
+
+.quick-input-root {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  background: transparent;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.quick-input-wheel {
+  overflow: visible;
+  /* 柔和的外投影，让转盘从桌面上"浮起" */
+  filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.32));
+}
+
+/* 底盘：作为扇区的统一基底，提供清晰的圆形轮廓外缘 */
+.quick-input-base {
+  fill: var(--color-bg);
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+/* 扇区默认态 */
+.quick-input-sector {
+  fill: var(--color-bg-elevated);
+  stroke: var(--color-border);
+  stroke-width: 1.5;
+  transition:
+    fill 0.1s ease,
+    stroke 0.1s ease,
+    stroke-width 0.1s ease;
+}
+
+/* 剪贴板历史项：用稍深的底色与预设词区分 */
+.quick-input-sector[data-history="true"] {
+  fill: var(--color-bg-sunken);
+}
+
+/* 高亮选中态：主色填充 + 外发光 + 轻微放大，制造"被拉出"的手感 */
+.quick-input-sector-active {
+  fill: var(--color-accent);
+  stroke: var(--color-accent-hover);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 8px var(--color-accent-subtle));
+}
+
+/* 扇区标签 */
+.quick-input-label {
+  fill: var(--color-fg);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  pointer-events: none;
+  /* 默认态不加投影，避免残留发虚 */
+}
+
+/* 高亮扇区的标签：反白为 on-accent 色，并加淡投影保证可读 */
+.quick-input-sector-active + .quick-input-label {
+  fill: var(--color-fg-on-accent);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+/* 中心死区圆：按钮质感，内阴影 + 描边；高亮时放大展示完整标签，r 过渡平滑 */
+.quick-input-center {
+  fill: var(--color-bg);
+  stroke: var(--color-border-strong);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.25));
+  transition:
+    r 0.15s ease,
+    fill 0.15s ease,
+    stroke 0.15s ease;
+}
+
+/* 中心完整标签：高亮扇区的原始文本，居中显示在放大的中心圆内 */
+.quick-input-center-label {
+  fill: var(--color-fg);
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  pointer-events: none;
+}
+
+/* 类型标记图标：预设词=书签（brand 色）、历史=时钟（中性灰），与底色差异共同区分两类条目 */
+.quick-input-type-icon {
+  color: var(--color-fg-muted);
+  pointer-events: none;
+}
+
+.quick-input-type-icon[data-history="false"] {
+  color: var(--color-brand);
+}
+
+/* 高亮扇区的类型图标：随标签一起反白，保证在 accent 底上清晰可读 */
+.quick-input-sector-active ~ .quick-input-type-icon {
+  color: var(--color-fg-on-accent);
+}
+
+/* 分组分隔线：预设词区与剪贴板历史区的分界，虚线与普通扇区边界区分 */
+.quick-input-divider {
+  stroke: var(--color-border-strong);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+}

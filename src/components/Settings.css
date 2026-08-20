@@ -1,7 +1,18 @@
 /* ── Layout: Sidebar + Content ─────────────────────────────── */
+.settings-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--settings-bg);
+  /* decorations:false 后补一道边框作为窗口边界（不透明窗口无法用 box-shadow 投射外部阴影） */
+  border: 1px solid var(--settings-border);
+  overflow: hidden;
+}
+
 .settings-layout {
   display: flex;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   background: var(--settings-bg);
 }
 
@@ -40,7 +51,8 @@
   font-family: inherit;
   cursor: pointer;
   text-align: left;
-  transition: background var(--transition-fast),
+  transition:
+    background var(--transition-fast),
     color var(--transition-fast),
     border-color var(--transition-fast);
 }
@@ -126,6 +138,16 @@
   background: var(--button-hover-bg);
 }
 
+/* 工具未启用时自启动开关的禁用态：取消 hover 高亮与手型光标 */
+.settings-checkbox-label.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.settings-checkbox-label.is-disabled:hover {
+  background: transparent;
+}
+
 .settings-checkbox-label input[type="checkbox"] {
   width: 16px;
   height: 16px;
@@ -159,7 +181,8 @@
   color: var(--settings-heading-color);
   cursor: pointer;
   min-width: 100px;
-  transition: border-color var(--transition-fast),
+  transition:
+    border-color var(--transition-fast),
     box-shadow var(--transition-fast);
 }
 
@@ -167,6 +190,61 @@
   outline: none;
   border-color: var(--settings-focus-border);
   box-shadow: 0 0 0 3px var(--settings-focus-shadow);
+}
+
+/* Theme accent swatches use color as the control itself; names remain available through aria-label/title. */
+.settings-color-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.settings-color-option {
+  position: relative;
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-fg-on-accent);
+  cursor: pointer;
+}
+
+.settings-color-swatch {
+  width: 22px;
+  height: 22px;
+  border: 1px solid oklch(0 0 0 / 0.12);
+  border-radius: inherit;
+  background: var(--swatch-color);
+  transition: transform var(--transition-fast);
+}
+
+.settings-color-option:hover .settings-color-swatch {
+  transform: scale(1.1);
+}
+
+.settings-color-option.is-selected {
+  border-color: var(--color-fg);
+}
+
+.settings-color-option.is-selected .icon {
+  position: absolute;
+  filter: drop-shadow(0 1px 1px oklch(0 0 0 / 0.3));
+}
+
+.settings-color-option:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.settings-theme-error {
+  display: block;
+  margin-top: var(--space-2);
+  color: var(--color-danger-fg);
 }
 
 /* ── Input ────────────────────────────────────────────────── */
@@ -179,7 +257,8 @@
   font-family: inherit;
   background: var(--settings-input-bg);
   color: var(--settings-heading-color);
-  transition: border-color var(--transition-fast),
+  transition:
+    border-color var(--transition-fast),
     box-shadow var(--transition-fast);
 }
 
@@ -216,13 +295,21 @@
   cursor: pointer;
   color: var(--color-fg-muted);
   flex-shrink: 0;
-  transition: background-color var(--transition-fast),
+  transition:
+    background-color var(--transition-fast),
     color var(--transition-fast);
 }
 
 .settings-toggle-btn:hover {
   background: var(--button-hover-bg);
   color: var(--color-fg);
+}
+
+.settings-toggle-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  background: var(--settings-input-bg);
+  color: var(--color-fg-muted);
 }
 
 .settings-toggle-btn:focus-visible {
@@ -244,7 +331,8 @@
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
-  transition: background-color var(--transition-fast),
+  transition:
+    background-color var(--transition-fast),
     transform var(--transition-fast);
 }
 
@@ -268,7 +356,7 @@
 }
 
 .settings-save-spinner {
-  animation: spin 0.8s linear infinite;
+  animation: settings-spin 0.8s linear infinite;
 }
 
 /* ── Hint text ────────────────────────────────────────────── */
@@ -296,7 +384,8 @@
   font-size: var(--text-sm);
   color: var(--settings-heading-color);
   cursor: pointer;
-  transition: background-color var(--transition-fast),
+  transition:
+    background-color var(--transition-fast),
     border-color var(--transition-fast);
   user-select: none;
 }
@@ -331,7 +420,296 @@
 }
 
 /* ── Animation ────────────────────────────────────────────── */
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+/* 命名避开 ToolbarButton.css 的同名 spin，避免未来内容冲突 */
+@keyframes settings-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── 快速输入转盘 ─────────────────────────────────────────── */
+.qi-snippet-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.qi-snippet-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+}
+
+.qi-snippet-row.qi-snippet-editing {
+  border-color: var(--settings-focus-border);
+  box-shadow: 0 0 0 3px var(--settings-focus-shadow);
+}
+
+.qi-snippet-label {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-fg);
+  min-width: 80px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.qi-snippet-text {
+  font-size: var(--text-sm);
+  color: var(--color-fg-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qi-snippet-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.qi-snippet-row:hover .qi-snippet-actions,
+.qi-snippet-row:focus-within .qi-snippet-actions {
+  opacity: 1;
+}
+
+/* 小号图标按钮（行内编辑/删除） */
+.settings-toggle-btn-sm {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+}
+
+.qi-snippet-edit-label {
+  width: 100px;
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-sm);
+}
+
+/* 字段旁悬浮提示图标 */
+.settings-item-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-bottom: var(--space-1-5);
+}
+
+.settings-item-head .settings-label {
+  margin-bottom: 0;
+}
+
+.settings-hint-inline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--color-fg-subtle);
+  cursor: help;
+  transition: color var(--transition-fast);
+}
+
+.settings-hint-inline:hover {
+  color: var(--color-fg);
+}
+
+.qi-snippet-add {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* 剪贴板历史清空按钮 */
+.qi-history-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.qi-history-actions .settings-hint {
+  margin-bottom: 0;
+}
+
+.settings-danger-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: var(--space-1-5) var(--space-3);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--button-danger-text);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.settings-danger-btn:hover {
+  background: var(--button-danger-hover-bg);
+}
+
+.settings-danger-btn:active {
+  background: var(--button-danger-active-bg);
+}
+
+.settings-danger-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-danger-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* ── 触发方式 radio 分段选择 ───────────────────────────────── */
+.settings-radio-row {
+  display: inline-flex;
+  gap: 0;
+  flex-wrap: wrap;
+  padding: 3px;
+  background: var(--settings-input-bg);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-md);
+}
+
+.settings-radio-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: 7px 18px;
+  border: none;
+  border-radius: calc(var(--radius-md) - 3px);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.settings-radio-chip + .settings-radio-chip {
+  margin-left: 2px;
+}
+
+.settings-radio-chip:hover {
+  background: var(--button-hover-bg);
+  color: var(--color-fg);
+}
+
+.settings-radio-chip:active {
+  transform: translateY(0.5px);
+}
+
+.settings-radio-chip.is-active {
+  background: var(--color-accent);
+  color: var(--color-fg-on-accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.settings-radio-chip:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.settings-radio-chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── 悬浮窗位置恢复 ─────────────────────────────────────────── */
+.settings-pos-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.settings-pos-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2-5) var(--space-3);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-md);
+  background: var(--settings-input-bg);
+}
+
+.settings-pos-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  font-size: var(--text-sm);
+  color: var(--settings-heading-color);
+  white-space: nowrap;
+}
+
+.settings-reset-pos-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: var(--space-1-5) var(--space-3);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-md);
+  background: var(--settings-input-bg);
+  color: var(--color-fg-muted);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.settings-reset-pos-btn:hover {
+  background: var(--button-hover-bg);
+  color: var(--color-fg);
+}
+
+.settings-reset-pos-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-reset-pos-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.settings-pos-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-pos-actions .settings-hint {
+  margin-bottom: 0;
 }

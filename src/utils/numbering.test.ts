@@ -32,9 +32,7 @@ describe("numbering 单行", () => {
 
 describe("numbering 多行", () => {
   it("number-dot 顺序编号", () => {
-    expect(numbering("甲\n乙\n丙", "number-dot")).toBe(
-      "1. 甲\n2. 乙\n3. 丙",
-    );
+    expect(numbering("甲\n乙\n丙", "number-dot")).toBe("1. 甲\n2. 乙\n3. 丙");
   });
 
   it("CRLF 换行按 \\n 还原", () => {
@@ -50,9 +48,7 @@ describe("numbering 多行", () => {
   });
 
   it("首尾空白行均保留", () => {
-    expect(numbering("\n甲\n乙\n\n", "number-dot")).toBe(
-      "\n1. 甲\n2. 乙\n\n",
-    );
+    expect(numbering("\n甲\n乙\n\n", "number-dot")).toBe("\n1. 甲\n2. 乙\n\n");
   });
 });
 
@@ -110,9 +106,7 @@ describe("numbering 剥离旧编号", () => {
   });
 
   it("剥离全角括号 (1)(2)", () => {
-    expect(numbering("（1）甲\n（2）乙", "number-dot")).toBe(
-      "1. 甲\n2. 乙",
-    );
+    expect(numbering("（1）甲\n（2）乙", "number-dot")).toBe("1. 甲\n2. 乙");
   });
 
   it("剥离字母 a. b.", () => {
@@ -124,9 +118,7 @@ describe("numbering 剥离旧编号", () => {
   });
 
   it("剥离中文全角括号 （一）（二）", () => {
-    expect(numbering("（一）甲\n（二）乙", "number-dot")).toBe(
-      "1. 甲\n2. 乙",
-    );
+    expect(numbering("（一）甲\n（二）乙", "number-dot")).toBe("1. 甲\n2. 乙");
   });
 
   it("无前缀的行原样加号，有前缀的剥离后重号（混合）", () => {

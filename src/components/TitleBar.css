@@ -1,0 +1,75 @@
+/* ── 自绘标题栏 ───────────────────────────────────────────────
+ * 取代 Windows 原生标题栏，背景/边框跟随主题与主题色。
+ * 高度固定 32px，拖拽由 JS 显式 startDragging() 承担（mousedown 触发），按钮区排除拖拽。
+ */
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  flex-shrink: 0;
+  padding: 0 0 0 12px;
+  background: var(--settings-sidebar-bg);
+  border-bottom: 1px solid var(--settings-border);
+  user-select: none;
+}
+
+.titlebar-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-fg-muted);
+  letter-spacing: -0.01em;
+  /* 省略号防止超长标题撑乱布局 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titlebar-controls {
+  display: inline-flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  height: 100%;
+  /* 按钮区不参与拖拽，保证点击响应 */
+}
+
+.titlebar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.titlebar-btn:hover {
+  background: var(--button-hover-bg);
+  color: var(--color-fg);
+}
+
+.titlebar-btn:active {
+  background: var(--button-active-bg);
+}
+
+.titlebar-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* 关闭按钮：hover 用红色高亮，沿用 Windows 习惯；图标用白色保证对比度 */
+.titlebar-close:hover {
+  background: var(--color-danger);
+  color: var(--neutral-0);
+}
+
+.titlebar-close:active {
+  background: var(--color-danger-hover);
+}

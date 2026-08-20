@@ -2,6 +2,8 @@ import {
   Copy,
   Sparkles,
   ArrowLeft,
+  ArrowUp,
+  ArrowDown,
   X,
   Check,
   Settings,
@@ -16,10 +18,12 @@ import {
   GripVertical,
   CaseUpper,
   CaseLower,
+  History,
   Image,
   ListFilter,
   ListOrdered,
   Binary,
+  Bookmark,
   QrCode,
   Download,
   Camera,
@@ -37,6 +41,8 @@ import {
   Volume2,
   Play,
   Pause,
+  RotateCcw,
+  SkipForward,
   Mic,
   MicOff,
   Activity,
@@ -49,6 +55,14 @@ import {
   Minimize2,
   Maximize2,
   Rocket,
+  Compass,
+  Keyboard,
+  Timer,
+  Space,
+  IndentDecrease,
+  CornerDownLeft,
+  Eraser,
+  Languages,
 } from "lucide-react";
 import type { LucideProps } from "lucide-react";
 
@@ -56,6 +70,8 @@ const ICON_MAP = {
   Copy,
   Sparkles,
   ArrowLeft,
+  ArrowUp,
+  ArrowDown,
   X,
   Check,
   Settings,
@@ -70,10 +86,12 @@ const ICON_MAP = {
   GripVertical,
   CaseUpper,
   CaseLower,
+  History,
   Image,
   ListFilter,
   ListOrdered,
   Binary,
+  Bookmark,
   QrCode,
   Download,
   Camera,
@@ -91,6 +109,8 @@ const ICON_MAP = {
   Volume2,
   Play,
   Pause,
+  RotateCcw,
+  SkipForward,
   Mic,
   MicOff,
   Activity,
@@ -103,6 +123,14 @@ const ICON_MAP = {
   Minimize2,
   Maximize2,
   Rocket,
+  Compass,
+  Keyboard,
+  Timer,
+  Space,
+  IndentDecrease,
+  CornerDownLeft,
+  Eraser,
+  Languages,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;
@@ -115,12 +143,7 @@ interface IconProps extends Omit<LucideProps, "ref"> {
 function Icon({ name, size = 16, className = "", ...rest }: IconProps) {
   const LucideIcon = ICON_MAP[name];
   return (
-    <LucideIcon
-      size={size}
-      className={`icon ${className}`.trim()}
-      strokeWidth={2}
-      {...rest}
-    />
+    <LucideIcon size={size} className={`icon ${className}`.trim()} strokeWidth={2} {...rest} />
   );
 }
 

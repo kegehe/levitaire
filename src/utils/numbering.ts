@@ -101,9 +101,7 @@ function toChineseOrdinal(n: number): string {
   if (n < 100) {
     const tens = Math.floor(n / 10);
     const ones = n % 10;
-    return ones === 0
-      ? `${digits[tens]}十`
-      : `${digits[tens]}十${digits[ones]}`;
+    return ones === 0 ? `${digits[tens]}十` : `${digits[tens]}十${digits[ones]}`;
   }
   if (n < 1000) {
     const hundreds = Math.floor(n / 100);
@@ -120,10 +118,7 @@ function toChineseOrdinal(n: number): string {
     } else if (tens === 1) {
       mid = ones === 0 ? "一十" : `一十${digits[ones]}`;
     } else {
-      mid =
-        ones === 0
-          ? `${digits[tens]}十`
-          : `${digits[tens]}十${digits[ones]}`;
+      mid = ones === 0 ? `${digits[tens]}十` : `${digits[tens]}十${digits[ones]}`;
     }
     return `${digits[hundreds]}百${mid}`;
   }

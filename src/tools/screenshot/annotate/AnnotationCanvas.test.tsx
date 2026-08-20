@@ -1,9 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, act } from "@testing-library/react";
 import { createRef } from "react";
-import AnnotationCanvas, {
-  type AnnotationCanvasHandle,
-} from "./AnnotationCanvas";
+import AnnotationCanvas, { type AnnotationCanvasHandle } from "./AnnotationCanvas";
 import { useAnnotations } from "./useAnnotations";
 import type { Annotation } from "./types";
 
@@ -28,9 +26,7 @@ function makeStubCtx() {
     arc: vi.fn(),
     closePath: vi.fn(),
     measureText: vi.fn(() => ({ width: 10 }) as TextMetrics),
-    getImageData: vi.fn(
-      () => ({ data: [128, 128, 128, 255] }) as unknown as ImageData,
-    ),
+    getImageData: vi.fn(() => ({ data: [128, 128, 128, 255] }) as unknown as ImageData),
     set strokeStyle(v: string) {
       calls.push(`strokeStyle=${v}`);
     },
@@ -81,9 +77,7 @@ class FakeImage {
 
 function setup() {
   const ctx = makeStubCtx();
-  const getCtx = vi
-    .spyOn(HTMLCanvasElement.prototype, "getContext")
-    .mockReturnValue(ctx);
+  const getCtx = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(ctx);
   return { ctx, getCtx };
 }
 
@@ -235,9 +229,7 @@ describe("AnnotationCanvas", () => {
       y: 20,
       toJSON: () => ({}),
     })) as never;
-    canvas.toDataURL = vi.fn(
-      () => "data:image/png;base64,WITH_TEXT",
-    ) as never;
+    canvas.toDataURL = vi.fn(() => "data:image/png;base64,WITH_TEXT") as never;
 
     // 点击画布开始文字输入
     fireEvent.pointerDown(canvas, { clientX: 20, clientY: 30, pointerId: 1 });

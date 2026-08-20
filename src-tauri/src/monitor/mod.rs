@@ -1,6 +1,6 @@
 //! 系统监控：常驻悬浮显示 CPU/内存/网络/磁盘/电池实时状态。
 //!
-//! 设计对称于 stt/mod.rs：MonitorState 作为 Tauri managed state。
+//! MonitorState 作为 Tauri managed state。
 //! 采集线程（std::thread::spawn + sleep）周期性采集系统指标，
 //! 通过 `app.emit("monitor-stats", payload)` 推送给前端 listen 订阅。
 //! 采集线程随监控窗口开关启停（开窗 start / 关窗 stop）。
@@ -214,9 +214,14 @@ fn collect(
     // sysinfo's PDH fallback can report a failed idle counter as 100% busy.
     let (per_core, freq, mem_used, mem_total, mem_available) = match st.sys.lock() {
         Ok(mut sys) => {
+            // 刷新各核使用率：所有平台都需要（per-core 取自 sysinfo）。
+            // Windows 上总使用率仍走 GetSystemTimes（见 windows_cpu_usage），
+            // 故仅非 Windows 读取 global_cpu_usage()。
+            // sysinfo 的 CPU 使用率基于两次刷新之间的差值，首次采集结果不可靠
+            // （非 Windows 首次为 0，Windows 经 PDH 首次可能为 100%），下一帧起正常。
+            sys.refresh_cpu_usage();
             #[cfg(not(target_os = "windows"))]
             {
-                sys.refresh_cpu_usage();
                 let total = sys.global_cpu_usage();
                 cpu_total = if total.is_finite() { total as f64 } else { 0.0 };
             }

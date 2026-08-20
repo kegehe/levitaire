@@ -20,16 +20,8 @@ export const DEFAULT_DEDUP_MODE: DedupMode = {
   charSubMode: "all",
 };
 
-const GRANULARITY_SET: ReadonlySet<DedupGranularity> = new Set([
-  "line",
-  "word",
-  "char",
-]);
-const CHAR_SUB_MODE_SET: ReadonlySet<CharSubMode> = new Set([
-  "all",
-  "line",
-  "consecutive",
-]);
+const GRANULARITY_SET: ReadonlySet<DedupGranularity> = new Set(["line", "word", "char"]);
+const CHAR_SUB_MODE_SET: ReadonlySet<CharSubMode> = new Set(["all", "line", "consecutive"]);
 
 /** 判定并归一化存储中的去重配置，脏数据回退到默认值 */
 function normalize(raw: unknown): DedupMode {

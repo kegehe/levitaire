@@ -18,9 +18,7 @@ export function normalizeNumberingStyle(raw: unknown): NumberingStyle {
   if (typeof raw !== "string") {
     return DEFAULT_NUMBERING_STYLE;
   }
-  return STYLE_SET.has(raw as NumberingStyle)
-    ? (raw as NumberingStyle)
-    : DEFAULT_NUMBERING_STYLE;
+  return STYLE_SET.has(raw as NumberingStyle) ? (raw as NumberingStyle) : DEFAULT_NUMBERING_STYLE;
 }
 
 /**

@@ -2,8 +2,15 @@ import { useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
+import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
+import {
+  applyThemePreferences,
+  getStoredThemePreferences,
+  subscribeThemePreferences,
+} from "../styles/themePreferences";
 import { invoke } from "@tauri-apps/api/core";
-import { ensureVoiceWindow, ensureScreenshotWindow, openToolWindow } from "../utils/toolWindows";
+import { ensureScreenshotWindow, openToolWindow } from "../utils/toolWindows";
+import { saveWindowPosition, persistWindowPositionOnMove } from "../utils/windowPosition";
 import { BACKEND_TOOLS } from "../tools/registry";
 import "./FloatingOrb.css";
 
@@ -14,34 +21,14 @@ function FloatingOrb() {
 
   // 同步设置页选择的主题（orb 是独立窗口，需手动读取 localStorage）
   useLayoutEffect(() => {
-    const theme = localStorage.getItem("floatory-theme") || "light";
-    document.documentElement.setAttribute("data-theme", theme);
+    applyThemePreferences(getStoredThemePreferences());
   }, []);
 
   // 监听设置窗口的主题变更事件
   useEffect(() => {
-    const unlistenTheme = listen<string>("floatory-theme-changed", (event) => {
-      document.documentElement.setAttribute("data-theme", event.payload);
-      localStorage.setItem("floatory-theme", event.payload);
-    });
+    const unlistenTheme = subscribeThemePreferences();
     return () => {
       unlistenTheme.then((fn) => fn());
-    };
-  }, []);
-
-  // 监听语音输入全局热键触发：后端 hotkey 线程 emit voice-hotkey-triggered，
-  // 由常驻的 orb 窗口接收并唤起录音浮层（getUserMedia 必须在前端 webview 执行）
-  useEffect(() => {
-    const un = listen("voice-hotkey-triggered", async () => {
-      try {
-        await ensureVoiceWindow();
-        await invoke("show_voice_window");
-      } catch (err) {
-        console.error(err);
-      }
-    });
-    return () => {
-      un.then((fn) => fn());
     };
   }, []);
 
@@ -66,6 +53,10 @@ function FloatingOrb() {
     };
   }, []);
 
+  // 记忆 orb 位置：拖拽结束时即时保存（orb-mouseup），onMoved 防抖作为兜底，
+  // 应用重启后恢复上次位置
+  useEffect(() => persistWindowPositionOnMove("orb"), []);
+
   // Make the orb window non-focusable so it never steals focus from other apps
   // Also set body to transparent (must be done via JS, not CSS, because all windows
   // share the same Vite bundle and a global body rule would break the settings window)
@@ -84,6 +75,10 @@ function FloatingOrb() {
       root.style.padding = "0";
       root.style.overflow = "visible";
       root.style.height = "100%";
+      // orb 收敛到 --orb-size 后，用 flex 让其在 64×64 窗口内居中
+      root.style.display = "flex";
+      root.style.alignItems = "center";
+      root.style.justifyContent = "center";
     }
   }, [win]);
 
@@ -133,7 +128,8 @@ function FloatingOrb() {
         windowPosOnMouseDown.current = null;
         return;
       }
-      // 拖拽（payload=false 或未传）：仅清理状态，不弹面板
+      // 拖拽（payload=false 或未传）：记忆位置，仅清理状态，不弹面板
+      saveWindowPosition("orb");
       windowPosOnMouseDown.current = null;
     });
 
@@ -145,41 +141,133 @@ function FloatingOrb() {
     };
   }, [win]);
 
-  // Handle mousedown: record window position and start dragging
-  const handleMouseDown = useCallback(async (e: React.MouseEvent) => {
-    // Only react to primary button
-    if (e.button !== 0) return;
-    e.preventDefault();
-    // Clear any stale state from previous interactions
-    if (mouseUpTimeout.current) {
-      clearTimeout(mouseUpTimeout.current);
-      mouseUpTimeout.current = null;
+  // 右键快捷菜单：与托盘菜单互补，提供高频操作入口（截图、录屏、设置、隐藏浮球、退出）。
+  // orb 窗口仅 64×64，HTML 菜单会超出窗口边界无法完整显示，
+  // 故用 Tauri 原生菜单 popup（浮于窗口之上）。菜单构建一次缓存复用：
+  // Promise 缓存保证并发右键共享同一构建，构建失败自动清除缓存以便下次重试。
+  const contextMenuPromiseRef = useRef<Promise<Menu> | null>(null);
+  const getContextMenu = useCallback(() => {
+    if (!contextMenuPromiseRef.current) {
+      contextMenuPromiseRef.current = (async () => {
+        const screenshotItem = await MenuItem.new({
+          id: "screenshot",
+          text: "屏幕截图",
+          action: async () => {
+            try {
+              await ensureScreenshotWindow();
+              await invoke("start_screenshot");
+            } catch (err) {
+              console.error("右键菜单截图失败:", err);
+            }
+          },
+        });
+        const recordingItem = await MenuItem.new({
+          id: "recording",
+          text: "GIF/录屏",
+          action: async () => {
+            try {
+              await ensureScreenshotWindow();
+              await invoke("start_recording_select");
+            } catch (err) {
+              console.error("右键菜单录屏失败:", err);
+            }
+          },
+        });
+        const settingsItem = await MenuItem.new({
+          id: "open-settings",
+          text: "设置",
+          action: () => {
+            invoke("show_settings").catch((err) => console.error("右键菜单打开设置失败:", err));
+          },
+        });
+        const hideOrbItem = await MenuItem.new({
+          id: "hide-orb",
+          text: "隐藏悬浮球",
+          action: () => {
+            win.hide().catch(console.error);
+          },
+        });
+        const quitItem = await MenuItem.new({
+          id: "quit-app",
+          text: "退出",
+          action: () => {
+            invoke("exit_app").catch((err) => console.error("右键菜单退出失败:", err));
+          },
+        });
+        const separator1 = await PredefinedMenuItem.new({ item: "Separator" });
+        const separator2 = await PredefinedMenuItem.new({ item: "Separator" });
+        return Menu.new({
+          items: [
+            screenshotItem,
+            recordingItem,
+            separator1,
+            settingsItem,
+            hideOrbItem,
+            separator2,
+            quitItem,
+          ],
+        });
+      })().catch((err) => {
+        // 构建失败时清除缓存，允许下次右键重新构建
+        contextMenuPromiseRef.current = null;
+        throw err;
+      });
     }
-    // Record window position before drag to detect click vs drag later
-    try {
-      windowPosOnMouseDown.current = await win.outerPosition();
-    } catch (err) {
-      console.error("Failed to get window position:", err);
-    }
-    // Safety timeout: if orb-mouseup event is not received within 5 seconds,
-    // clean up the stale position to prevent false matches on next interaction
-    mouseUpTimeout.current = setTimeout(() => {
-      windowPosOnMouseDown.current = null;
-      mouseUpTimeout.current = null;
-    }, 5000);
-    try {
-      await win.startDragging();
-    } catch (err) {
-      console.error("Failed to start dragging:", err);
-    }
+    return contextMenuPromiseRef.current;
   }, [win]);
+
+  const handleContextMenu = useCallback(
+    async (e: React.MouseEvent) => {
+      e.preventDefault();
+      try {
+        const menu = await getContextMenu();
+        await menu.popup();
+      } catch (err) {
+        console.error("悬浮球右键菜单打开失败:", err);
+      }
+    },
+    [getContextMenu],
+  );
+
+  // Handle mousedown: record window position and start dragging
+  const handleMouseDown = useCallback(
+    async (e: React.MouseEvent) => {
+      // Only react to primary button
+      if (e.button !== 0) return;
+      e.preventDefault();
+      // Clear any stale state from previous interactions
+      if (mouseUpTimeout.current) {
+        clearTimeout(mouseUpTimeout.current);
+        mouseUpTimeout.current = null;
+      }
+      // Record window position before drag to detect click vs drag later
+      try {
+        windowPosOnMouseDown.current = await win.outerPosition();
+      } catch (err) {
+        console.error("Failed to get window position:", err);
+      }
+      // Safety timeout: if orb-mouseup event is not received within 5 seconds,
+      // clean up the stale position to prevent false matches on next interaction
+      mouseUpTimeout.current = setTimeout(() => {
+        windowPosOnMouseDown.current = null;
+        mouseUpTimeout.current = null;
+      }, 5000);
+      try {
+        await win.startDragging();
+      } catch (err) {
+        console.error("Failed to start dragging:", err);
+      }
+    },
+    [win],
+  );
 
   return (
     <div
       className="orb-container"
       onMouseDown={handleMouseDown}
+      onContextMenu={handleContextMenu}
       role="button"
-      aria-label="Floatory 悬浮球 — 拖拽移动，点击触发"
+      aria-label="Levitaire 悬浮球 — 左键点击、拖拽移动，右键快捷菜单"
     >
       <div className="orb-inner">
         {/* 原子轨道图标 — 中心圆点 + 3 条椭圆轨道交叉，象征悬浮球为中心、多工具环绕 */}

@@ -1,10 +1,5 @@
 import Icon from "../../../components/Icon";
-import {
-  COLOR_AUTO,
-  PRESET_COLORS,
-  STROKE_WIDTHS,
-  type ToolKind,
-} from "./types";
+import { COLOR_AUTO, PRESET_COLORS, STROKE_WIDTHS, type ToolKind } from "./types";
 import type { UseAnnotations } from "./useAnnotations";
 import type { CSSProperties } from "react";
 
@@ -115,10 +110,7 @@ function AnnotationToolbar(props: Props) {
               title={`${w}px`}
               disabled={!!busy}
             >
-              <span
-                className="ss-width-line"
-                style={{ height: `${w}px` }}
-              />
+              <span className="ss-width-line" style={{ height: `${w}px` }} />
             </button>
           ))}
         </div>
@@ -148,19 +140,49 @@ function AnnotationToolbar(props: Props) {
         <span className="ss-sep" />
 
         {/* 导出 */}
-        <button className="ss-btn" onClick={onCopy} disabled={!!busy || !ready} data-tooltip="复制" aria-label="复制">
+        <button
+          className="ss-btn"
+          onClick={onCopy}
+          disabled={!!busy || !ready}
+          data-tooltip="复制"
+          aria-label="复制"
+        >
           <Icon name="Copy" size={16} />
         </button>
-        <button className="ss-btn" onClick={onSave} disabled={!!busy || !ready} data-tooltip="保存" aria-label="保存">
+        <button
+          className="ss-btn"
+          onClick={onSave}
+          disabled={!!busy || !ready}
+          data-tooltip="保存"
+          aria-label="保存"
+        >
           <Icon name="Download" size={16} />
         </button>
-        <button className="ss-btn" onClick={onOcr} disabled={!!busy} data-tooltip="OCR" aria-label="OCR">
+        <button
+          className="ss-btn"
+          onClick={onOcr}
+          disabled={!!busy}
+          data-tooltip="OCR"
+          aria-label="OCR"
+        >
           <Icon name="Search" size={16} />
         </button>
-        <button className="ss-btn" onClick={onPin} disabled={!!busy || !ready} data-tooltip="钉到桌面" aria-label="钉到桌面">
+        <button
+          className="ss-btn"
+          onClick={onPin}
+          disabled={!!busy || !ready}
+          data-tooltip="钉到桌面"
+          aria-label="钉到桌面"
+        >
           <Icon name="Pin" size={16} />
         </button>
-        <button className="ss-btn ss-btn-danger" onClick={onCancel} disabled={!!busy} data-tooltip="取消" aria-label="取消">
+        <button
+          className="ss-btn ss-btn-danger"
+          onClick={onCancel}
+          disabled={!!busy}
+          data-tooltip="取消"
+          aria-label="取消"
+        >
           <Icon name="X" size={16} />
         </button>
         {busy && <span className="ss-busy">{busy}…</span>}

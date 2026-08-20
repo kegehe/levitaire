@@ -341,8 +341,16 @@ unsafe fn set_clipboard_text(text: &str) -> bool {
     write_clipboard_text(text)
 }
 
+/// 写入文本到剪贴板（公开，供 quick_input 模块调用）
+pub unsafe fn set_clipboard_text_pub(text: &str) -> bool {
+    write_clipboard_text(text)
+}
+
 /// 写入文本到剪贴板（内部公共实现）
 unsafe fn write_clipboard_text(text: &str) -> bool {
+    // 标记为应用自写：剪贴板监听器（WM_CLIPBOARDUPDATE）据此跳过，
+    // 避免把粘贴/替换/恢复的原内容误入快速输入转盘历史。
+    crate::clipboard::listener::mark_self_write(text);
     if OpenClipboard(None).is_err() {
         return false;
     }
@@ -377,8 +385,8 @@ pub unsafe fn simulate_copy() -> bool {
     simulate_key_combo(VK_CONTROL, 0x43) // 0x43 = 'C'
 }
 
-/// 模拟 Ctrl+V 按键
-pub(crate) unsafe fn simulate_paste() -> bool {
+/// 模拟 Ctrl+V 按键（公开，供 quick_input 模块调用）
+pub unsafe fn simulate_paste() -> bool {
     simulate_key_combo(VK_CONTROL, 0x56) // 0x56 = 'V'
 }
 

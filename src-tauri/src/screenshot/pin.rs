@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// VK_ESCAPE 虚拟键码（避免跨模块导入 KeyboardAndMouse）
 const VK_ESCAPE: u16 = 0x1B;
 
-const PIN_CLASS_NAME: PCWSTR = w!("FloatoryPinWindow");
+const PIN_CLASS_NAME: PCWSTR = w!("LevitairePinWindow");
 const CMD_CLOSE: u16 = 1;
 const CMD_COPY: u16 = 2;
 const CMD_SAVE: u16 = 3;
@@ -69,6 +69,11 @@ const GLOW_OUTER: COLORREF = COLORREF(0x00FF_E48C);
 /// 贴图窗口运行时数据
 struct PinWindow {
     hwnd: isize,
+    /// 占位期（hwnd 尚未回填）内是否已收到关闭请求。
+    /// 为 true 时，窗口线程在建窗并回填 hwnd 后将立即销毁窗口，
+    /// 避免「占位登记完成、hwnd 尚未回填」的窗口期内 close_pin 因 hwnd==0
+    /// 直接移除记录，导致窗口随后照常创建却无法被关闭而永久泄漏。
+    close_requested: bool,
     // 像素数据由窗口线程所有（通过 Box::into_raw 传给线程），此处仅存 hwnd 用于关闭
 }
 
@@ -113,7 +118,7 @@ pub fn cleanup_stale_temp_files() {
         for entry in temp.flatten() {
             let name = entry.file_name();
             if let Some(name) = name.to_str() {
-                if name.starts_with("floatory-pin-") && name.ends_with(".png") {
+                if name.starts_with("levitaire-pin-") && name.ends_with(".png") {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -164,7 +169,7 @@ pub fn create_pin(
 
     // 登记占位（hwnd 稍后由窗口线程回填）
     pins_locked(|m| {
-        m.insert(id, PinWindow { hwnd: 0 });
+        m.insert(id, PinWindow { hwnd: 0, close_requested: false });
     });
 
     // 在独立线程创建窗口并跑消息循环，避免阻塞 Tauri 命令线程
@@ -229,7 +234,7 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         let hwnd = CreateWindowExW(
             ex_style,
             PIN_CLASS_NAME,
-            w!("Floatory Pin"),
+            w!("Levitaire Pin"),
             style,
             win_x,
             win_y,
@@ -254,11 +259,27 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         );
 
         // 回填 hwnd 到 PINS
-        pins_locked(|m| {
+        let close_requested = pins_locked(|m| {
             if let Some(p) = m.get_mut(&id) {
+                let req = p.close_requested;
                 p.hwnd = hwnd_isize;
+                req
+            } else {
+                // 记录已被移除（占位期 close_pin 移除路径），正常关闭本窗口
+                true
             }
         });
+
+        // 检查窗口创建期间（占位期）是否已收到关闭请求。
+        // 若收到，立即销毁本窗口：WM_NCDESTROY 会释放 PinState 并 PostQuitMessage 退出消息循环，
+        // 随后 remove 记录并结束线程，从而杜绝「窗口已创建却无人能关闭」的窗口+线程泄漏。
+        if close_requested {
+            crate::utils::logger::log(
+                "screenshot",
+                &format!("pin id={} close requested during window creation, destroying", id),
+            );
+            let _ = DestroyWindow(hwnd);
+        };
 
         // 消息循环
         let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
@@ -690,7 +711,53 @@ unsafe fn show_context_menu(hwnd: HWND, lparam: LPARAM) {
     }
 }
 
-/// 把贴图像素以 CF_DIB 复制到剪贴板。
+/// 生成应用当前缩放与透明度后的 RGBA 像素（供「另存为/复制」导出）。
+/// 屏幕显示效果来自 WM_PAINT 的 StretchDIBits（按 state.scale 拉伸）与
+/// SetLayeredWindowAttributes(LWA_ALPHA)（按 state.opacity 调透明度）；
+/// 导出时必须复现同样变换，否则得到的是原始未调整图像（所见与所得不一致）。
+/// 像素数据与宽高不一致时返回 Err。
+/// 成功时返回 (RGBA 像素, 宽, 高)。
+fn render_pin_rgba(
+    pixels: &[u8],
+    width: i32,
+    height: i32,
+    scale: f32,
+    opacity: u8,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    // BGRA → RGBA（image crate 使用 RGBA 字节序）
+    let mut rgba = Vec::with_capacity(pixels.len());
+    for chunk in pixels.chunks_exact(4) {
+        rgba.push(chunk[2]); // R
+        rgba.push(chunk[1]); // G
+        rgba.push(chunk[0]); // B
+        rgba.push(chunk[3]); // A
+    }
+    let src_w = width as u32;
+    let src_h = height as u32;
+    let img = image::RgbaImage::from_raw(src_w, src_h, rgba)
+        .ok_or_else(|| "贴图像素尺寸与数据长度不匹配".to_string())?;
+
+    // 缩放：与 handle_wheel 的窗口尺寸计算保持一致（round(原尺寸*scale)）
+    let dst_w = ((width as f32 * scale).round().max(1.0)) as u32;
+    let dst_h = ((height as f32 * scale).round().max(1.0)) as u32;
+    let scaled = if (dst_w, dst_h) != (src_w, src_h) {
+        image::imageops::resize(&img, dst_w, dst_h, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+
+    // 透明度：LWA_ALPHA 作用于整窗口，此处等效地乘到每个像素的 alpha 通道
+    let mut out = scaled.into_raw();
+    let alpha_factor = opacity as f32 / 255.0;
+    if alpha_factor < 1.0 {
+        for px in out.chunks_exact_mut(4) {
+            px[3] = ((px[3] as f32) * alpha_factor).round() as u8;
+        }
+    }
+    Ok((out, dst_w, dst_h))
+}
+
+/// 把当前贴图（含缩放/透明度调整）以 CF_DIB 复制到剪贴板。
 unsafe fn copy_pin_to_clipboard(hwnd: HWND) -> Result<(), String> {
     let state_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
         hwnd,
@@ -701,9 +768,20 @@ unsafe fn copy_pin_to_clipboard(hwnd: HWND) -> Result<(), String> {
     }
     let state = &*state_ptr;
 
+    // 应用当前缩放与透明度（所见即所得），再转回 BGRA 供 DIB 使用
+    let (rgba, width, height) =
+        render_pin_rgba(&state.pixels, state.width, state.height, state.scale, state.opacity)?;
+    let mut pixels = Vec::with_capacity(rgba.len());
+    for chunk in rgba.chunks_exact(4) {
+        pixels.push(chunk[2]);
+        pixels.push(chunk[1]);
+        pixels.push(chunk[0]);
+        pixels.push(chunk[3]);
+    }
+
     // 构造 BITMAPINFO + 像素（BGRA，自上而下 biHeight 为负）
     let header_size = std::mem::size_of::<BITMAPINFOHEADER>();
-    let pixels_len = state.pixels.len();
+    let pixels_len = pixels.len();
     let total = header_size + pixels_len;
 
     let hmem = GlobalAlloc(GMEM_MOVEABLE, total).map_err(|e| format!("GlobalAlloc: {}", e))?;
@@ -718,8 +796,8 @@ unsafe fn copy_pin_to_clipboard(hwnd: HWND) -> Result<(), String> {
     // 简化：用正高度并把扫描行倒序拷贝，使剪贴板消费者按常规 DIB 解析
     let header = BITMAPINFOHEADER {
         biSize: header_size as u32,
-        biWidth: state.width,
-        biHeight: state.height, // 正高度 = 自下而上
+        biWidth: width as i32,
+        biHeight: height as i32, // 正高度 = 自下而上
         biPlanes: 1,
         biBitCount: 32,
         biCompression: 0,
@@ -733,9 +811,9 @@ unsafe fn copy_pin_to_clipboard(hwnd: HWND) -> Result<(), String> {
         std::slice::from_raw_parts(&header as *const BITMAPINFOHEADER as *const u8, header_size);
     buf[..header_size].copy_from_slice(header_bytes);
     // 像素自上而下 → 倒序写入（每行 width*4 字节），适配正高度 DIB
-    let row = (state.width as usize) * 4;
-    let rows = state.height as usize;
-    let src = &state.pixels;
+    let row = (width as usize) * 4;
+    let rows = height as usize;
+    let src = &pixels;
     for r in 0..rows {
         let src_off = r * row;
         let dst_off = header_size + (rows - 1 - r) * row;
@@ -784,7 +862,8 @@ unsafe fn copy_pin_to_clipboard(hwnd: HWND) -> Result<(), String> {
 /// 在独立线程执行：rfd 的保存对话框是模态的，会跑自己的消息循环；
 /// 若在窗口消息线程（pin_wndproc）内同步调用，对话框期间派发的消息会重入 wndproc，
 /// 可能触发 DestroyWindow → WM_NCDESTROY → drop(PinState)，使此处持有的 state 引用悬垂（UB）。
-/// 故此处仅克隆像素数据（owned），把阻塞的对话框与文件 IO 移到独立线程。
+/// 故此处仅克隆像素与变换参数（owned），把渲染（缩放/透明度）、PNG 编码、对话框与文件 IO
+/// 全部移到独立线程，既避免重入 wndproc，也不让大图放大渲染冻结贴图消息循环。
 unsafe fn save_pin_as(hwnd: HWND) -> Result<(), String> {
     let state_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
         hwnd,
@@ -795,27 +874,37 @@ unsafe fn save_pin_as(hwnd: HWND) -> Result<(), String> {
     }
     let state = &*state_ptr;
 
-    // BGRA → PNG（在此同步完成，借用仅在此时存活，不跨 rfd 阻塞调用）
-    let mut rgba: Vec<u8> = Vec::with_capacity(state.pixels.len());
-    for chunk in state.pixels.chunks_exact(4) {
-        rgba.push(chunk[2]); // R
-        rgba.push(chunk[1]); // G
-        rgba.push(chunk[0]); // B
-        rgba.push(chunk[3]); // A
-    }
+    // 克隆像素与变换参数（owned），渲染 + PNG 编码 + 对话框 + 写入全部移入独立线程：
+    // 1) 避免 rfd 模态对话框重入 wndproc 导致 PinState 悬垂；2) 大图放大渲染不冻结贴图消息循环。
+    let pixels = state.pixels.clone();
     let width = state.width;
     let height = state.height;
-    let img = image::RgbaImage::from_raw(width as u32, height as u32, rgba)
-        .ok_or_else(|| "构造 RgbaImage 失败".to_string())?;
-    let dyn_img = image::DynamicImage::ImageRgba8(img);
-    let mut png_buf: Vec<u8> = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut png_buf);
-    dyn_img
-        .write_to(&mut cursor, image::ImageFormat::Png)
-        .map_err(|e| format!("PNG 编码失败: {}", e))?;
+    let scale = state.scale;
+    let opacity = state.opacity;
 
-    // 阻塞的对话框 + 文件写入移到独立线程，避免重入 wndproc 与冻结贴图消息循环
     std::thread::spawn(move || {
+        // 应用当前缩放与透明度（所见即所得）
+        let (rgba, w, h) = match render_pin_rgba(&pixels, width, height, scale, opacity) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::utils::logger::log("screenshot", &format!("save_pin_as 渲染失败: {}", e));
+                return;
+            }
+        };
+        let img = match image::RgbaImage::from_raw(w, h, rgba) {
+            Some(img) => image::DynamicImage::ImageRgba8(img),
+            None => {
+                crate::utils::logger::log("screenshot", "save_pin_as 构造 RgbaImage 失败");
+                return;
+            }
+        };
+        let mut png_buf: Vec<u8> = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut png_buf);
+        if let Err(e) = img.write_to(&mut cursor, image::ImageFormat::Png) {
+            crate::utils::logger::log("screenshot", &format!("save_pin_as PNG 编码失败: {}", e));
+            return;
+        }
+
         let path = rfd::FileDialog::new()
             .set_file_name("screenshot.png")
             .add_filter("PNG 图片", &["png"])
@@ -831,7 +920,22 @@ unsafe fn save_pin_as(hwnd: HWND) -> Result<(), String> {
 
 /// 主动关闭贴图（按 id）
 pub fn close_pin(_app: &tauri::AppHandle, id: u32) -> Result<(), String> {
-    let hwnd_isize = pins_locked(|m| m.get(&id).map(|p| p.hwnd).unwrap_or(0));
+    let hwnd_isize = pins_locked(|m| {
+        let Some(p) = m.get_mut(&id) else {
+            // 记录不存在（窗口已彻底清理或建窗失败已移除），无需操作
+            return 0;
+        };
+        if p.hwnd != 0 {
+            p.hwnd
+        } else {
+            // 占位期（窗口线程尚未回填 hwnd）：不移除记录，仅标记待关闭。
+            // 若此处直接 remove，窗口线程稍后仍会照常建窗并显示，记录已删导致
+            // 窗口无人能关闭、消息循环永不退出，造成窗口+线程永久泄漏。
+            // 标记后由窗口线程在回填 hwnd 时检测 close_requested 并自行销毁窗口。
+            p.close_requested = true;
+            0
+        }
+    });
     if hwnd_isize != 0 {
         unsafe {
             let hwnd = HWND(hwnd_isize as *mut std::ffi::c_void);
@@ -843,11 +947,63 @@ pub fn close_pin(_app: &tauri::AppHandle, id: u32) -> Result<(), String> {
                 LPARAM(0),
             );
         }
-        return Ok(());
     }
-    // 窗口已不存在，清理记录
-    pins_locked(|m| {
-        m.remove(&id);
-    });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_pin_rgba;
+
+    /// 2x2 BGRA 像素：红 / 绿 / 蓝 / 白（各 alpha=255）。
+    fn sample_bgra() -> Vec<u8> {
+        vec![
+            0, 0, 255, 255, // 红
+            0, 255, 0, 255, // 绿
+            255, 0, 0, 255, // 蓝
+            255, 255, 255, 255, // 白
+        ]
+    }
+
+    #[test]
+    fn no_transform_keeps_pixels() {
+        let px = sample_bgra();
+        let (rgba, w, h) = render_pin_rgba(&px, 2, 2, 1.0, 255).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgba.len(), px.len());
+        // 首像素 BGRA(0,0,255,255) → RGBA(255,0,0,255)
+        assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn scale_upsizes_dimensions() {
+        let px = sample_bgra();
+        let (rgba, w, h) = render_pin_rgba(&px, 2, 2, 2.0, 255).unwrap();
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(rgba.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn scale_rounds_like_handle_wheel() {
+        let px = sample_bgra();
+        // round(2*1.4)=3，与 handle_wheel 的窗口内容尺寸计算一致
+        let (_, w, h) = render_pin_rgba(&px, 2, 2, 1.4, 255).unwrap();
+        assert_eq!((w, h), (3, 3));
+    }
+
+    #[test]
+    fn opacity_scales_alpha() {
+        let px = sample_bgra();
+        let (rgba, _, _) = render_pin_rgba(&px, 2, 2, 1.0, 128).unwrap();
+        // alpha_factor = 128/255，255 → round(255*128/255) = 128
+        for c in rgba.chunks_exact(4) {
+            assert_eq!(c[3], 128);
+        }
+    }
+
+    #[test]
+    fn mismatched_size_returns_err() {
+        let px = sample_bgra(); // 16 字节
+        assert!(render_pin_rgba(&px, 3, 2, 1.0, 255).is_err());
+    }
 }

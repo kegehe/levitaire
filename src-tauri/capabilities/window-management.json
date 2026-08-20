@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/tauri-utils/schema.json",
+  "identifier": "window-management",
+  "description": "动态创建/销毁窗口的权限（仅 screenshot-overlay 和 orb 需要）",
+  "windows": [
+    "screenshot-overlay",
+    "orb"
+  ],
+  "permissions": [
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:webview:allow-create-webview-window"
+  ]
+}

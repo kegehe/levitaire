@@ -21,7 +21,12 @@ describe("useAiOptimize", () => {
   });
 
   it("checkAiConfig 返回配置", async () => {
-    const config = { api_key: "sk-test", base_url: "https://api.test", model: "m", api_type: "anthropic" };
+    const config = {
+      api_key: "sk-test",
+      base_url: "https://api.test",
+      model: "m",
+      api_type: "anthropic",
+    };
     mockInvoke.mockResolvedValueOnce(config);
 
     const { result } = renderHook(() => useAiOptimize());
@@ -53,7 +58,12 @@ describe("useAiOptimize", () => {
     const { result } = renderHook(() => useAiOptimize());
 
     await act(async () => {
-      result.current.optimize("test", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
+      result.current.optimize("test", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
     });
 
     expect(result.current.isLoading).toBe(true);
@@ -67,8 +77,18 @@ describe("useAiOptimize", () => {
     const { result } = renderHook(() => useAiOptimize());
 
     await act(async () => {
-      result.current.optimize("test", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
-      result.current.optimize("test2", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
+      result.current.optimize("test", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
+      result.current.optimize("test2", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
     });
 
     // 只应调用一次 invoke
@@ -81,7 +101,12 @@ describe("useAiOptimize", () => {
     const { result } = renderHook(() => useAiOptimize());
 
     await act(async () => {
-      result.current.optimize("input", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
+      result.current.optimize("input", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
     });
 
     await act(async () => {
@@ -101,7 +126,12 @@ describe("useAiOptimize", () => {
     const { result } = renderHook(() => useAiOptimize());
 
     await act(async () => {
-      result.current.optimize("input", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
+      result.current.optimize("input", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
     });
 
     await act(async () => {
@@ -120,7 +150,12 @@ describe("useAiOptimize", () => {
     const { result } = renderHook(() => useAiOptimize());
 
     await act(async () => {
-      result.current.optimize("input", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
+      result.current.optimize("input", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
     });
 
     await act(async () => {
@@ -137,7 +172,12 @@ describe("useAiOptimize", () => {
     const { result } = renderHook(() => useAiOptimize());
 
     await act(async () => {
-      result.current.optimize("input", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
+      result.current.optimize("input", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
     });
 
     await act(async () => {
@@ -160,7 +200,12 @@ describe("useAiOptimize", () => {
     const { result } = renderHook(() => useAiOptimize());
 
     await act(async () => {
-      result.current.optimize("input", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
+      result.current.optimize("input", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
     });
 
     await act(async () => {
@@ -180,7 +225,12 @@ describe("useAiOptimize", () => {
     const { result } = renderHook(() => useAiOptimize());
 
     await act(async () => {
-      await result.current.optimize("input", { id: "p", icon: "Sparkles", label: "润色", systemPrompt: "sp" });
+      await result.current.optimize("input", {
+        id: "p",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "sp",
+      });
     });
 
     expect(result.current.isLoading).toBe(false);
@@ -191,7 +241,12 @@ describe("useAiOptimize", () => {
     mockInvoke.mockReturnValueOnce(new Promise(() => {}));
 
     const { result } = renderHook(() => useAiOptimize());
-    const mode = { id: "polish", icon: "Sparkles" as const, label: "润色", systemPrompt: "润色提示词" };
+    const mode = {
+      id: "polish",
+      icon: "Sparkles" as const,
+      label: "润色",
+      systemPrompt: "润色提示词",
+    };
 
     await act(async () => {
       result.current.optimize("测试文本", mode);

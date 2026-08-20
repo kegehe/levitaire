@@ -1,4 +1,4 @@
-/* Floatory — Global Styles */
+/* Levitaire — Global Styles */
 @import "./tokens.css";
 
 /* ── Reset ───────────────────────────────────────────────── */
@@ -8,6 +8,34 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  border: 0 solid;
+}
+
+/* 表单元素继承字体与颜色（替代 Tailwind preflight，避免 UA 默认系统字体/黑字/圆角） */
+button,
+input,
+select,
+optgroup,
+textarea {
+  font: inherit;
+  font-feature-settings: inherit;
+  font-variation-settings: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  border-radius: 0;
+  background-color: transparent;
+  opacity: 1;
+}
+
+svg {
+  display: block;
+  vertical-align: middle;
+}
+
+img,
+video {
+  max-width: 100%;
+  height: auto;
 }
 
 /* ── Typography ──────────────────────────────────────────── */
@@ -37,14 +65,15 @@ body.settings-window {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-size: var(--text-md);
   line-height: var(--leading-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   color: var(--color-fg);
-  transition: background-color var(--transition-normal),
+  transition:
+    background-color var(--transition-normal),
     color var(--transition-normal);
 }
 
@@ -74,18 +103,10 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--neutral-300);
+  background: var(--color-scrollbar);
   border-radius: var(--radius-full);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--neutral-400);
-}
-
-[data-theme="dark"] ::-webkit-scrollbar-thumb {
-  background: var(--neutral-700);
-}
-
-[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
-  background: var(--neutral-600);
+  background: var(--color-scrollbar-hover);
 }

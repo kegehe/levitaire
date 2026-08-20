@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Levitaire Theme Lab</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --font-ui: Inter, "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+        --font-mono: "Cascadia Mono", Consolas, monospace;
+      }
+
+      * { box-sizing: border-box; }
+      button, input { font: inherit; }
+      button { color: inherit; }
+      body { margin: 0; font-family: var(--font-ui); background: var(--page); color: var(--text); }
+
+      /* Signal: a quiet dark-first utility surface with cool cyan signals. */
+      body[data-scheme="signal"][data-mode="dark"] {
+        --page: #151617; --app: #1b1c1e; --surface: #24262a; --surface-raised: #2b2e33;
+        --surface-sunken: #191a1c; --text: #f1f4f7; --muted: #a9b0b8; --subtle: #747d87;
+        --line: #3a3e44; --line-strong: #535a62; --accent: #5bd2ff; --accent-strong: #93e4ff;
+        --accent-ink: #09202a; --accent-soft: #123540; --success: #55d68a; --warning: #ffbe62;
+        --danger: #ff7c7c; --danger-soft: #44272a; --chart-2: #88d86c; --chart-3: #ffbd63;
+        --shadow: 0 18px 42px rgb(0 0 0 / .38); --window-radius: 14px; --panel-radius: 10px;
+      }
+      body[data-scheme="signal"][data-mode="light"] {
+        --page: #eef2f4; --app: #f7f9fa; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #edf1f3; --text: #172129; --muted: #5c6973; --subtle: #82909a;
+        --line: #d8e0e4; --line-strong: #b9c6cd; --accent: #007ca8; --accent-strong: #006988;
+        --accent-ink: #ffffff; --accent-soft: #dceff5; --success: #197c4b; --warning: #a96100;
+        --danger: #c84249; --danger-soft: #f9e5e6; --chart-2: #3f985c; --chart-3: #c97a12;
+        --shadow: 0 18px 42px rgb(31 48 58 / .14); --window-radius: 14px; --panel-radius: 10px;
+      }
+
+      /* Cloud: crisp light-first UI, closer to native Windows productivity surfaces. */
+      body[data-scheme="cloud"][data-mode="light"] {
+        --page: #f2f5fa; --app: #f9fbff; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #f1f5f9; --text: #172033; --muted: #5e6b81; --subtle: #8793a8;
+        --line: #d9e1ed; --line-strong: #bdc9da; --accent: #2864dc; --accent-strong: #174fbf;
+        --accent-ink: #ffffff; --accent-soft: #e4edff; --success: #178154; --warning: #ad6a12;
+        --danger: #c9414b; --danger-soft: #fbe8e9; --chart-2: #3c9b69; --chart-3: #d68b24;
+        --shadow: 0 14px 34px rgb(44 62 89 / .13); --window-radius: 10px; --panel-radius: 8px;
+      }
+      body[data-scheme="cloud"][data-mode="dark"] {
+        --page: #171b24; --app: #1e2430; --surface: #262e3c; --surface-raised: #2c3545;
+        --surface-sunken: #191e28; --text: #eef3ff; --muted: #acb8cc; --subtle: #7d8aa0;
+        --line: #3a465a; --line-strong: #55657d; --accent: #80aaff; --accent-strong: #b4ccff;
+        --accent-ink: #142a54; --accent-soft: #203a70; --success: #62d59b; --warning: #ffc36d;
+        --danger: #ff9296; --danger-soft: #472a32; --chart-2: #7bd89d; --chart-3: #ffc36d;
+        --shadow: 0 18px 42px rgb(0 0 0 / .35); --window-radius: 10px; --panel-radius: 8px;
+      }
+
+      /* Studio: high-contrast graphite with teal action; intended for dense monitoring work. */
+      body[data-scheme="studio"][data-mode="dark"] {
+        --page: #111212; --app: #181a1a; --surface: #202323; --surface-raised: #292c2b;
+        --surface-sunken: #141515; --text: #f3f6f4; --muted: #abb4b0; --subtle: #747d79;
+        --line: #373d3a; --line-strong: #57605b; --accent: #54d7c5; --accent-strong: #9aeee1;
+        --accent-ink: #082421; --accent-soft: #143c37; --success: #70d58a; --warning: #efc66a;
+        --danger: #f78282; --danger-soft: #442829; --chart-2: #9bd86e; --chart-3: #f0be5f;
+        --shadow: 0 12px 28px rgb(0 0 0 / .4); --window-radius: 8px; --panel-radius: 6px;
+      }
+      body[data-scheme="studio"][data-mode="light"] {
+        --page: #eef1ef; --app: #f8faf8; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #edf1ee; --text: #16211d; --muted: #5f6c67; --subtle: #87918d;
+        --line: #d5dcd8; --line-strong: #b8c4bd; --accent: #087e72; --accent-strong: #05665d;
+        --accent-ink: #ffffff; --accent-soft: #d9f0eb; --success: #26834f; --warning: #a66e16;
+        --danger: #c54848; --danger-soft: #fae7e6; --chart-2: #4c9b58; --chart-3: #c78b26;
+        --shadow: 0 12px 28px rgb(30 47 39 / .13); --window-radius: 8px; --panel-radius: 6px;
+      }
+
+      /* Quartz: calm blue-gray with clearer elevation, designed for long settings sessions. */
+      body[data-scheme="quartz"][data-mode="light"] {
+        --page: #f3f5f8; --app: #fafbfc; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #eef1f5; --text: #202833; --muted: #687482; --subtle: #929ba6;
+        --line: #d9dfe6; --line-strong: #b9c3cf; --accent: #4169b5; --accent-strong: #305394;
+        --accent-ink: #ffffff; --accent-soft: #e7edf9; --success: #2c8057; --warning: #ad741c;
+        --danger: #c64c55; --danger-soft: #fae9ea; --chart-2: #55a171; --chart-3: #cf922f;
+        --shadow: 0 10px 26px rgb(41 53 68 / .12); --window-radius: 12px; --panel-radius: 8px;
+      }
+      body[data-scheme="quartz"][data-mode="dark"] {
+        --page: #191c21; --app: #21252c; --surface: #2a2f38; --surface-raised: #333944;
+        --surface-sunken: #1c2026; --text: #f1f4f8; --muted: #b2bac5; --subtle: #7e8998;
+        --line: #414957; --line-strong: #5a677a; --accent: #91b5ff; --accent-strong: #b9d0ff;
+        --accent-ink: #1a315d; --accent-soft: #293d66; --success: #79d39c; --warning: #eebd65;
+        --danger: #ff9299; --danger-soft: #4a2b31; --chart-2: #8bd8a5; --chart-3: #f1bd67;
+        --shadow: 0 16px 38px rgb(0 0 0 / .36); --window-radius: 12px; --panel-radius: 8px;
+      }
+
+      /* Moss: muted evergreen, for a calmer alternative that remains operational. */
+      body[data-scheme="moss"][data-mode="light"] {
+        --page: #f1f4f0; --app: #f9fbf8; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #edf2ed; --text: #1c2921; --muted: #637267; --subtle: #89958c;
+        --line: #d3dfd5; --line-strong: #b5c6b8; --accent: #357b58; --accent-strong: #256440;
+        --accent-ink: #ffffff; --accent-soft: #deeee3; --success: #277e4d; --warning: #a87319;
+        --danger: #c54e4b; --danger-soft: #fae8e5; --chart-2: #6a9f42; --chart-3: #c9912b;
+        --shadow: 0 11px 27px rgb(40 58 44 / .12); --window-radius: 12px; --panel-radius: 9px;
+      }
+      body[data-scheme="moss"][data-mode="dark"] {
+        --page: #151a17; --app: #1d2420; --surface: #26302a; --surface-raised: #303a33;
+        --surface-sunken: #19201c; --text: #eef5ef; --muted: #b0bdb2; --subtle: #7b897e;
+        --line: #3e4d43; --line-strong: #5a6d60; --accent: #7bd4a0; --accent-strong: #a9ebc2;
+        --accent-ink: #153d29; --accent-soft: #254b36; --success: #80d59b; --warning: #f0c66f;
+        --danger: #ff9290; --danger-soft: #4a2a2a; --chart-2: #aad56d; --chart-3: #efc36a;
+        --shadow: 0 16px 38px rgb(0 0 0 / .38); --window-radius: 12px; --panel-radius: 9px;
+      }
+
+      /* Ember: dark charcoal and coral action, intentionally more expressive for capture tools. */
+      body[data-scheme="ember"][data-mode="light"] {
+        --page: #f6f3f2; --app: #fcfaf9; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #f4efed; --text: #2b2422; --muted: #756762; --subtle: #9b8b85;
+        --line: #e4d8d3; --line-strong: #cdbbb4; --accent: #c75b47; --accent-strong: #a84535;
+        --accent-ink: #ffffff; --accent-soft: #f9e4df; --success: #287d55; --warning: #aa741b;
+        --danger: #be464c; --danger-soft: #fae7e8; --chart-2: #469565; --chart-3: #cf8e27;
+        --shadow: 0 12px 28px rgb(72 47 39 / .12); --window-radius: 14px; --panel-radius: 10px;
+      }
+      body[data-scheme="ember"][data-mode="dark"] {
+        --page: #1a1716; --app: #231e1c; --surface: #2d2623; --surface-raised: #382f2b;
+        --surface-sunken: #1e1a18; --text: #f8f1ef; --muted: #c3b2ac; --subtle: #8d7c76;
+        --line: #4b3f39; --line-strong: #6b5850; --accent: #ff9b83; --accent-strong: #ffc0ad;
+        --accent-ink: #512217; --accent-soft: #5c3027; --success: #80d49c; --warning: #f4c670;
+        --danger: #ff9699; --danger-soft: #4b292b; --chart-2: #8edca5; --chart-3: #f2c469;
+        --shadow: 0 17px 38px rgb(0 0 0 / .4); --window-radius: 14px; --panel-radius: 10px;
+      }
+
+      /* Arctic: luminous ice gray, with a sharper compact visual language. */
+      body[data-scheme="arctic"][data-mode="light"] {
+        --page: #eef6f8; --app: #f9fdfe; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #eaf4f6; --text: #17272c; --muted: #597078; --subtle: #81979e;
+        --line: #cfdee3; --line-strong: #acc2c9; --accent: #1686a5; --accent-strong: #0a6e89;
+        --accent-ink: #ffffff; --accent-soft: #d8eff5; --success: #208557; --warning: #a97619;
+        --danger: #c6474c; --danger-soft: #fae7e7; --chart-2: #4ca873; --chart-3: #d09326;
+        --shadow: 0 9px 24px rgb(27 71 83 / .12); --window-radius: 7px; --panel-radius: 5px;
+      }
+      body[data-scheme="arctic"][data-mode="dark"] {
+        --page: #101a1d; --app: #172227; --surface: #203037; --surface-raised: #293b43;
+        --surface-sunken: #131f23; --text: #eaf7fa; --muted: #a9c1c7; --subtle: #779298;
+        --line: #395159; --line-strong: #547078; --accent: #76d6ee; --accent-strong: #a8eafa;
+        --accent-ink: #123d49; --accent-soft: #1f5361; --success: #70d9a0; --warning: #f1c66d;
+        --danger: #ff9797; --danger-soft: #4b2a2b; --chart-2: #8edca5; --chart-3: #efc26a;
+        --shadow: 0 15px 34px rgb(0 0 0 / .4); --window-radius: 7px; --panel-radius: 5px;
+      }
+
+      /* Mono: stark neutral geometry with a limited citron action signal. */
+      body[data-scheme="mono"][data-mode="light"] {
+        --page: #f4f4f1; --app: #fafaf8; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #f0f0ec; --text: #20211f; --muted: #686a65; --subtle: #92938d;
+        --line: #dadbd4; --line-strong: #bfc1b8; --accent: #617c09; --accent-strong: #4d6405;
+        --accent-ink: #ffffff; --accent-soft: #ebf3ce; --success: #298254; --warning: #a8751b;
+        --danger: #c7494e; --danger-soft: #fbe8e9; --chart-2: #5a9c45; --chart-3: #cb9130;
+        --shadow: 0 8px 22px rgb(31 32 29 / .12); --window-radius: 4px; --panel-radius: 3px;
+      }
+      body[data-scheme="mono"][data-mode="dark"] {
+        --page: #131414; --app: #1b1c1b; --surface: #242524; --surface-raised: #2d2e2c;
+        --surface-sunken: #161716; --text: #f4f5ef; --muted: #b7b8b0; --subtle: #7d7f78;
+        --line: #41433e; --line-strong: #61645d; --accent: #c6e85a; --accent-strong: #e0f59e;
+        --accent-ink: #344400; --accent-soft: #405016; --success: #79d697; --warning: #f1c46c;
+        --danger: #ff9295; --danger-soft: #4b292b; --chart-2: #a4d76e; --chart-3: #f0c36a;
+        --shadow: 0 13px 30px rgb(0 0 0 / .42); --window-radius: 4px; --panel-radius: 3px;
+      }
+
+      /* Iris: a restrained violet accent for users who want a more distinctive identity. */
+      body[data-scheme="iris"][data-mode="light"] {
+        --page: #f6f4f9; --app: #fcfbfe; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #f2eff7; --text: #272334; --muted: #6f687e; --subtle: #958da5;
+        --line: #ded8e9; --line-strong: #c4b9d5; --accent: #7656bb; --accent-strong: #5f429c;
+        --accent-ink: #ffffff; --accent-soft: #ebe4fb; --success: #2d8155; --warning: #a87218;
+        --danger: #c54955; --danger-soft: #fae8ea; --chart-2: #4b9d6b; --chart-3: #ce8f2a;
+        --shadow: 0 12px 28px rgb(61 44 91 / .12); --window-radius: 12px; --panel-radius: 8px;
+      }
+      body[data-scheme="iris"][data-mode="dark"] {
+        --page: #191722; --app: #211e2c; --surface: #2a2637; --surface-raised: #352f45;
+        --surface-sunken: #1d1a27; --text: #f5f1fa; --muted: #bdb3cc; --subtle: #877b99;
+        --line: #463d58; --line-strong: #625372; --accent: #b89aff; --accent-strong: #d5c1ff;
+        --accent-ink: #39215d; --accent-soft: #4a3671; --success: #7bd39a; --warning: #f0c269;
+        --danger: #ff929b; --danger-soft: #4a2a31; --chart-2: #8bd9a7; --chart-3: #f0c169;
+        --shadow: 0 17px 38px rgb(0 0 0 / .4); --window-radius: 12px; --panel-radius: 8px;
+      }
+
+      /* Dusk: blue-teal dusk tones, with wider radii for a softer consumer-facing direction. */
+      body[data-scheme="dusk"][data-mode="light"] {
+        --page: #f1f5f6; --app: #f8fbfc; --surface: #ffffff; --surface-raised: #ffffff;
+        --surface-sunken: #edf3f4; --text: #1d2a30; --muted: #60727a; --subtle: #86959b;
+        --line: #d3e0e3; --line-strong: #b5c6cb; --accent: #197c91; --accent-strong: #0d6579;
+        --accent-ink: #ffffff; --accent-soft: #d9edf1; --success: #268051; --warning: #a87219;
+        --danger: #c64950; --danger-soft: #fae7e8; --chart-2: #63a95c; --chart-3: #ce9328;
+        --shadow: 0 15px 34px rgb(32 64 73 / .12); --window-radius: 16px; --panel-radius: 12px;
+      }
+      body[data-scheme="dusk"][data-mode="dark"] {
+        --page: #12191c; --app: #1a2529; --surface: #233137; --surface-raised: #2b3d44;
+        --surface-sunken: #151f23; --text: #eef6f6; --muted: #adc0c3; --subtle: #789095;
+        --line: #3b535a; --line-strong: #567078; --accent: #70d3d8; --accent-strong: #a7ebed;
+        --accent-ink: #113d42; --accent-soft: #20545a; --success: #77d39a; --warning: #f0c36a;
+        --danger: #ff9396; --danger-soft: #4b292b; --chart-2: #99d774; --chart-3: #efc169;
+        --shadow: 0 19px 42px rgb(0 0 0 / .4); --window-radius: 16px; --panel-radius: 12px;
+      }
+
+      .lab { min-height: 100vh; padding: 28px; }
+      .lab-header { max-width: 1440px; margin: 0 auto 22px; display: flex; justify-content: space-between; align-items: end; gap: 24px; }
+      .eyebrow { margin: 0 0 6px; color: var(--accent); font: 700 11px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+      h1 { margin: 0; font-size: 25px; line-height: 1.2; letter-spacing: 0; }
+      .subtitle { max-width: 630px; margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+      .mode-switch { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 4px 12px rgb(0 0 0 / .08); }
+      .mode-switch button, .scheme-choice { cursor: pointer; border: 0; background: transparent; }
+      .mode-switch button { padding: 6px 10px; color: var(--muted); border-radius: 5px; font-size: 12px; }
+      .mode-switch button.is-active { background: var(--surface-sunken); color: var(--text); }
+
+      .scheme-list { max-width: 1440px; margin: 0 auto 22px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+      .scheme-choice { position: relative; min-height: 112px; padding: 16px; text-align: left; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease; }
+      .scheme-choice:hover { transform: translateY(-1px); border-color: var(--line-strong); box-shadow: 0 8px 20px rgb(0 0 0 / .08); }
+      .scheme-choice.is-active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+      .choice-top { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+      .scheme-name { font-size: 14px; font-weight: 700; }
+      .choice-tag { padding: 3px 6px; color: var(--accent); border-radius: 4px; background: var(--accent-soft); font-size: 10px; font-weight: 700; }
+      .scheme-choice p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+      .swatches { display: flex; gap: 5px; margin-top: 12px; }
+      .swatches span { width: 16px; height: 16px; border: 1px solid rgb(255 255 255 / .14); border-radius: 50%; }
+
+      .workbench { max-width: 1440px; min-height: 720px; margin: 0 auto; padding: 20px; position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: calc(var(--window-radius) + 4px); background: var(--app); box-shadow: var(--shadow); }
+      .workbench::before { content: ""; position: absolute; inset: 0; pointer-events: none; border: 1px solid rgb(255 255 255 / .04); border-radius: inherit; }
+      .scene-label { position: relative; z-index: 1; display: flex; justify-content: space-between; margin-bottom: 18px; color: var(--subtle); font: 700 10px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+      .scene-grid { position: relative; z-index: 1; display: grid; grid-template-columns: 250px minmax(430px, 1fr) 280px; gap: 16px; align-items: start; }
+
+      .window { border: 1px solid var(--line); border-radius: var(--window-radius); background: var(--surface); box-shadow: 0 8px 20px rgb(0 0 0 / .1); overflow: hidden; }
+      .window-top { height: 40px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--line); }
+      .window-title { font-size: 12px; font-weight: 700; }
+      .window-meta { color: var(--subtle); font: 10px var(--font-mono); }
+      .icon-btn { display: inline-grid; width: 26px; height: 26px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; }
+      .icon-btn:hover { background: var(--surface-sunken); color: var(--text); }
+
+      .palette-body { padding: 9px; display: grid; gap: 7px; }
+      .tool-row { display: grid; grid-template-columns: 30px 1fr auto; gap: 9px; align-items: center; padding: 8px; border: 1px solid transparent; border-radius: var(--panel-radius); }
+      .tool-row.is-on { border-color: var(--line); background: var(--surface-sunken); }
+      .tool-glyph { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 7px; color: var(--accent); background: var(--accent-soft); font-size: 14px; }
+      .tool-name { font-size: 12px; font-weight: 650; }
+      .tool-note { margin-top: 2px; color: var(--subtle); font-size: 10px; }
+      .toggle { width: 28px; height: 16px; padding: 2px; border: 0; border-radius: 20px; background: var(--line-strong); }
+      .toggle span { display: block; width: 12px; height: 12px; border-radius: 50%; background: #fff; transition: transform 160ms ease; }
+      .toggle.is-on { background: var(--accent); }.toggle.is-on span { transform: translateX(12px); }
+
+      .settings { min-height: 534px; display: grid; grid-template-columns: 138px 1fr; }
+      .settings-nav { padding: 10px 0; border-right: 1px solid var(--line); background: var(--surface-sunken); }
+      .brand { padding: 4px 13px 15px; font-size: 13px; font-weight: 750; }
+      .nav-item { display: flex; gap: 8px; align-items: center; width: 100%; padding: 9px 13px; border: 0; border-left: 2px solid transparent; background: transparent; color: var(--muted); font-size: 11px; text-align: left; }
+      .nav-item.is-active { border-left-color: var(--accent); background: var(--accent-soft); color: var(--accent-strong); font-weight: 700; }
+      .settings-content { padding: 22px; }
+      .settings-content h2 { margin: 0; font-size: 18px; letter-spacing: 0; }
+      .settings-content > p { margin: 6px 0 21px; color: var(--muted); font-size: 12px; }
+      .field { display: grid; gap: 6px; margin-bottom: 15px; }
+      .field label { color: var(--muted); font-size: 11px; font-weight: 650; }
+      .field-input { height: 32px; display: flex; align-items: center; justify-content: space-between; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-raised); color: var(--text); font-size: 12px; }
+      .field-input em { color: var(--subtle); font-style: normal; }
+      .config-card { margin-top: 20px; padding: 12px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface-sunken); }
+      .config-card-title { font-size: 12px; font-weight: 700; }.config-card p { margin: 4px 0 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+      .primary-btn { height: 30px; padding: 0 11px; border: 0; border-radius: 6px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 800; }
+
+      .right-stack { display: grid; gap: 14px; }
+      .monitor { padding: 11px; }.monitor-head { display: flex; justify-content: space-between; align-items: center; padding-bottom: 9px; border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 700; }
+      .status { display: inline-flex; align-items: center; gap: 5px; color: var(--success); font: 10px var(--font-mono); }.status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+      .metric { padding: 10px 0; border-bottom: 1px solid var(--line); }.metric:last-child { border: 0; padding-bottom: 0; }.metric-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }.metric-head strong { color: var(--text); font: 700 12px var(--font-mono); }
+      .bar { height: 5px; margin-top: 7px; overflow: hidden; border-radius: 999px; background: var(--surface-sunken); }.bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }.bar.mem span { background: var(--chart-2); }.bar.net span { background: var(--chart-3); }
+
+      .recording { padding: 12px; display: grid; grid-template-columns: 10px 1fr auto; gap: 9px; align-items: center; }.recording-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 4px var(--danger-soft); }.recording-time { font: 800 15px var(--font-mono); }.recording-note { margin-top: 2px; color: var(--subtle); font-size: 10px; }.recording-actions { display: flex; gap: 5px; }.recording-actions button { width: 25px; height: 25px; border: 0; border-radius: 50%; background: var(--surface-sunken); color: var(--muted); font-size: 10px; }.recording-actions button.stop { background: var(--danger); color: white; }
+
+      .overlay-demo { position: relative; z-index: 1; margin-top: 16px; min-height: 118px; padding: 16px; overflow: hidden; border: 1px dashed var(--line-strong); border-radius: var(--window-radius); background: var(--surface-sunken); }
+      .selection { position: absolute; top: 29px; left: 22%; width: 35%; height: 64px; border: 1px solid var(--accent); box-shadow: 0 0 0 1px rgb(255 255 255 / .35); }.selection-tag { position: absolute; top: -20px; left: 0; padding: 3px 5px; background: var(--accent); color: var(--accent-ink); font: 700 9px var(--font-mono); }
+      .capture-toolbar { position: absolute; right: 28px; bottom: 17px; display: flex; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: 0 8px 20px rgb(0 0 0 / .18); }.capture-toolbar button { width: 27px; height: 27px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 12px; }.capture-toolbar button.is-active { background: var(--accent-soft); color: var(--accent); }
+      .orb { position: absolute; z-index: 2; left: 22px; bottom: 22px; display: grid; width: 46px; height: 46px; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius: 50%; background: color-mix(in srgb, var(--surface-raised) 82%, transparent); color: var(--accent); box-shadow: 0 7px 20px rgb(0 0 0 / .2); backdrop-filter: blur(12px); font-size: 20px; }
+
+      .token-strip { position: relative; z-index: 1; display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }.token { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font: 10px var(--font-mono); }.token i { width: 13px; height: 13px; border: 1px solid var(--line); border-radius: 4px; background: var(--c); }
+      .source-note { max-width: 1440px; margin: 15px auto 0; color: var(--subtle); font-size: 11px; line-height: 1.5; }.source-note a { color: var(--accent); }
+
+      @media (max-width: 1050px) { .scheme-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }.scene-grid { grid-template-columns: 230px minmax(390px, 1fr); }.right-stack { grid-column: span 2; grid-template-columns: 1fr 1fr; }.lab-header { align-items: start; flex-direction: column; }.orb { display: none; } }
+      @media (max-width: 720px) { .lab { padding: 14px; }.scheme-list { grid-template-columns: 1fr; }.scene-grid { grid-template-columns: 1fr; }.settings { min-height: 0; }.right-stack { grid-column: auto; grid-template-columns: 1fr; }.settings-content { padding: 16px; }.workbench { padding: 12px; }.overlay-demo { display: none; }.settings { grid-template-columns: 112px 1fr; }.settings-nav { overflow: hidden; }.nav-item { padding: 9px; }.brand { padding: 4px 9px 15px; } }
+    </style>
+  </head>
+  <body data-scheme="signal" data-mode="dark">
+    <main class="lab">
+      <header class="lab-header">
+        <div>
+          <p class="eyebrow">Levitaire / Theme Lab</p>
+          <h1>统一多窗口主题候选</h1>
+          <p class="subtitle">同一套令牌同时覆盖悬浮球、文字工具栏、工具面板、设置页、系统监控、截图与录屏控制。选择方案后，下面的完整场景会即时更新。</p>
+        </div>
+        <div class="mode-switch" aria-label="预览模式">
+          <button type="button" data-mode="light">浅色</button>
+          <button type="button" data-mode="dark" class="is-active">深色</button>
+        </div>
+      </header>
+
+      <section class="scheme-list" aria-label="主题方案">
+        <button type="button" class="scheme-choice is-active" data-scheme="signal">
+          <span class="choice-top"><span class="scheme-name">Signal</span><span class="choice-tag">推荐</span></span>
+          <p>深石墨基底，青色只用于动作和状态。适合常驻悬浮窗，夜间工作尤其稳定。</p>
+          <span class="swatches"><span style="background:#1b1c1e"></span><span style="background:#2b2e33"></span><span style="background:#5bd2ff"></span><span style="background:#55d68a"></span><span style="background:#ff7c7c"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="cloud">
+          <span class="choice-top"><span class="scheme-name">Cloud</span><span class="choice-tag">原生感</span></span>
+          <p>明亮冷白与清晰钴蓝，最接近 Windows 生产力工具；边界和层级辨识最直接。</p>
+          <span class="swatches"><span style="background:#f9fbff"></span><span style="background:#f1f5f9"></span><span style="background:#2864dc"></span><span style="background:#178154"></span><span style="background:#c9414b"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="studio">
+          <span class="choice-top"><span class="scheme-name">Studio</span><span class="choice-tag">高密度</span></span>
+          <p>最克制的黑白层次搭配蓝绿色动作色。小尺寸监控、录屏控制和专业任务界面更突出。</p>
+          <span class="swatches"><span style="background:#181a1a"></span><span style="background:#292c2b"></span><span style="background:#54d7c5"></span><span style="background:#70d58a"></span><span style="background:#f78282"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="quartz">
+          <span class="choice-top"><span class="scheme-name">Quartz</span><span class="choice-tag">均衡</span></span>
+          <p>蓝灰层次明确，边界、输入框与设置页在长时间使用时最平静。</p>
+          <span class="swatches"><span style="background:#21252c"></span><span style="background:#333944"></span><span style="background:#91b5ff"></span><span style="background:#79d39c"></span><span style="background:#ff9299"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="moss">
+          <span class="choice-top"><span class="scheme-name">Moss</span><span class="choice-tag">沉静</span></span>
+          <p>低饱和常青绿，保留桌面工具的理性，但比蓝色方案更舒缓。</p>
+          <span class="swatches"><span style="background:#1d2420"></span><span style="background:#303a33"></span><span style="background:#7bd4a0"></span><span style="background:#aad56d"></span><span style="background:#ff9290"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="ember">
+          <span class="choice-top"><span class="scheme-name">Ember</span><span class="choice-tag">鲜明</span></span>
+          <p>炭黑搭配珊瑚动作色，对截图、录制与即时操作的注意力引导最强。</p>
+          <span class="swatches"><span style="background:#231e1c"></span><span style="background:#382f2b"></span><span style="background:#ff9b83"></span><span style="background:#80d49c"></span><span style="background:#ff9699"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="arctic">
+          <span class="choice-top"><span class="scheme-name">Arctic</span><span class="choice-tag">锐利</span></span>
+          <p>冰灰、天青和更小圆角。层次清晰，适合偏工程和精密感的产品定位。</p>
+          <span class="swatches"><span style="background:#172227"></span><span style="background:#293b43"></span><span style="background:#76d6ee"></span><span style="background:#70d9a0"></span><span style="background:#ff9797"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="mono">
+          <span class="choice-top"><span class="scheme-name">Mono</span><span class="choice-tag">极简</span></span>
+          <p>近黑白结构只保留柠檬色动作信号，最适合追求克制与高效率的界面。</p>
+          <span class="swatches"><span style="background:#1b1c1b"></span><span style="background:#2d2e2c"></span><span style="background:#c6e85a"></span><span style="background:#a4d76e"></span><span style="background:#ff9295"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="iris">
+          <span class="choice-top"><span class="scheme-name">Iris</span><span class="choice-tag">品牌感</span></span>
+          <p>克制紫罗兰强调色，辨识度最高，适合希望 Levitaire 拥有鲜明产品个性的方向。</p>
+          <span class="swatches"><span style="background:#211e2c"></span><span style="background:#352f45"></span><span style="background:#b89aff"></span><span style="background:#8bd9a7"></span><span style="background:#ff929b"></span></span>
+        </button>
+        <button type="button" class="scheme-choice" data-scheme="dusk">
+          <span class="choice-top"><span class="scheme-name">Dusk</span><span class="choice-tag">柔和</span></span>
+          <p>蓝绿色暮色与较大圆角，让多个浮窗显得亲和，但仍保持足够的工具感。</p>
+          <span class="swatches"><span style="background:#1a2529"></span><span style="background:#2b3d44"></span><span style="background:#70d3d8"></span><span style="background:#99d774"></span><span style="background:#ff9396"></span></span>
+        </button>
+      </section>
+
+      <section class="workbench" aria-label="完整界面预览">
+        <div class="scene-label"><span>真实窗口组合</span><span id="scene-mode">Signal / 深色</span></div>
+        <div class="scene-grid">
+          <section class="window" aria-label="工具面板">
+            <div class="window-top"><span class="window-title">工具面板</span><button class="icon-btn" aria-label="关闭">×</button></div>
+            <div class="palette-body">
+              <div class="tool-row is-on"><span class="tool-glyph">T</span><span><span class="tool-name">文字工具栏</span><span class="tool-note">选中文本时显示</span></span><button class="toggle is-on" aria-label="已启用"><span></span></button></div>
+              <div class="tool-row is-on"><span class="tool-glyph">□</span><span><span class="tool-name">截图标注</span><span class="tool-note">区域截取与 OCR</span></span><button class="toggle is-on" aria-label="已启用"><span></span></button></div>
+              <div class="tool-row is-on"><span class="tool-glyph">⌁</span><span><span class="tool-name">系统监控</span><span class="tool-note">CPU 与内存状态</span></span><button class="toggle is-on" aria-label="已启用"><span></span></button></div>
+              <div class="tool-row"><span class="tool-glyph">●</span><span><span class="tool-name">屏幕录制</span><span class="tool-note">按需启动</span></span><button class="toggle" aria-label="已关闭"><span></span></button></div>
+            </div>
+          </section>
+
+          <section class="window settings" aria-label="设置窗口">
+            <nav class="settings-nav"><div class="brand">Levitaire</div><button class="nav-item is-active">◈ 常规</button><button class="nav-item">⌘ 快捷键</button><button class="nav-item">◌ 工具</button><button class="nav-item">⌁ AI 服务</button><button class="nav-item">ⓘ 关于</button></nav>
+            <div class="settings-content"><h2>常规</h2><p>控制应用的外观与常驻行为。</p><div class="field"><label>主题</label><div class="field-input"><span id="theme-value">Signal · 深色</span><em>⌄</em></div></div><div class="field"><label>悬浮球位置</label><div class="field-input"><span>右下角</span><em>⌄</em></div></div><div class="config-card"><div class="config-card-title">启动与常驻</div><p>开机时启动，并保留悬浮球入口。</p><button class="primary-btn">保存设置</button></div></div>
+          </section>
+
+          <aside class="right-stack">
+            <section class="window monitor" aria-label="系统监控"><div class="monitor-head"><span>系统监控</span><span class="status">LIVE</span></div><div class="metric"><div class="metric-head"><span>CPU</span><strong>18%</strong></div><div class="bar"><span style="width:18%"></span></div></div><div class="metric"><div class="metric-head"><span>内存</span><strong>6.2 GB</strong></div><div class="bar mem"><span style="width:62%"></span></div></div><div class="metric"><div class="metric-head"><span>网络</span><strong>3.4 MB/s</strong></div><div class="bar net"><span style="width:38%"></span></div></div></section>
+            <section class="window recording" aria-label="录屏控制"><span class="recording-dot"></span><span><span class="recording-time">00:02:18</span><span class="recording-note">1,468 帧</span></span><span class="recording-actions"><button aria-label="暂停">Ⅱ</button><button class="stop" aria-label="停止">■</button></span></section>
+          </aside>
+        </div>
+        <section class="overlay-demo" aria-label="截图覆盖层"><div class="selection"><span class="selection-tag">824 × 462</span></div><div class="capture-toolbar"><button class="is-active" aria-label="矩形">□</button><button aria-label="画笔">✎</button><button aria-label="文字">T</button><button aria-label="复制">⧉</button><button aria-label="保存">↓</button></div></section>
+        <button class="orb" aria-label="打开工具面板">✦</button>
+        <div class="token-strip"><span class="token"><i style="--c:var(--app)"></i>app</span><span class="token"><i style="--c:var(--surface)"></i>surface</span><span class="token"><i style="--c:var(--line)"></i>border</span><span class="token"><i style="--c:var(--accent)"></i>accent</span><span class="token"><i style="--c:var(--success)"></i>success</span><span class="token"><i style="--c:var(--danger)"></i>danger</span></div>
+      </section>
+      <p class="source-note">设计参考：<a href="https://github.com/radix-ui/themes" target="_blank" rel="noreferrer">Radix Themes</a> 的语义层级与状态色、<a href="https://github.com/microsoft/vscode" target="_blank" rel="noreferrer">VS Code</a> 的组件级颜色注册方式，以及 <a href="https://github.com/shadcn-ui/ui" target="_blank" rel="noreferrer">shadcn/ui</a> 的可替换 CSS 变量模型。此页为独立预览，不会改变当前应用。</p>
+    </main>
+    <script>
+      const labels = { signal: "Signal", cloud: "Cloud", studio: "Studio", quartz: "Quartz", moss: "Moss", ember: "Ember", arctic: "Arctic", mono: "Mono", iris: "Iris", dusk: "Dusk" };
+      const modeLabels = { light: "浅色", dark: "深色" };
+      const body = document.body;
+      const update = () => {
+        document.querySelectorAll("[data-scheme]").forEach((item) => item.classList.toggle("is-active", item.dataset.scheme === body.dataset.scheme));
+        document.querySelectorAll("[data-mode]").forEach((item) => item.classList.toggle("is-active", item.dataset.mode === body.dataset.mode));
+        const label = `${labels[body.dataset.scheme]} · ${modeLabels[body.dataset.mode]}`;
+        document.getElementById("theme-value").textContent = label;
+        document.getElementById("scene-mode").textContent = label.replace(" · ", " / ");
+      };
+      document.querySelectorAll(".scheme-choice").forEach((button) => button.addEventListener("click", () => { body.dataset.scheme = button.dataset.scheme; update(); }));
+      document.querySelectorAll(".mode-switch button").forEach((button) => button.addEventListener("click", () => { body.dataset.mode = button.dataset.mode; update(); }));
+      update();
+    </script>
+  </body>
+</html>

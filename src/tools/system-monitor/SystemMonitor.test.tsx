@@ -18,7 +18,7 @@ describe("SystemMonitor theme synchronization", () => {
   });
 
   it("uses the saved theme when the monitor window opens", () => {
-    localStorage.setItem("floatory-theme", "dark");
+    localStorage.setItem("levitaire-theme", "dark");
 
     render(<SystemMonitor />);
 
@@ -41,10 +41,10 @@ describe("SystemMonitor theme synchronization", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    act(() => emitMockEvent("floatory-theme-changed", "dark"));
+    act(() => emitMockEvent("levitaire-theme-changed", "dark"));
 
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
-    expect(localStorage.getItem("floatory-theme")).toBe("dark");
+    expect(localStorage.getItem("levitaire-theme")).toBe("dark");
   });
 
   it("renders aggregate disk read and write rates without disk names", async () => {
@@ -116,10 +116,12 @@ describe("SystemMonitor theme synchronization", () => {
       await Promise.resolve();
     });
 
-    act(() => emitMockEvent("floatory-system-monitor-config-changed", {
-      intervalMs: 1000,
-      displayMode: "mini",
-    }));
+    act(() =>
+      emitMockEvent("levitaire-system-monitor-config-changed", {
+        intervalMs: 1000,
+        displayMode: "mini",
+      }),
+    );
 
     expect(container.querySelector(".monitor-body")).toHaveClass("is-mini");
     expect(mockSetSize).toHaveBeenCalledWith(expect.objectContaining({ width: 300, height: 180 }));
@@ -139,8 +141,8 @@ describe("SystemMonitor theme synchronization", () => {
       await Promise.resolve();
     });
 
-    // 默认 full 模式，按钮 aria-label 应为"迷你模式"
-    const toggleBtn = screen.getByLabelText("迷你模式");
+    // 默认 full 模式，按钮 aria-label 应为动作描述"切换到迷你模式"
+    const toggleBtn = screen.getByLabelText("切换到迷你模式");
     expect(toggleBtn).toBeInTheDocument();
     expect(container.querySelector(".monitor-body")).not.toHaveClass("is-mini");
 
@@ -157,7 +159,7 @@ describe("SystemMonitor theme synchronization", () => {
     );
     // 应手动 emit 事件以触发本窗口 UI 刷新
     expect(mockEmit).toHaveBeenCalledWith(
-      "floatory-system-monitor-config-changed",
+      "levitaire-system-monitor-config-changed",
       expect.objectContaining({ displayMode: "mini" }),
     );
   });
@@ -174,8 +176,7 @@ describe("SystemMonitor theme synchronization", () => {
       await Promise.resolve();
     });
 
-    const toggleBtn = screen.getByLabelText("标准模式");
+    const toggleBtn = screen.getByLabelText("切换到标准模式");
     expect(toggleBtn).toBeInTheDocument();
   });
-
 });

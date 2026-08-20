@@ -1,19 +1,17 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useLayoutEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Icon from "../../components/Icon";
-import AnnotationCanvas, {
-  type AnnotationCanvasHandle,
-} from "./annotate/AnnotationCanvas";
+import AnnotationCanvas, { type AnnotationCanvasHandle } from "./annotate/AnnotationCanvas";
 import AnnotationToolbar from "./annotate/AnnotationToolbar";
 import { useAnnotations } from "./annotate/useAnnotations";
+import { DEFAULT_COLOR, DEFAULT_TOOL, DEFAULT_WIDTH_INDEX, type ToolKind } from "./annotate/types";
 import {
-  DEFAULT_COLOR,
-  DEFAULT_TOOL,
-  DEFAULT_WIDTH_INDEX,
-  type ToolKind,
-} from "./annotate/types";
+  applyThemePreferences,
+  getStoredThemePreferences,
+  subscribeThemePreferences,
+} from "../../styles/themePreferences";
 import "./ScreenshotTool.css";
 
 /** 截图模式：绘制选区 / 选区完成后进入标注 */
@@ -37,6 +35,20 @@ interface PanelPosition {
   top: number;
 }
 
+/** 选区方式：区域拖框 / 窗口识别 */
+type SelectMode = "region" | "window";
+
+/** 窗口信息（后端 enumerate_windows 的返回映射，坐标为虚拟桌面绝对物理像素） */
+interface WindowInfo {
+  hwnd: number;
+  title: string;
+  className: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 const OCR_PANEL_WIDTH = 420;
 const OCR_PANEL_HEIGHT = 300;
 const OCR_PANEL_GAP = 10;
@@ -48,9 +60,10 @@ function initialOcrPanelPosition(selection: Selection): PanelPosition {
   const maxLeft = Math.max(VIEWPORT_PADDING, window.innerWidth - width - VIEWPORT_PADDING);
   const maxTop = Math.max(VIEWPORT_PADDING, window.innerHeight - height - VIEWPORT_PADDING);
   const below = selection.top + selection.height + OCR_PANEL_GAP;
-  const top = below + height <= window.innerHeight - VIEWPORT_PADDING
-    ? below
-    : selection.top - height - OCR_PANEL_GAP;
+  const top =
+    below + height <= window.innerHeight - VIEWPORT_PADDING
+      ? below
+      : selection.top - height - OCR_PANEL_GAP;
 
   return {
     left: Math.max(VIEWPORT_PADDING, Math.min(selection.left, maxLeft)),
@@ -63,6 +76,9 @@ function ScreenshotTool() {
   const [mode, setMode] = useState<Mode>("selecting");
   const modeRef = useRef<Mode>("selecting");
   modeRef.current = mode;
+  const [selectMode, setSelectMode] = useState<SelectMode>("region");
+  const [windows, setWindows] = useState<WindowInfo[]>([]);
+  const [selectedWindow, setSelectedWindow] = useState<WindowInfo | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [image, setImage] = useState<CapturedImage | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -86,6 +102,17 @@ function ScreenshotTool() {
   // 失焦退出防抖计时器：失焦后延迟一小段时间再退出，期间若重新获焦则取消，
   // 兼顾「失焦应退出标注态」与「RDP/远程桌面等环境下 overlay 频繁瞬时失焦」。
   const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useLayoutEffect(() => {
+    applyThemePreferences(getStoredThemePreferences());
+  }, []);
+
+  useEffect(() => {
+    const unlistenTheme = subscribeThemePreferences();
+    return () => {
+      unlistenTheme.then((fn) => fn()).catch(console.error);
+    };
+  }, []);
   // 标注
   const annotations = useAnnotations();
   const clearRef = useRef(annotations.clear);
@@ -114,7 +141,8 @@ function ScreenshotTool() {
         setReady(true);
       }
     };
-    win.scaleFactor()
+    win
+      .scaleFactor()
       .then((s) => {
         scaleRef.current = s;
         scaleReady = true;
@@ -145,6 +173,18 @@ function ScreenshotTool() {
       root.style.overflow = "hidden";
     }
   }, [win, fetchReady]);
+
+  // 窗口识别模式：加载窗口列表；切回区域模式时清理旧状态
+  useEffect(() => {
+    if (selectMode === "window") {
+      invoke<WindowInfo[]>("enumerate_windows")
+        .then((list) => setWindows(Array.isArray(list) ? list : []))
+        .catch(console.error);
+    } else {
+      setWindows([]);
+      setSelectedWindow(null);
+    }
+  }, [selectMode]);
 
   // Esc 取消 + Ctrl+Z/Y 撤销重做（标注态）
   const cancelRef = useRef<() => void>(() => {});
@@ -189,6 +229,9 @@ function ScreenshotTool() {
       genRef.current++;
       setSelection(null);
       setMode("selecting");
+      setSelectMode("region");
+      setWindows([]);
+      setSelectedWindow(null);
       setImage(null);
       setBusy(null);
       setOcrText(null);
@@ -251,6 +294,9 @@ function ScreenshotTool() {
     // 重置组件状态，避免 overlay 复用时残留上次的选区/图片
     setSelection(null);
     setMode("selecting");
+    setSelectMode("region");
+    setWindows([]);
+    setSelectedWindow(null);
     setImage(null);
     setBusy(null);
     setOcrText(null);
@@ -279,7 +325,7 @@ function ScreenshotTool() {
   }, []);
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (mode !== "selecting" || busy || !ready) return;
+    if (mode !== "selecting" || busy || !ready || selectMode !== "region") return;
     const x = snap(e.clientX);
     const y = snap(e.clientY);
     dragStart.current = { x, y };
@@ -350,6 +396,45 @@ function ScreenshotTool() {
     }
   };
 
+  // 窗口识别模式：选中窗口后直接按窗口物理区域截取，无需手动拖框。
+  // enumerate_windows 返回的 left/top 是虚拟桌面绝对物理坐标，与拖框选区
+  // 换算后的 capture_region 入参一致，可原样传入；CSS 坐标仅用于显示选区框。
+  const captureWindow = async (w: WindowInfo) => {
+    if (mode !== "selecting" || busy || !ready) return;
+    const scale = scaleRef.current;
+    const origin = originRef.current;
+    const css: Selection = {
+      left: (w.left - origin.x) / scale,
+      top: (w.top - origin.y) / scale,
+      width: w.width / scale,
+      height: w.height / scale,
+    };
+    setSelectedWindow(w);
+    setSelection(css);
+    setBusy("capture");
+    // 自增代际使前一次未完成的窗口截取失效：快速连点不同窗口时，
+    // 旧 capture_region 返回后被丢弃，保证"最后点击的窗口获胜"
+    // （与 cancel 的 genRef 语义一致，且 selecting 阶段无其他异步依赖它）。
+    genRef.current++;
+    const gen = genRef.current;
+    try {
+      const res = await invoke<{ pngBase64: string; width: number; height: number }>(
+        "capture_region",
+        { left: w.left, top: w.top, width: w.width, height: w.height },
+      );
+      // 若期间已取消（Esc / 窗口隐藏），丢弃结果
+      if (gen !== genRef.current) return;
+      setImage({ base64: res.pngBase64, width: res.width, height: res.height });
+      setMode("annotating");
+    } catch (err) {
+      console.error("capture_region failed:", err);
+      cancel();
+    } finally {
+      if (gen === genRef.current) {
+        setBusy(null);
+      }
+    }
+  };
   // 导出前把标注烧入底图，得到含标注的纯 base64
   const flushAnnotated = useCallback((): string | null => {
     if (!annotateRef.current) return image?.base64 ?? null;
@@ -367,6 +452,12 @@ function ScreenshotTool() {
       cancel();
     } catch (err) {
       console.error(err);
+      // 用户可能在 invoke 期间已退出标注态（cancel 清空了 error），
+      // 此时不再显示错误，避免过期错误残留到下一次截图会话。
+      if (modeRef.current !== "annotating") return;
+      showError(
+        typeof err === "string" ? err : ((err as { message?: string })?.message ?? "复制失败"),
+      );
     } finally {
       setBusy(null);
     }
@@ -389,9 +480,7 @@ function ScreenshotTool() {
     } catch (err) {
       console.error(err);
       showError(
-        typeof err === "string"
-          ? err
-          : (err as { message?: string })?.message ?? "保存失败",
+        typeof err === "string" ? err : ((err as { message?: string })?.message ?? "保存失败"),
       );
     } finally {
       suppressFocusReset.current = false;
@@ -424,7 +513,9 @@ function ScreenshotTool() {
       requestAnimationFrame(() => ocrTextRef.current?.focus());
     } catch (err) {
       console.error("ocr_region failed:", err);
-      showError(typeof err === "string" ? err : (err as { message?: string })?.message ?? "OCR 识别失败");
+      showError(
+        typeof err === "string" ? err : ((err as { message?: string })?.message ?? "OCR 识别失败"),
+      );
     } finally {
       if (gen === genRef.current) {
         setBusy(null);
@@ -515,22 +606,86 @@ function ScreenshotTool() {
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
     >
+      {/* 顶部模式切换栏：区域拖框 / 窗口识别 */}
+      {mode === "selecting" && (
+        <div className="ss-area-tabs" onPointerDown={(e) => e.stopPropagation()}>
+          <button
+            className={`ss-area-tab ${selectMode === "region" ? "active" : ""}`}
+            onClick={() => setSelectMode("region")}
+          >
+            <Icon name="Scissors" size={14} /> 区域
+          </button>
+          <button
+            className={`ss-area-tab ${selectMode === "window" ? "active" : ""}`}
+            onClick={() => setSelectMode("window")}
+          >
+            <Icon name="AppWindow" size={14} /> 窗口
+          </button>
+          <button className="ss-area-cancel" onClick={cancel}>
+            取消
+          </button>
+        </div>
+      )}
+
+      {/* 窗口识别模式：窗口列表，点击后按窗口区域自动框选截取 */}
+      {mode === "selecting" && selectMode === "window" && (
+        <div className="ss-window-list" onPointerDown={(e) => e.stopPropagation()}>
+          {windows.length === 0 ? (
+            <p className="ss-window-empty">未检测到可截图的窗口</p>
+          ) : (
+            windows.map((w) => (
+              <button
+                key={w.hwnd}
+                className={`ss-window-item ${selectedWindow?.hwnd === w.hwnd ? "selected" : ""}`}
+                onClick={() => captureWindow(w)}
+              >
+                <Icon name="AppWindow" size={16} />
+                <div className="ss-window-item-info">
+                  <span className="ss-window-item-title">{w.title}</span>
+                  <span className="ss-window-item-size">
+                    {w.width}×{w.height}
+                  </span>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
       {/* 半透明遮罩：用 4 个 div 框出选区外的区域。尺寸标签仅在 selecting 时显示，
           参照 Snipaste：选区完成后只留工具栏，避免标签与工具栏并存干扰。
           截图瞬间 Rust 侧会临时 hide 整个 overlay 窗口，选区框/遮罩随之从屏幕消失，
           不会被 GDI 截入底图，因此前端无需在此条件渲染上做额外处理。 */}
       {selection && selection.width > 0 && selection.height > 0 && (
         <>
-          <div className="ss-mask" style={{ left: 0, top: 0, width: "100%", height: `${selection.top}px` }} />
-          <div className="ss-mask" style={{ left: 0, top: selection.top + selection.height, width: "100%", bottom: 0 }} />
-          <div className="ss-mask" style={{ left: 0, top: selection.top, width: `${selection.left}px`, height: selection.height }} />
-          <div className="ss-mask" style={{ left: selection.left + selection.width, top: selection.top, right: 0, height: selection.height }} />
+          <div
+            className="ss-mask"
+            style={{ left: 0, top: 0, width: "100%", height: `${selection.top}px` }}
+          />
+          <div
+            className="ss-mask"
+            style={{ left: 0, top: selection.top + selection.height, width: "100%", bottom: 0 }}
+          />
+          <div
+            className="ss-mask"
+            style={{
+              left: 0,
+              top: selection.top,
+              width: `${selection.left}px`,
+              height: selection.height,
+            }}
+          />
+          <div
+            className="ss-mask"
+            style={{
+              left: selection.left + selection.width,
+              top: selection.top,
+              right: 0,
+              height: selection.height,
+            }}
+          />
           <div className="ss-selection-box" style={boxStyle(selection)} />
           {mode === "selecting" && (
-            <div
-              className="ss-size-badge"
-              style={sizeBadgeStyle(selection)}
-            >
+            <div className="ss-size-badge" style={sizeBadgeStyle(selection)}>
               {Math.round(selection.width * (scaleRef.current || 1))} ×{" "}
               {Math.round(selection.height * (scaleRef.current || 1))}
             </div>
@@ -539,7 +694,11 @@ function ScreenshotTool() {
       )}
       {(!selection || (selection.width === 0 && selection.height === 0)) && (
         <div className="ss-hint">
-          {ready ? "拖动鼠标选择截图区域，按 Esc 取消" : "正在准备截图…"}
+          {ready
+            ? selectMode === "region"
+              ? "拖动鼠标选择截图区域，按 Esc 取消"
+              : "点击上方列表选择要截取的窗口，按 Esc 取消"
+            : "正在准备截图…"}
         </div>
       )}
 
@@ -583,11 +742,7 @@ function ScreenshotTool() {
               aria-modal="true"
               aria-label="OCR 结果"
               onPointerDown={(event) => event.stopPropagation()}
-              style={
-                ocrPanelPosition
-                  ? { ...ocrPanelPosition, transform: "none" }
-                  : undefined
-              }
+              style={ocrPanelPosition ? { ...ocrPanelPosition, transform: "none" } : undefined}
             >
               <div
                 className="ss-ocr-result-header"

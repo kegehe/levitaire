@@ -1,7 +1,8 @@
 use crate::config::AiConfig;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// AI 响应结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +18,10 @@ pub struct AiResponse {
 /// AI 客户端封装（内部使用 Mutex 实现线程安全的配置更新）
 pub struct AiService {
     inner: Mutex<AiServiceInner>,
+    /// 流式请求取消标志：request_cancel() 置位，call_stream 每收到一帧数据时检查。
+    /// 置位后立即终止当前流式请求（drop 底层连接），避免用户取消后仍把整段结果
+    /// 发给前端、白耗网络/CPU 与 token（并减小文本继续外传的隐私暴露）。
+    cancel_flag: Arc<AtomicBool>,
 }
 
 /// AI 服务内部实现
@@ -226,7 +231,19 @@ impl AiService {
                 config,
                 http_client: None,
             }),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// 请求取消当前流式调用（前端点「取消」时调用）
+    pub fn request_cancel(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+        crate::utils::logger::log("ai", "cancel requested for streaming call");
+    }
+
+    /// 重置取消标志（发起新的流式调用前调用，避免上一次取消影响新请求）
+    pub fn reset_cancel(&self) {
+        self.cancel_flag.store(false, Ordering::SeqCst);
     }
 
     pub fn update_config(&self, config: AiConfig) -> Result<(), String> {
@@ -436,6 +453,12 @@ impl AiService {
         let mut full_content = String::new();
 
         while let Some(chunk_result) = stream.next().await {
+            // 用户已取消流式调用 → 立即终止并丢弃剩余数据，避免白耗网络/CPU 与 token。
+            // drop response 会断开底层连接；前端取消后已移除监听器，安全性无影响。
+            if self.cancel_flag.load(Ordering::SeqCst) {
+                crate::utils::logger::log("ai", "streaming call cancelled, aborting read");
+                return Err("已取消".to_string());
+            }
             let chunk = chunk_result.map_err(|e| format!("读取流数据失败: {}", e))?;
             buffer.extend_from_slice(&chunk);
 
@@ -671,11 +694,11 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_ai_call() {
-        let api_key = std::env::var("FLOATORY_AI_API_KEY").expect("请设置环境变量 FLOATORY_AI_API_KEY");
-        let base_url = std::env::var("FLOATORY_AI_BASE_URL")
+        let api_key = std::env::var("LEVITAIRE_AI_API_KEY").expect("请设置环境变量 LEVITAIRE_AI_API_KEY");
+        let base_url = std::env::var("LEVITAIRE_AI_BASE_URL")
             .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-        let model = std::env::var("FLOATORY_AI_MODEL")
-            .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+        let model = std::env::var("LEVITAIRE_AI_MODEL")
+            .unwrap_or_else(|_| "claude-sonnet-5".to_string());
 
         let config = AiConfig {
             api_key,

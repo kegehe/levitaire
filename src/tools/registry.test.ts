@@ -1,17 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import {
-  FLOATING_TOOLS,
-  CATEGORY_LABELS,
-  getEnabledTools,
-  setEnabledTools,
-  getAutostartTools,
-  setAutostartTools,
-  toggleAutostart,
-} from "./registry";
+import { FLOATING_TOOLS, CATEGORY_LABELS, getEnabledTools, setEnabledTools } from "./registry";
 
-const STORAGE_KEY = "floatory-tools-enabled";
-const AUTOSTART_KEY = "floatory-tools-autostart";
+const STORAGE_KEY = "levitaire-tools-enabled";
 const LEGACY_KEY = "floatory-toolbar-features";
+const LEGACY_STORAGE_KEYS = ["floatory-tools-enabled", "floast-tools-enabled"];
 
 beforeEach(() => {
   localStorage.clear();
@@ -70,6 +62,30 @@ describe("getEnabledTools", () => {
     expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull();
   });
 
+  it("旧版迁移：Floatory STORAGE_KEY 作为真值迁入当前 key", () => {
+    const stored = ["text-toolbar"]; // 用户曾禁用 screenshot
+    localStorage.setItem(LEGACY_STORAGE_KEYS[0], JSON.stringify(stored));
+    const result = getEnabledTools();
+    expect(result).toEqual(["text-toolbar"]);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual(["text-toolbar"]);
+  });
+
+  it("旧版迁移：Floast STORAGE_KEY 作为真值迁入当前 key", () => {
+    const stored = ["screenshot"];
+    localStorage.setItem(LEGACY_STORAGE_KEYS[1], JSON.stringify(stored));
+    const result = getEnabledTools();
+    expect(result).toEqual(["screenshot"]);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual(["screenshot"]);
+  });
+
+  it("旧版迁移：多代旧 STORAGE_KEY 并存时按顺序优先 floatory", () => {
+    localStorage.setItem(LEGACY_STORAGE_KEYS[1], JSON.stringify(["screenshot"]));
+    localStorage.setItem(LEGACY_STORAGE_KEYS[0], JSON.stringify(["text-toolbar"]));
+    const result = getEnabledTools();
+    // 按迁移顺序 floatory 优先于 floast
+    expect(result).toEqual(["text-toolbar"]);
+  });
+
   it("有 STORAGE_KEY 时返回存储值，不自动补全 defaultEnabled 工具", () => {
     const stored = ["text-toolbar"];
     localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
@@ -79,7 +95,10 @@ describe("getEnabledTools", () => {
   });
 
   it("过滤已移除工具的残留 ID，保留有效项", () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(["text-toolbar", "removed-tool", "screenshot"]));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(["text-toolbar", "removed-tool", "screenshot"]),
+    );
     const result = getEnabledTools();
     expect(result).toContain("text-toolbar");
     expect(result).toContain("screenshot");
@@ -121,60 +140,5 @@ describe("setEnabledTools", () => {
   it("持久化到 localStorage", () => {
     setEnabledTools(["a", "b"]);
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual(["a", "b"]);
-  });
-});
-
-describe("getAutostartTools", () => {
-  it("首次使用：返回空数组", () => {
-    const result = getAutostartTools();
-    expect(result).toEqual([]);
-  });
-
-  it("返回存储的自启动工具 ID 列表", () => {
-    localStorage.setItem(AUTOSTART_KEY, JSON.stringify(["system-monitor", "voice-input"]));
-    const result = getAutostartTools();
-    expect(result.sort()).toEqual(["system-monitor", "voice-input"]);
-  });
-
-  it("过滤已移除工具的残留 ID", () => {
-    localStorage.setItem(AUTOSTART_KEY, JSON.stringify(["system-monitor", "removed-tool"]));
-    const result = getAutostartTools();
-    expect(result).toEqual(["system-monitor"]);
-    expect(result).not.toContain("removed-tool");
-  });
-
-  it("损坏的 JSON 回退到空数组", () => {
-    localStorage.setItem(AUTOSTART_KEY, "not-json{{{");
-    const result = getAutostartTools();
-    expect(result).toEqual([]);
-  });
-});
-
-describe("setAutostartTools", () => {
-  it("持久化到 localStorage", () => {
-    setAutostartTools(["system-monitor"]);
-    expect(JSON.parse(localStorage.getItem(AUTOSTART_KEY)!)).toEqual(["system-monitor"]);
-  });
-});
-
-describe("toggleAutostart", () => {
-  it("添加自启动标记并返回 true", () => {
-    const result = toggleAutostart("system-monitor");
-    expect(result).toBe(true);
-    expect(getAutostartTools()).toContain("system-monitor");
-  });
-
-  it("移除自启动标记并返回 false", () => {
-    setAutostartTools(["system-monitor"]);
-    const result = toggleAutostart("system-monitor");
-    expect(result).toBe(false);
-    expect(getAutostartTools()).not.toContain("system-monitor");
-  });
-
-  it("多次 toggle 交替生效", () => {
-    expect(toggleAutostart("voice-input")).toBe(true);
-    expect(getAutostartTools()).toContain("voice-input");
-    expect(toggleAutostart("voice-input")).toBe(false);
-    expect(getAutostartTools()).not.toContain("voice-input");
   });
 });

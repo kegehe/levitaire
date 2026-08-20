@@ -7,7 +7,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, GetWindowRect, PostThreadMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, HHOOK, MSG, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT,
+    UnhookWindowsHookEx, HHOOK, MSG, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_QUIT,
 };
 
 // ─── 钩子全局状态 ──────────────────────────────────────────────
@@ -15,6 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// 集中管理的钩子全局状态（所有字段均为原子类型，无锁访问）
 struct HookState {
     sender: OnceLock<mpsc::Sender<HookEvent>>,
+    /// app_handle（供 hook_proc 在转盘模式下直接 emit 鼠标移动）
+    app_handle: OnceLock<tauri::AppHandle>,
     hook_ptr: AtomicPtr<std::ffi::c_void>,
     toolbar_hwnd: AtomicPtr<std::ffi::c_void>,
     orb_hwnd: AtomicPtr<std::ffi::c_void>,
@@ -39,12 +42,15 @@ struct HookState {
     last_check_ms: AtomicU64,
     // 钩子线程 ID（用于发送 WM_QUIT 退出消息循环）
     hook_thread_id: AtomicU64,
+    // 转盘模式：emit 鼠标移动时的上次时间戳（毫秒），用于节流
+    quick_input_last_emit_ms: AtomicU64,
 }
 
 const COOLDOWN_MS: u64 = 300;
 
 static STATE: HookState = HookState {
     sender: OnceLock::new(),
+    app_handle: OnceLock::new(),
     hook_ptr: AtomicPtr::new(std::ptr::null_mut()),
     toolbar_hwnd: AtomicPtr::new(std::ptr::null_mut()),
     orb_hwnd: AtomicPtr::new(std::ptr::null_mut()),
@@ -60,11 +66,15 @@ static STATE: HookState = HookState {
     mouse_down_on_toolbar: AtomicBool::new(false),
     last_check_ms: AtomicU64::new(0),
     hook_thread_id: AtomicU64::new(0),
+    quick_input_last_emit_ms: AtomicU64::new(0),
 };
 
 enum HookEvent {
     MouseUp,
     MouseDown { x: i32, y: i32 },
+    /// 转盘模式下鼠标坐标：由钩子线程转发到后台线程再 emit，
+    /// 避免 WH_MOUSE_LL 回调内执行 emit_to 阻塞导致钩子被系统静默卸载。
+    QuickInputMove { x: i32, y: i32 },
 }
 
 // ─── 工具函数 ──────────────────────────────────────────────────
@@ -105,6 +115,7 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
     let (tx, rx) = mpsc::channel::<HookEvent>();
 
     STATE.sender.set(tx).expect("SENDER already initialized");
+    STATE.app_handle.set(app_handle.clone()).ok();
     crate::utils::logger::log("mouse", "SENDER initialized");
 
     // 保存窗口句柄
@@ -128,8 +139,11 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
             match event {
                 HookEvent::MouseUp => {
                     // 截图/录制模式：跳过所有选区检测与工具栏交互，选区由遮罩前端处理
+                    // 转盘守卫与钩子线程一致：仅当转盘激活且实际可见时才跳过选区检测，
+                    // active 卡死而转盘未显示时恢复正常的拖选/工具栏行为。
                     if STATE.screenshot_mode.load(Ordering::SeqCst)
                         || STATE.recording_mode.load(Ordering::SeqCst)
+                        || (crate::quick_input::is_active() && crate::quick_input::wheel_visible())
                     {
                         continue;
                     }
@@ -173,6 +187,24 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
 
                     // 文字工具栏已禁用：以下均为选区检测路径，开关关闭后不再弹出文字工具栏
                     if !STATE.text_toolbar_enabled.load(Ordering::SeqCst) {
+                        continue;
+                    }
+
+                    // 设置窗口内交互 → 跳过选区检测：
+                    // settings 是应用自有窗口（含自绘标题栏拖动），其上的按下→抬起
+                    // 不应触发文字工具栏，否则拖动标题栏松手时会被误判为拖选，
+                    // 进而调用 get_selection()（含模拟 Ctrl+C）干扰设置窗口。
+                    // settings 延迟创建且关闭后仅隐藏（窗口对象仍存在），故需 is_visible 守卫：
+                    // 否则隐藏窗口仍保留最后的屏幕矩形，会让该区域内的正常拖选被误排除。
+                    // 置于 text_toolbar_enabled 检查之后：开关关闭时选区检测本就跳过，无需查询。
+                    let down_in_settings = down_valid
+                        && app.get_webview_window("settings").is_some_and(|win| {
+                            win.is_visible().unwrap_or(false)
+                                && win.hwnd()
+                                    .map(|hwnd| is_point_in_window_rect(hwnd.0, down_x, down_y))
+                                    .unwrap_or(false)
+                        });
+                    if down_in_settings {
                         continue;
                     }
 
@@ -289,6 +321,18 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                         }
                     }
                 }
+                HookEvent::QuickInputMove { x, y } => {
+                    // 从钩子线程收到转盘鼠标坐标，在后台线程 emit：
+                    // 避免 WH_MOUSE_LL 回调内执行 emit_to 在设置窗口创建等场景下阻塞，
+                    // 导致整个鼠标钩子被系统静默卸载。
+                    if let Some(app) = STATE.app_handle.get() {
+                        let _ = app.emit_to(
+                            "quick-input-overlay",
+                            "quick-input-mouse-move",
+                            serde_json::json!({ "x": x, "y": y }),
+                        );
+                    }
+                }
             }
         }
         crate::utils::logger::log("mouse", "Event processing thread exited");
@@ -346,6 +390,11 @@ pub fn stop_hook() {
 /// 供外部模块调用，同步工具栏可见状态
 pub fn set_toolbar_visible(visible: bool) {
     STATE.toolbar_visible.store(visible, Ordering::SeqCst);
+}
+
+/// 供外部模块调用，查询工具栏是否可见
+pub fn is_toolbar_visible() -> bool {
+    STATE.toolbar_visible.load(Ordering::SeqCst)
 }
 
 /// 供外部模块调用，更新工具栏窗口句柄缓存
@@ -410,9 +459,53 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
         if let Some(sender) = STATE.sender.get() {
             match msg {
                 _ if msg == WM_LBUTTONUP => {
+                    // 转盘激活且实际可见时吞掉左键抬起，与 WM_LBUTTONDOWN 对称：
+                    // 确保「点选扇区」的一次点击完全不会落入选区检测/拖选逻辑。
+                    // 可见性守卫：active 卡死而转盘未显示时不吞点击，避免全局左键被吞。
+                    if crate::quick_input::is_active() && crate::quick_input::wheel_visible() {
+                        return LRESULT(1);
+                    }
                     let _ = sender.send(HookEvent::MouseUp);
                 }
+                _ if msg == WM_MOUSEMOVE
+                    && crate::quick_input::is_active()
+                    && crate::quick_input::wheel_visible() =>
+                {
+                    // 转盘模式：节流后把鼠标坐标转发给后台线程 emit，避免 WH_MOUSE_LL
+                    // 回调内执行 emit_to 在设置窗口创建等场景下阻塞导致钩子被系统静默卸载。
+                    // 可见性守卫：active 卡死而转盘未显示时停止无效 emit。
+                    let now = now_ms();
+                    let last = STATE.quick_input_last_emit_ms.load(Ordering::SeqCst);
+                    // 16ms 节流（约 60fps），避免高频 mousemove 淹没后台线程/前端
+                    if now.saturating_sub(last) >= 16 {
+                        STATE.quick_input_last_emit_ms.store(now, Ordering::SeqCst);
+                        let mut cur = POINT::default();
+                        if GetCursorPos(&mut cur).is_ok() {
+                            let _ = sender.send(HookEvent::QuickInputMove { x: cur.x, y: cur.y });
+                        }
+                    }
+                }
                 _ if msg == WM_LBUTTONDOWN => {
+                    // 快速输入转盘激活且实际可见时：任何按下都作为「点击选中扇区」处理。
+                    // 通知前端（自行读高亮项并输入）后吞掉该按下，避免其落入
+                    // 选区检测/拖选逻辑，也不会在转盘区域拖出文字工具栏。
+                    // 可见性守卫：active 卡死而转盘未显示时不吞点击，保证全局鼠标可用。
+                    if crate::quick_input::is_active() && crate::quick_input::wheel_visible() {
+                        // 独立线程执行 confirm_by_click（内含 emit_to）：WH_MOUSE_LL 回调需在超时内返回，
+                        // 避免设置窗口创建等场景下 emit 阻塞导致整个鼠标钩子被系统静默卸载。
+                        if let Some(app) = STATE.app_handle.get() {
+                            let app_clone = app.clone();
+                            std::thread::spawn(move || {
+                                crate::quick_input::confirm_by_click(&app_clone);
+                            });
+                        }
+                        // 清除残留的按下状态，避免随后的 WM_LBUTTONUP 误判为拖选而弹出文字工具栏
+                        STATE.mouse_down_valid.store(false, Ordering::SeqCst);
+                        STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
+                        STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
+                        // 吞掉该按下，不让它穿透到下层窗口
+                        return LRESULT(1);
+                    }
                     // WH_MOUSE_LL 的 lparam 是指向 MSLLHOOKSTRUCT 的指针，
                     // 其首字段 pt: POINT 即真实屏幕坐标
                     let pt = lparam.0 as *const POINT;
@@ -489,5 +582,16 @@ mod tests {
         assert!(has_drag(1, 2)); // 距离 = 3，算拖拽
         assert!(has_drag(6, 0)); // 距离 = 6，算拖拽
         assert!(has_drag(-2, -2)); // 负方向也算
+    }
+
+    #[test]
+    fn test_toolbar_visible_getter_roundtrip() {
+        // 保存现场，测试后恢复，避免污染共享的全局状态
+        let original = is_toolbar_visible();
+        set_toolbar_visible(false);
+        assert!(!is_toolbar_visible());
+        set_toolbar_visible(true);
+        assert!(is_toolbar_visible());
+        set_toolbar_visible(original);
     }
 }

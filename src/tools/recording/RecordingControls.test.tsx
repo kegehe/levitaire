@@ -23,14 +23,17 @@ describe("RecordingControls", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    const syncsBeforeStart = mockInvoke.mock.calls.filter(([command]) => command === "get_recording_state").length;
+    const syncsBeforeStart = mockInvoke.mock.calls.filter(
+      ([command]) => command === "get_recording_state",
+    ).length;
 
     state = { paused: false, elapsedMs: 0, frameCount: 0 };
     act(() => emitMockEvent("recording-controls-started", undefined));
 
     await waitFor(() => {
-      expect(mockInvoke.mock.calls.filter(([command]) => command === "get_recording_state").length)
-        .toBeGreaterThan(syncsBeforeStart);
+      expect(
+        mockInvoke.mock.calls.filter(([command]) => command === "get_recording_state").length,
+      ).toBeGreaterThan(syncsBeforeStart);
       expect(screen.getByTitle("暂停录制")).toBeTruthy();
       expect(screen.getByText("0 帧")).toBeTruthy();
     });
@@ -52,7 +55,9 @@ describe("RecordingControls", () => {
     fireEvent.click(pause);
 
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("pause_recording"));
-    expect(mockInvoke.mock.calls.filter(([command]) => command === "pause_recording")).toHaveLength(1);
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "pause_recording")).toHaveLength(
+      1,
+    );
   });
 
   it("cancels and closes the overlay through one native command", async () => {

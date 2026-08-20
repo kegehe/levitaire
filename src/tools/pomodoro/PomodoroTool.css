@@ -1,0 +1,285 @@
+.pomo-container {
+  width: 100%;
+  height: 100%;
+}
+
+.pomo-body {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  background: var(--color-bg-elevated);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px;
+  box-sizing: border-box;
+  font-size: 12px;
+  /* 允许 tooltip 悬浮超出本容器（窗口边缘由全局 body overflow:hidden 裁切） */
+  overflow: visible;
+}
+
+.pomo-titlebar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.pomo-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pomo-icon-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.pomo-icon-btn:hover {
+  background: var(--button-hover-bg);
+  color: var(--color-fg);
+}
+
+.pomo-icon-btn:focus-visible,
+.pomo-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* CSS-only tooltip — mirrors SystemMonitor.css 惯例 */
+.pomo-icon-btn[data-tooltip]::after,
+.pomo-btn[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--tooltip-text);
+  background: var(--tooltip-bg);
+  border: 1px solid var(--tooltip-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 1000;
+}
+
+.pomo-icon-btn[data-tooltip]:hover::after,
+.pomo-icon-btn[data-tooltip]:focus-visible::after,
+.pomo-btn[data-tooltip]:hover::after,
+.pomo-btn[data-tooltip]:focus-visible::after {
+  opacity: 1;
+}
+
+/* 标题栏按钮靠窗口右侧，tooltip 右对齐避免溢出右边缘（同 SystemMonitor.css） */
+.pomo-titlebar .pomo-icon-btn[data-tooltip]::after {
+  left: auto;
+  right: 4px;
+  transform: none;
+}
+
+/* 控制区按钮（重置/跳过）tooltip 向上悬浮，落在进度环下方空白区，
+   避免超出窗口底部被裁切 */
+.pomo-controls .pomo-btn[data-tooltip]::after {
+  top: auto;
+  bottom: calc(100% + 5px);
+  transform: translateX(-50%);
+}
+
+.pomo-ring-wrap {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  flex-shrink: 0;
+}
+
+.pomo-ring {
+  width: 120px;
+  height: 120px;
+  display: block;
+  transform: rotate(-90deg);
+}
+
+.pomo-ring-bg {
+  fill: none;
+  stroke: var(--color-bg-sunken);
+  stroke-width: 8;
+}
+
+.pomo-ring-fg {
+  fill: none;
+  stroke-width: 8;
+  stroke-linecap: round;
+  transition:
+    stroke-dashoffset 0.5s linear,
+    stroke 0.3s ease;
+}
+
+.pomo-ring-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  pointer-events: none;
+}
+
+.pomo-time {
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.pomo-stage-label {
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+
+.pomo-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.pomo-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-sunken);
+  color: var(--color-fg);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.pomo-btn:hover {
+  background: var(--button-hover-bg);
+}
+
+.pomo-btn-primary {
+  min-width: 96px;
+  border: none;
+  background: var(--color-accent);
+  color: var(--color-fg-on-accent);
+}
+
+.pomo-btn-primary:hover {
+  filter: brightness(1.05);
+}
+
+.pomo-btn[data-tooltip] {
+  padding: 0 10px;
+}
+
+.pomo-rounds {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.pomo-round-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--color-bg-sunken);
+  border: 1px solid var(--color-border);
+}
+
+.pomo-round-dot.is-done {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.pomo-rounds-text {
+  margin-left: 2px;
+  font-size: 10px;
+  color: var(--color-fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+/* mini 模式：进度环 + 时间 + 底部一行迷你控制按钮（重置/开始暂停/跳过） */
+.pomo-body.is-mini {
+  gap: 6px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.pomo-mini-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* 基于 .pomo-icon-btn 放大为迷你控制按钮 */
+.pomo-mini-ctrl {
+  width: 28px;
+  height: 26px;
+  border-radius: 6px;
+}
+
+.pomo-mini-toggle {
+  width: 30px;
+}
+
+/* mini 控制区按钮 tooltip 向上悬浮，避免超出窗口底部被裁切 */
+.pomo-mini-controls .pomo-icon-btn[data-tooltip]::after {
+  top: auto;
+  bottom: calc(100% + 5px);
+  transform: translateX(-50%);
+}
+
+.is-mini .pomo-ring-wrap {
+  width: 100px;
+  height: 100px;
+}
+
+.is-mini .pomo-ring {
+  width: 100px;
+  height: 100px;
+}
+
+.is-mini .pomo-time {
+  font-size: 22px;
+}

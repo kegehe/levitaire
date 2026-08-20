@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -20,21 +21,55 @@ fn default_api_type() -> String {
     "anthropic".to_string()
 }
 
+/// Appearance preferences shared by every webview window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThemePreferences {
+    pub theme: String,
+    pub accent: String,
+    pub scheme: String,
+}
+
+fn default_theme() -> String {
+    "light".to_string()
+}
+
+fn default_theme_accent() -> String {
+    "blue".to_string()
+}
+
+fn default_theme_scheme() -> String {
+    "cloud".to_string()
+}
+
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
             base_url: String::from("https://api.anthropic.com"),
-            model: String::from("claude-sonnet-4-20250514"),
+            model: String::from("claude-sonnet-5"),
             api_type: default_api_type(),
         }
     }
+}
+
+/// 悬浮窗位置（物理像素坐标），用于位置记忆
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowPosition {
+    pub x: i32,
+    pub y: i32,
 }
 
 /// 应用全局配置（与 config.json 文件结构对应）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub ai: AiConfig,
+    /// Stored outside webview localStorage so newly opened tool windows share the same appearance.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_theme_accent")]
+    pub theme_accent: String,
+    #[serde(default = "default_theme_scheme")]
+    pub theme_scheme: String,
     /// DPAPI 加密后的 API Key（十六进制编码），与 ai.api_key 互斥存储
     /// 加载时自动解密填入 ai.api_key；保存时自动加密填入此字段，清空 ai.api_key
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +86,9 @@ pub struct AppConfig {
     /// 悬浮工具栏启用的功能 ID 列表（如 ["copy","search",...]）。空表示使用默认全量
     #[serde(default)]
     pub toolbar_features: Vec<String>,
+    /// 文字工具栏「搜索」使用的搜索引擎 ID（如 "bing"/"google"/"baidu"）。空串表示使用默认 Bing
+    #[serde(default)]
+    pub search_engine: String,
     /// 去重粒度配置（JSON 字符串，前端解析）。空串表示使用默认值
     #[serde(default)]
     pub dedup_mode: String,
@@ -67,22 +105,6 @@ pub struct AppConfig {
     /// TTS 朗读配置（JSON 字符串，前端解析）：{rate,voiceId,volume}。空串表示使用默认值
     #[serde(default)]
     pub tts_config: String,
-    /// 语音输入工具是否启用（仅启用时热键才触发）。默认 false
-    #[serde(default)]
-    pub stt_enabled: bool,
-    /// 语音输入全局快捷键，如 "Ctrl+Shift+S"；空串表示不启用
-    #[serde(default)]
-    pub stt_hotkey: String,
-    /// 语音输入配置（JSON 字符串，前端解析）：{provider,baseUrl,model,autoPaste}。空串表示使用默认值。
-    /// 注意：apiKey 不存此字段，单独用 stt_api_key_encrypted 加密存储
-    #[serde(default)]
-    pub stt_config: String,
-    /// STT API Key 的 DPAPI 加密存储（十六进制编码）。加载时解密供运行时使用，保存时清空白文
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stt_api_key_encrypted: Option<String>,
-    /// STT API Key 明文（仅运行时使用，保存时加密到 stt_api_key_encrypted 并清空本字段）
-    #[serde(default, skip_serializing)]
-    pub stt_api_key: String,
     /// 系统监控工具是否启用（仅启用时 palette 卡片可激活）。默认 false
     #[serde(default = "default_system_monitor_enabled")]
     pub system_monitor_enabled: bool,
@@ -92,6 +114,13 @@ pub struct AppConfig {
     /// 系统监控配置（JSON 字符串，前端解析）：如 {"intervalMs":1000}。空串表示使用默认值
     #[serde(default)]
     pub system_monitor_config: String,
+    /// 番茄钟工具是否启用（仅启用时 palette 卡片可激活）。默认 false
+    #[serde(default = "default_pomodoro_enabled")]
+    pub pomodoro_enabled: bool,
+    /// 番茄钟配置（JSON 字符串，前端解析）：如 {"workMinutes":25,"roundsBeforeLongBreak":4}。
+    /// 空串表示使用默认值
+    #[serde(default)]
+    pub pomodoro_config: String,
     /// 录屏工具是否启用（仅启用时热键才触发）。默认 false
     #[serde(default)]
     pub recording_enabled: bool,
@@ -108,9 +137,42 @@ pub struct AppConfig {
     /// 截图文件保存路径（目录）。空串表示未设置，每次保存时弹出对话框选择位置
     #[serde(default)]
     pub screenshot_save_path: String,
+    /// OCR 识别引擎偏好："windows"（Windows.Media.Ocr）或 "paddle"（PaddleOCR-ONNX）。
+    /// 空串表示未设置，启动时按默认策略自动选择（Windows 平台优先 Windows OCR）
+    #[serde(default)]
+    pub ocr_engine: String,
     /// 自启动工具 ID 列表（应用启动时自动打开窗口的工具，如 ["system-monitor"]）
     #[serde(default)]
     pub tools_autostart: Vec<String>,
+    /// 悬浮窗位置记忆（窗口 id → 物理坐标），如 "orb"、"monitor-overlay"、"pomodoro-overlay"。
+    /// 空 map 表示尚未记忆任何位置，各窗口回退到默认定位
+    #[serde(default)]
+    pub window_positions: HashMap<String, WindowPosition>,
+    /// 快速输入转盘工具是否启用（仅启用时触发键才唤起转盘）。默认 false
+    #[serde(default = "default_quick_input_enabled")]
+    pub quick_input_enabled: bool,
+    /// 快速输入转盘触发键名（如 "CapsLock"、"F8"）。空串表示默认 CapsLock
+    #[serde(default = "default_quick_input_trigger_key")]
+    pub quick_input_trigger_key: String,
+    /// 快速输入转盘触发模式："click" = 单击切换（再点击触发键关闭，鼠标点击扇区选中）；
+    /// "hold" = 按住唤起（松开触发键即按当前高亮扇区选中）。默认 click
+    #[serde(default = "default_quick_input_mode")]
+    pub quick_input_mode: String,
+    /// 快速输入转盘预设提示词（JSON 字符串，前端解析）：[{"label":"","text":""}]。空串表示无预设
+    #[serde(default)]
+    pub quick_input_snippets: String,
+}
+
+fn default_quick_input_enabled() -> bool {
+    false
+}
+
+fn default_quick_input_trigger_key() -> String {
+    "CapsLock".to_string()
+}
+
+fn default_quick_input_mode() -> String {
+    "click".to_string()
 }
 
 fn default_screenshot_enabled() -> bool {
@@ -129,34 +191,45 @@ fn default_system_monitor_interval_ms() -> u64 {
     1000
 }
 
+fn default_pomodoro_enabled() -> bool {
+    false
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             ai: AiConfig::default(),
+            theme: default_theme(),
+            theme_accent: default_theme_accent(),
+            theme_scheme: default_theme_scheme(),
             api_key_encrypted: None,
             screenshot_hotkey: String::new(),
             screenshot_enabled: default_screenshot_enabled(),
             text_toolbar_enabled: default_text_toolbar_enabled(),
             toolbar_features: Vec::new(),
+            search_engine: String::new(),
             dedup_mode: String::new(),
             md5_length: String::new(),
             numbering_style: String::new(),
             clear_options: Vec::new(),
             tts_config: String::new(),
-            stt_enabled: false,
-            stt_hotkey: String::new(),
-            stt_config: String::new(),
-            stt_api_key_encrypted: None,
-            stt_api_key: String::new(),
             system_monitor_enabled: default_system_monitor_enabled(),
             system_monitor_interval_ms: default_system_monitor_interval_ms(),
             system_monitor_config: String::new(),
+            pomodoro_enabled: default_pomodoro_enabled(),
+            pomodoro_config: String::new(),
             recording_enabled: false,
             recording_hotkey: String::new(),
             recording_config: String::new(),
             recording_save_path: String::new(),
             screenshot_save_path: String::new(),
+            ocr_engine: String::new(),
             tools_autostart: Vec::new(),
+            window_positions: HashMap::new(),
+            quick_input_enabled: default_quick_input_enabled(),
+            quick_input_trigger_key: default_quick_input_trigger_key(),
+            quick_input_mode: default_quick_input_mode(),
+            quick_input_snippets: String::new(),
         }
     }
 }
@@ -167,10 +240,9 @@ pub struct StartupConfig {
     pub screenshot_hotkey: String,
     pub screenshot_enabled: bool,
     pub text_toolbar_enabled: bool,
-    pub stt_hotkey: String,
-    pub stt_enabled: bool,
     pub recording_hotkey: String,
     pub recording_enabled: bool,
+    pub ocr_engine: String,
 }
 
 /// 配置管理器（线程安全）
@@ -218,17 +290,16 @@ impl ConfigManager {
             screenshot_hotkey: c.screenshot_hotkey.clone(),
             screenshot_enabled: c.screenshot_enabled,
             text_toolbar_enabled: c.text_toolbar_enabled,
-            stt_hotkey: c.stt_hotkey.clone(),
-            stt_enabled: c.stt_enabled,
             recording_hotkey: c.recording_hotkey.clone(),
             recording_enabled: c.recording_enabled,
+            ocr_engine: c.ocr_engine.clone(),
         })
     }
 
     /// 获取配置文件路径
     fn get_config_path() -> PathBuf {
         let data_dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        let app_dir = data_dir.join("floatory");
+        let app_dir = data_dir.join("levitaire");
         // 确保目录存在
         let _ = fs::create_dir_all(&app_dir);
         app_dir.join("config.json")
@@ -257,29 +328,6 @@ impl ConfigManager {
                                     crate::utils::logger::log(
                                         "config",
                                         &format!("解密 API Key 失败: {}", e),
-                                    );
-                                }
-                            }
-                        }
-                        // 解密 STT API Key
-                        if let Some(ref encrypted_hex) = config.stt_api_key_encrypted {
-                            match crate::utils::crypto::from_hex(encrypted_hex)
-                                .and_then(|bytes| crate::utils::crypto::decrypt(&bytes))
-                                .and_then(|decrypted| {
-                                    String::from_utf8(decrypted)
-                                        .map_err(|e| format!("UTF-8 解码失败: {}", e))
-                                }) {
-                                Ok(key) => {
-                                    config.stt_api_key = key;
-                                    crate::utils::logger::log(
-                                        "config",
-                                        "已从加密字段解密 STT API Key",
-                                    );
-                                }
-                                Err(e) => {
-                                    crate::utils::logger::log(
-                                        "config",
-                                        &format!("解密 STT API Key 失败: {}", e),
                                     );
                                 }
                             }
@@ -335,20 +383,6 @@ impl ConfigManager {
             config_to_save.ai.api_key = String::new();
         }
 
-        // STT API Key 加密存储（同 ai.api_key 模式）
-        if config_to_save.stt_api_key.is_empty() {
-            config_to_save.stt_api_key_encrypted = None;
-        } else {
-            let encrypted = crate::utils::crypto::encrypt(config_to_save.stt_api_key.as_bytes())
-                .map_err(|e| {
-                    crate::utils::logger::log("config", &format!("STT API Key 加密失败: {}", e));
-                    format!("STT API Key 加密失败，配置未保存: {}", e)
-                })?;
-            config_to_save.stt_api_key_encrypted = Some(crate::utils::crypto::to_hex(&encrypted));
-            crate::utils::logger::log("config", "STT API Key 已加密存储");
-            config_to_save.stt_api_key = String::new();
-        }
-
         let content = serde_json::to_string_pretty(&config_to_save)
             .map_err(|e| format!("序列化配置失败: {}", e))?;
         let temp_path = self
@@ -381,6 +415,77 @@ impl ConfigManager {
             config.ai = new_ai_config;
         }
         self.save_config()
+    }
+
+    pub fn get_theme_preferences(&self) -> Result<ThemePreferences, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| ThemePreferences {
+                theme: c.theme.clone(),
+                accent: c.theme_accent.clone(),
+                scheme: c.theme_scheme.clone(),
+            })
+    }
+
+    pub fn update_theme_preferences(&self, preferences: ThemePreferences) -> Result<(), String> {
+        if preferences.theme != "light" && preferences.theme != "dark" {
+            return Err("主题必须是 light 或 dark".to_string());
+        }
+        if !matches!(
+            preferences.accent.as_str(),
+            "blue" | "cyan" | "teal" | "green" | "indigo" | "violet"
+        ) {
+            return Err("不支持的主题色".to_string());
+        }
+        if !matches!(
+            preferences.scheme.as_str(),
+            "signal"
+                | "cloud"
+                | "studio"
+                | "quartz"
+                | "moss"
+                | "ember"
+                | "arctic"
+                | "mono"
+                | "iris"
+                | "dusk"
+        ) {
+            return Err("不支持的界面风格".to_string());
+        }
+        let requested = preferences.clone();
+        let previous = {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            let previous = ThemePreferences {
+                theme: config.theme.clone(),
+                accent: config.theme_accent.clone(),
+                scheme: config.theme_scheme.clone(),
+            };
+            config.theme = preferences.theme;
+            config.theme_accent = preferences.accent;
+            config.theme_scheme = preferences.scheme;
+            previous
+        };
+        if let Err(error) = self.save_config() {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            // Do not overwrite a newer preference update that raced this failed write.
+            if config.theme == requested.theme
+                && config.theme_accent == requested.accent
+                && config.theme_scheme == requested.scheme
+            {
+                config.theme = previous.theme;
+                config.theme_accent = previous.accent;
+                config.theme_scheme = previous.scheme;
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// 获取截图快捷键（空串表示未设置）
@@ -459,6 +564,26 @@ impl ConfigManager {
                 .lock()
                 .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.toolbar_features = features;
+        }
+        self.save_config()
+    }
+
+    /// 获取搜索引擎配置（空串表示未设置，前端取默认 Bing）
+    pub fn get_search_engine(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.search_engine.clone())
+    }
+
+    /// 更新搜索引擎配置并持久化
+    pub fn update_search_engine(&self, engine: String) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.search_engine = engine;
         }
         self.save_config()
     }
@@ -563,86 +688,6 @@ impl ConfigManager {
         self.save_config()
     }
 
-    /// 获取语音输入工具启用状态
-    pub fn get_stt_enabled(&self) -> Result<bool, String> {
-        self.config
-            .lock()
-            .map_err(|e| format!("获取配置锁失败: {}", e))
-            .map(|c| c.stt_enabled)
-    }
-
-    /// 更新语音输入工具启用状态并持久化
-    pub fn update_stt_enabled(&self, enabled: bool) -> Result<(), String> {
-        {
-            let mut config = self
-                .config
-                .lock()
-                .map_err(|e| format!("获取配置锁失败: {}", e))?;
-            config.stt_enabled = enabled;
-        }
-        self.save_config()
-    }
-
-    /// 获取语音输入快捷键（空串表示未设置）
-    pub fn get_stt_hotkey(&self) -> Result<String, String> {
-        self.config
-            .lock()
-            .map_err(|e| format!("获取配置锁失败: {}", e))
-            .map(|c| c.stt_hotkey.clone())
-    }
-
-    /// 更新语音输入快捷键并持久化
-    pub fn update_stt_hotkey(&self, hotkey: String) -> Result<(), String> {
-        {
-            let mut config = self
-                .config
-                .lock()
-                .map_err(|e| format!("获取配置锁失败: {}", e))?;
-            config.stt_hotkey = hotkey;
-        }
-        self.save_config()
-    }
-
-    /// 获取语音输入配置（JSON 字符串，空串表示未设置，前端取默认值）
-    pub fn get_stt_config(&self) -> Result<String, String> {
-        self.config
-            .lock()
-            .map_err(|e| format!("获取配置锁失败: {}", e))
-            .map(|c| c.stt_config.clone())
-    }
-
-    /// 更新语音输入配置并持久化
-    pub fn update_stt_config(&self, stt_config: String) -> Result<(), String> {
-        {
-            let mut config = self
-                .config
-                .lock()
-                .map_err(|e| format!("获取配置锁失败: {}", e))?;
-            config.stt_config = stt_config;
-        }
-        self.save_config()
-    }
-
-    /// 获取 STT API Key 明文（运行时使用，从加密字段解密）
-    pub fn get_stt_api_key(&self) -> Result<String, String> {
-        self.config
-            .lock()
-            .map_err(|e| format!("获取配置锁失败: {}", e))
-            .map(|c| c.stt_api_key.clone())
-    }
-
-    /// 更新 STT API Key（加密存储）。空串则清除加密字段
-    pub fn update_stt_api_key(&self, api_key: String) -> Result<(), String> {
-        {
-            let mut config = self
-                .config
-                .lock()
-                .map_err(|e| format!("获取配置锁失败: {}", e))?;
-            config.stt_api_key = api_key;
-        }
-        self.save_config()
-    }
-
     /// 获取系统监控工具启用状态
     pub fn get_system_monitor_enabled(&self) -> Result<bool, String> {
         self.config
@@ -699,6 +744,46 @@ impl ConfigManager {
                 .lock()
                 .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config_lock.system_monitor_config = config;
+        }
+        self.save_config()
+    }
+
+    /// 获取番茄钟工具启用状态
+    pub fn get_pomodoro_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.pomodoro_enabled)
+    }
+
+    /// 更新番茄钟工具启用状态并持久化
+    pub fn update_pomodoro_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.pomodoro_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    /// 获取番茄钟配置（JSON 字符串，空串表示未设置，前端取默认值）
+    pub fn get_pomodoro_config(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.pomodoro_config.clone())
+    }
+
+    /// 更新番茄钟配置并持久化
+    pub fn update_pomodoro_config(&self, config: String) -> Result<(), String> {
+        {
+            let mut config_lock = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config_lock.pomodoro_config = config;
         }
         self.save_config()
     }
@@ -803,6 +888,18 @@ impl ConfigManager {
         self.save_config()
     }
 
+    /// 更新 OCR 识别引擎偏好并持久化
+    pub fn update_ocr_engine(&self, engine: String) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.ocr_engine = engine;
+        }
+        self.save_config()
+    }
+
     /// 获取自启动工具 ID 列表
     pub fn get_tools_autostart(&self) -> Result<Vec<String>, String> {
         self.config
@@ -822,12 +919,124 @@ impl ConfigManager {
         }
         self.save_config()
     }
+
+    /// 获取指定悬浮窗的记忆位置（None 表示尚未记忆）
+    pub fn get_window_position(&self, window_id: &str) -> Result<Option<WindowPosition>, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.window_positions.get(window_id).copied())
+    }
+
+    /// 记忆指定悬浮窗位置并持久化
+    pub fn set_window_position(&self, window_id: &str, pos: WindowPosition) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.window_positions.insert(window_id.to_string(), pos);
+        }
+        self.save_config()
+    }
+
+    /// 清除指定悬浮窗的记忆位置并持久化，使其回退到默认定位
+    pub fn reset_window_position(&self, window_id: &str) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.window_positions.remove(window_id);
+        }
+        self.save_config()
+    }
+
+    /// 获取快速输入转盘工具启用状态
+    pub fn get_quick_input_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_enabled)
+    }
+
+    /// 更新快速输入转盘工具启用状态并持久化
+    pub fn update_quick_input_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    /// 获取快速输入转盘触发键名（空串表示默认 CapsLock）
+    pub fn get_quick_input_trigger_key(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_trigger_key.clone())
+    }
+
+    /// 更新快速输入转盘触发键名并持久化
+    pub fn update_quick_input_trigger_key(&self, key: String) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_trigger_key = key;
+        }
+        self.save_config()
+    }
+
+    /// 获取快速输入转盘触发模式（"click" = 单击切换，"hold" = 按住唤起）
+    pub fn get_quick_input_mode(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_mode.clone())
+    }
+
+    /// 更新快速输入转盘触发模式并持久化
+    pub fn update_quick_input_mode(&self, mode: String) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_mode = mode;
+        }
+        self.save_config()
+    }
+
+    /// 获取快速输入转盘预设提示词（JSON 字符串，空串表示无预设）
+    pub fn get_quick_input_snippets(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_snippets.clone())
+    }
+
+    /// 更新快速输入转盘预设提示词并持久化
+    pub fn update_quick_input_snippets(&self, snippets: String) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_snippets = snippets;
+        }
+        self.save_config()
+    }
 }
 
 // ─── 开机自启动（Windows 注册表） ────────────────────────────────
 
 const REG_RUN_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const REG_VALUE_NAME_STR: &str = "FloatoryService";
+const REG_VALUE_NAME_STR: &str = "LevitaireService";
 
 /// 获取当前可执行文件路径（UTF-16）
 fn get_exe_path_wide() -> Result<Vec<u16>, String> {
@@ -836,12 +1045,25 @@ fn get_exe_path_wide() -> Result<Vec<u16>, String> {
     if len == 0 {
         return Err("获取可执行文件路径失败".to_string());
     }
+    // 返回值等于缓冲容量说明路径被截断，直接报错避免写入不完整路径
+    if len as usize >= buf.len() {
+        return Err("可执行文件路径过长，可能被截断".to_string());
+    }
     Ok(buf[..len as usize].to_vec())
 }
 
 /// 将字符串转为 PCWSTR（含 null 终止符）
 fn to_pcwstr(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 给 exe 路径两端加双引号（UTF-16），避免路径含空格时注册表 Run 键无法启动
+fn quote_exe_path_wide(exe_path: &[u16]) -> Vec<u16> {
+    let mut quoted = Vec::with_capacity(exe_path.len() + 2);
+    quoted.push(b'"' as u16);
+    quoted.extend_from_slice(exe_path);
+    quoted.push(b'"' as u16);
+    quoted
 }
 
 /// 查询开机自启动状态
@@ -862,7 +1084,8 @@ pub fn get_auto_start() -> bool {
         }
 
         let mut data_type = REG_VALUE_TYPE(0);
-        let mut data_buf = [0u8; 1040];
+        // 缓冲需容纳加双引号后的路径：最长 exe 路径(520 字符) + 2 个引号，取 2048 字节留足余量
+        let mut data_buf = [0u8; 2048];
         let mut data_size = data_buf.len() as u32;
 
         let result = RegQueryValueExW(
@@ -897,9 +1120,13 @@ pub fn set_auto_start(enable: bool) -> Result<(), String> {
 
         if enable {
             let exe_path = get_exe_path_wide()?;
+            // 双引号包裹完整路径，避免安装目录含空格时注册表 Run 键启动失败
+            let quoted_path = quote_exe_path_wide(&exe_path);
             // REG_SZ 数据：UTF-16 含 null 终止符，字节切片
-            let data =
-                std::slice::from_raw_parts(exe_path.as_ptr() as *const u8, exe_path.len() * 2);
+            let data = std::slice::from_raw_parts(
+                quoted_path.as_ptr() as *const u8,
+                quoted_path.len() * 2,
+            );
             let result = RegSetValueExW(
                 hkey,
                 windows::core::PCWSTR(value_name.as_ptr()),
@@ -932,11 +1159,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_quote_exe_path_wide() {
+        // 含空格路径（如 Program Files）需被双引号包裹
+        let path: Vec<u16> = "C:\\Program Files\\Levitaire\\levitaire.exe"
+            .encode_utf16()
+            .collect();
+        let quoted = quote_exe_path_wide(&path);
+        let quoted_str = String::from_utf16(&quoted).unwrap();
+        assert_eq!(quoted_str, "\"C:\\Program Files\\Levitaire\\levitaire.exe\"");
+        assert_eq!(quoted.first(), Some(&(b'"' as u16)));
+        assert_eq!(quoted.last(), Some(&(b'"' as u16)));
+        assert_eq!(quoted.len(), path.len() + 2);
+
+        // 无空格路径同样包裹，行为一致
+        let plain: Vec<u16> = "C:\\Levitaire\\levitaire.exe".encode_utf16().collect();
+        let quoted_plain = quote_exe_path_wide(&plain);
+        assert_eq!(
+            String::from_utf16(&quoted_plain).unwrap(),
+            "\"C:\\Levitaire\\levitaire.exe\""
+        );
+
+        // 空路径仅剩两个引号
+        let empty: Vec<u16> = Vec::new();
+        assert_eq!(
+            String::from_utf16(&quote_exe_path_wide(&empty)).unwrap(),
+            "\"\""
+        );
+    }
+
+    #[test]
     fn test_ai_config_default() {
         let config = AiConfig::default();
         assert!(config.api_key.is_empty());
         assert_eq!(config.base_url, "https://api.anthropic.com");
-        assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.model, "claude-sonnet-5");
         assert_eq!(config.api_type, "anthropic");
     }
 
@@ -946,8 +1202,8 @@ mod tests {
         assert!(config.screenshot_enabled);
         assert!(config.text_toolbar_enabled);
         assert_eq!(config.system_monitor_interval_ms, 1000);
-        assert!(!config.stt_enabled);
         assert!(!config.system_monitor_enabled);
+        assert!(!config.pomodoro_enabled);
         assert!(config.tools_autostart.is_empty());
     }
 
@@ -1000,7 +1256,7 @@ mod tests {
     /// 使用临时目录，不影响真实配置文件
     #[test]
     fn test_config_manager_save_load_encrypted() {
-        let tmp = std::env::temp_dir().join(format!("floatory_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("levitaire_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1044,7 +1300,7 @@ mod tests {
     /// 测试清空 API Key 时加密字段也被清除
     #[test]
     fn test_config_manager_clear_key_removes_encrypted() {
-        let tmp = std::env::temp_dir().join(format!("floatory_test_clear_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("levitaire_test_clear_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1106,7 +1362,7 @@ mod tests {
     /// 测试 ConfigManager 持久化 md5_length 的保存与加载
     #[test]
     fn test_config_manager_md5_length_save_load() {
-        let tmp = std::env::temp_dir().join(format!("floatory_test_md5_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("levitaire_test_md5_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1155,7 +1411,7 @@ mod tests {
     #[test]
     fn test_config_manager_numbering_style_save_load() {
         let tmp =
-            std::env::temp_dir().join(format!("floatory_test_numbering_{}", std::process::id()));
+            std::env::temp_dir().join(format!("levitaire_test_numbering_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1208,7 +1464,7 @@ mod tests {
     #[test]
     fn test_config_manager_clear_options_save_load() {
         let tmp =
-            std::env::temp_dir().join(format!("floatory_test_clearopts_{}", std::process::id()));
+            std::env::temp_dir().join(format!("levitaire_test_clearopts_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1230,8 +1486,7 @@ mod tests {
 
     /// 测试 tts_config 字段默认值与 serde 往返
     #[test]
-    fn test_tts_config_default_and_roundtrip() {
-        // 默认值为空串（前端取默认配置）
+    fn test_tts_config_default_and_roundtrip() {        // 默认值为空串（前端取默认配置）
         let config = AppConfig::default();
         assert_eq!(config.tts_config, "");
 
@@ -1260,7 +1515,7 @@ mod tests {
     /// 测试 ConfigManager 持久化 tts_config 的保存与加载
     #[test]
     fn test_config_manager_tts_config_save_load() {
-        let tmp = std::env::temp_dir().join(format!("floatory_test_tts_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("levitaire_test_tts_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1280,50 +1535,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 测试 stt 字段默认值与 serde 往返
+    /// 测试 search_engine 字段默认值与 serde 往返
     #[test]
-    fn test_stt_fields_default_and_roundtrip() {
-        // 默认值：enabled=false, hotkey="", config="", api_key=""
+    fn test_search_engine_default_and_roundtrip() {
+        // 默认值为空串（前端取默认 Bing）
         let config = AppConfig::default();
-        assert!(!config.stt_enabled);
-        assert_eq!(config.stt_hotkey, "");
-        assert_eq!(config.stt_config, "");
-        assert_eq!(config.stt_api_key, "");
-        assert_eq!(config.stt_api_key_encrypted, None);
+        assert_eq!(config.search_engine, "");
 
+        // 序列化含 search_engine，反序列化保持一致
         let config = AppConfig {
-            stt_enabled: true,
-            stt_hotkey: "Ctrl+Shift+S".to_string(),
-            stt_config: r#"{"provider":"openai","baseUrl":"https://api.openai.com","model":"whisper-1","autoPaste":true}"#.to_string(),
+            search_engine: "baidu".to_string(),
             ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("stt_enabled"));
-        assert!(json.contains("stt_hotkey"));
-        assert!(json.contains("stt_config"));
-        // stt_api_key 是 skip_serializing，不应出现在 json
-        assert!(!json.contains("stt_api_key\":"));
+        assert!(json.contains("search_engine"));
         let decoded: AppConfig = serde_json::from_str(&json).unwrap();
-        assert!(decoded.stt_enabled);
-        assert_eq!(decoded.stt_hotkey, "Ctrl+Shift+S");
-        assert!(decoded.stt_config.contains("whisper-1"));
+        assert_eq!(decoded.search_engine, "baidu");
     }
 
-    /// 测试旧配置文件（无 stt 字段）加载时取默认值
+    /// 测试旧配置文件（无 search_engine 字段）加载时取默认空串
     #[test]
-    fn test_stt_fields_missing_defaults() {
+    fn test_search_engine_missing_defaults_empty() {
         let json = r#"{"ai":{"api_key":"","base_url":"","model":"","api_type":"anthropic"}}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert!(!config.stt_enabled);
-        assert_eq!(config.stt_hotkey, "");
-        assert_eq!(config.stt_config, "");
-        assert_eq!(config.stt_api_key, "");
+        assert_eq!(config.search_engine, "");
     }
 
-    /// 测试 ConfigManager 持久化 stt 字段的保存与加载
+    /// 测试 ConfigManager 持久化 search_engine 的保存与加载
     #[test]
-    fn test_config_manager_stt_save_load() {
-        let tmp = std::env::temp_dir().join(format!("floatory_test_stt_{}", std::process::id()));
+    fn test_config_manager_search_engine_save_load() {
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_search_engine_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1332,29 +1574,51 @@ mod tests {
             config_path: config_path.clone(),
         };
 
-        manager.update_stt_enabled(true).unwrap();
-        assert!(manager.get_stt_enabled().unwrap());
-        manager
-            .update_stt_hotkey("Ctrl+Shift+S".to_string())
-            .unwrap();
-        assert_eq!(manager.get_stt_hotkey().unwrap(), "Ctrl+Shift+S");
-        let payload = r#"{"provider":"openai","baseUrl":"https://api.openai.com","model":"whisper-1","autoPaste":false}"#.to_string();
-        manager.update_stt_config(payload.clone()).unwrap();
-        assert_eq!(manager.get_stt_config().unwrap(), payload);
+        manager.update_search_engine("google".to_string()).unwrap();
+        assert_eq!(manager.get_search_engine().unwrap(), "google");
 
         // 重新加载验证持久化
         let loaded = ConfigManager::load_config(&config_path);
-        assert!(loaded.stt_enabled);
-        assert_eq!(loaded.stt_hotkey, "Ctrl+Shift+S");
-        assert_eq!(loaded.stt_config, payload);
+        assert_eq!(loaded.search_engine, "google");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 测试 STT API Key 的加密存储与解密加载
+    /// 测试 window_positions 字段默认值与 serde 往返
     #[test]
-    fn test_config_manager_stt_api_key_encrypted() {
-        let tmp = std::env::temp_dir().join(format!("floatory_test_sttkey_{}", std::process::id()));
+    fn test_window_positions_default_and_roundtrip() {
+        // 默认为空 map（前端回退到各窗口默认定位）
+        let config = AppConfig::default();
+        assert!(config.window_positions.is_empty());
+
+        let config = AppConfig {
+            window_positions: HashMap::from([(
+                "orb".to_string(),
+                WindowPosition { x: 123, y: 456 },
+            )]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("window_positions"));
+        let decoded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.window_positions.get("orb"),
+            Some(&WindowPosition { x: 123, y: 456 })
+        );
+    }
+
+    /// 测试旧配置文件（无 window_positions 字段）加载时取默认空 map
+    #[test]
+    fn test_window_positions_missing_defaults_empty() {
+        let json = r#"{"ai":{"api_key":"","base_url":"","model":"","api_type":"anthropic"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.window_positions.is_empty());
+    }
+
+    /// 测试 ConfigManager 持久化窗口位置的保存与加载
+    #[test]
+    fn test_config_manager_window_position_save_load() {
+        let tmp = std::env::temp_dir().join(format!("levitaire_test_winpos_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1363,35 +1627,79 @@ mod tests {
             config_path: config_path.clone(),
         };
 
-        // 设置 STT API Key 并保存
+        // 未记忆时返回 None
+        assert_eq!(manager.get_window_position("orb").unwrap(), None);
+
         manager
-            .update_stt_api_key("sk-stt-secret-123".to_string())
+            .set_window_position("orb", WindowPosition { x: 800, y: 600 })
             .unwrap();
-
-        // 验证文件中不含明文 key，含加密字段
-        let file_content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            !file_content.contains("sk-stt-secret-123"),
-            "文件中不应包含明文 STT API Key"
-        );
-        assert!(
-            file_content.contains("stt_api_key_encrypted"),
-            "文件应包含加密字段"
+        assert_eq!(
+            manager.get_window_position("orb").unwrap(),
+            Some(WindowPosition { x: 800, y: 600 })
         );
 
-        // 运行时可读明文
-        assert_eq!(manager.get_stt_api_key().unwrap(), "sk-stt-secret-123");
+        // 覆盖已有位置
+        manager
+            .set_window_position("monitor-overlay", WindowPosition { x: 10, y: 20 })
+            .unwrap();
+        manager
+            .set_window_position("orb", WindowPosition { x: 900, y: 700 })
+            .unwrap();
+        assert_eq!(
+            manager.get_window_position("orb").unwrap(),
+            Some(WindowPosition { x: 900, y: 700 })
+        );
 
-        // 重新加载验证解密
+        // 重新加载验证持久化
         let loaded = ConfigManager::load_config(&config_path);
-        assert_eq!(loaded.stt_api_key, "sk-stt-secret-123");
+        assert_eq!(
+            loaded.window_positions.get("orb"),
+            Some(&WindowPosition { x: 900, y: 700 })
+        );
+        assert_eq!(
+            loaded.window_positions.get("monitor-overlay"),
+            Some(&WindowPosition { x: 10, y: 20 })
+        );
 
-        // 清空 key 后加密字段应被移除
-        manager.update_stt_api_key(String::new()).unwrap();
-        let file_content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            !file_content.contains("stt_api_key_encrypted"),
-            "清空后加密字段应移除"
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 测试 ConfigManager 清除窗口位置记忆
+    #[test]
+    fn test_config_manager_reset_window_position() {
+        let tmp = std::env::temp_dir().join(format!("levitaire_test_reset_winpos_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let config_path = tmp.join("config.json");
+
+        let manager = ConfigManager {
+            config: Mutex::new(AppConfig::default()),
+            config_path: config_path.clone(),
+        };
+
+        // 未记忆时清除不应报错
+        manager.reset_window_position("orb").unwrap();
+        assert_eq!(manager.get_window_position("orb").unwrap(), None);
+
+        // 记忆后清除
+        manager
+            .set_window_position("orb", WindowPosition { x: 800, y: 600 })
+            .unwrap();
+        manager
+            .set_window_position("monitor-overlay", WindowPosition { x: 10, y: 20 })
+            .unwrap();
+        manager.reset_window_position("orb").unwrap();
+        assert_eq!(manager.get_window_position("orb").unwrap(), None);
+        assert_eq!(
+            manager.get_window_position("monitor-overlay").unwrap(),
+            Some(WindowPosition { x: 10, y: 20 })
+        );
+
+        // 重新加载验证持久化
+        let loaded = ConfigManager::load_config(&config_path);
+        assert_eq!(loaded.window_positions.get("orb"), None);
+        assert_eq!(
+            loaded.window_positions.get("monitor-overlay"),
+            Some(&WindowPosition { x: 10, y: 20 })
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

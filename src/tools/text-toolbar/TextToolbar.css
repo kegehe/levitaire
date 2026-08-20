@@ -40,7 +40,9 @@
   background-repeat: no-repeat;
   background-position: center;
   background-size: 12px;
-  transition: opacity var(--transition-fast), background-color var(--transition-fast);
+  transition:
+    opacity var(--transition-fast),
+    background-color var(--transition-fast);
   opacity: 0.7;
 }
 
@@ -80,11 +82,21 @@
   animation: modeItemEnter var(--transition-normal) ease-out backwards;
 }
 
-.toolbar-mode-select .toolbar-button:nth-child(1) { animation-delay: 0ms; }
-.toolbar-mode-select .toolbar-button:nth-child(3) { animation-delay: 30ms; }
-.toolbar-mode-select .toolbar-button:nth-child(4) { animation-delay: 60ms; }
-.toolbar-mode-select .toolbar-button:nth-child(5) { animation-delay: 90ms; }
-.toolbar-mode-select .toolbar-button:nth-child(6) { animation-delay: 120ms; }
+.toolbar-mode-select .toolbar-button:nth-child(1) {
+  animation-delay: 0ms;
+}
+.toolbar-mode-select .toolbar-button:nth-child(3) {
+  animation-delay: 30ms;
+}
+.toolbar-mode-select .toolbar-button:nth-child(4) {
+  animation-delay: 60ms;
+}
+.toolbar-mode-select .toolbar-button:nth-child(5) {
+  animation-delay: 90ms;
+}
+.toolbar-mode-select .toolbar-button:nth-child(6) {
+  animation-delay: 120ms;
+}
 
 .toolbar-mode-divider {
   width: 1px;
@@ -118,7 +130,7 @@
   flex-direction: column;
   gap: var(--space-2);
   min-width: 380px;
-  max-width: 520px;
+  /* 宽度上限由 .toolbar-container 的 max-width 限制，无需重复声明 */
   animation: previewEnter var(--transition-normal) ease-out;
 }
 
@@ -158,8 +170,13 @@
 }
 
 @keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 .toolbar-preview-actions {
@@ -291,6 +308,61 @@
   justify-content: flex-end;
 }
 
+/* ── TTS 朗读 ─────────────────────────────────────────────── */
+.toolbar-tts {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* 注意：animation 简写不能用 `var(--transition-normal) ease-out`——
+     展开成 `200ms ease ease-out` 含两个 timing-function，声明在计算值阶段
+     无效（IACVT），动画不生效。这里显式写 duration + timing。 */
+  animation: previewEnter 200ms ease-out;
+}
+
+.toolbar-tts-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.toolbar-tts-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+}
+
+.toolbar-tts-time {
+  font-size: var(--text-sm);
+  color: var(--color-fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 34px;
+}
+
+/* 进度条轨道固定宽度，避免每 500ms 刷新时容器尺寸变化触发窗口抖动 */
+.toolbar-tts-bar {
+  position: relative;
+  width: 96px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-border);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.toolbar-tts-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 3px;
+  background: var(--color-accent);
+  /* 与 500ms 轮询间隔匹配的线性过渡，进度条平滑推进不跳变。
+     注意不能用 `width var(--transition-normal) linear`——var 展开成
+     `200ms ease` 后会变成两个 timing-function，整个 transition 声明无效。 */
+  transition: width 200ms linear;
+}
+
 /* ── Error ───────────────────────────────────────────────── */
 .toolbar-error {
   display: flex;
@@ -314,10 +386,23 @@
 }
 
 @keyframes errorShake {
-  0%, 100% { transform: translateX(0); }
-  15% { transform: translateX(-3px); }
-  30% { transform: translateX(3px); }
-  45% { transform: translateX(-2px); }
-  60% { transform: translateX(2px); }
-  75% { transform: translateX(-1px); }
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  15% {
+    transform: translateX(-3px);
+  }
+  30% {
+    transform: translateX(3px);
+  }
+  45% {
+    transform: translateX(-2px);
+  }
+  60% {
+    transform: translateX(2px);
+  }
+  75% {
+    transform: translateX(-1px);
+  }
 }

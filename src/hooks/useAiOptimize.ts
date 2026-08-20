@@ -120,6 +120,11 @@ export function useAiOptimize(): UseAiOptimizeReturn {
     setErrorMessage(null);
     unlistenRef.current?.();
     unlistenRef.current = null;
+    // 通知后端中止当前流式请求：避免取消后后端仍把整段结果继续生成并发给
+    // 已无人监听的 IPC（白耗 token、浪费网络/CPU，并让取消的文本继续外传）。
+    invoke("cancel_ai_stream").catch((err) =>
+      console.error("Failed to cancel AI stream:", err),
+    );
   }, []);
 
   return {

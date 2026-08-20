@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn ffmpeg_path(extra_candidates: &[PathBuf]) -> PathBuf {
-    if let Ok(path) = std::env::var("FLOATORY_FFMPEG_PATH") {
+    if let Ok(path) = std::env::var("LEVITAIRE_FFMPEG_PATH") {
         let path = PathBuf::from(path);
         if path.is_file() {
             return path;
@@ -93,8 +93,10 @@ impl FfmpegEncoder {
             .arg("ultrafast")
             .arg("-crf")
             .arg("23")
+            // H.264 yuv420p 要求偶数宽高；奇数尺寸时裁剪最右一列/最下一行，
+            // 而不是 pad 补黑边，避免成片右侧/底部出现黑边。
             .arg("-vf")
-            .arg("pad=ceil(iw/2)*2:ceil(ih/2)*2")
+            .arg("crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0")
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-movflags")
@@ -106,7 +108,7 @@ impl FfmpegEncoder {
             .spawn()
             .map_err(|e| {
                 format!(
-                    "启动 ffmpeg 失败: {}。请安装 ffmpeg，或将 ffmpeg.exe 放到 src-tauri/binaries/ffmpeg.exe，或设置 FLOATORY_FFMPEG_PATH。当前路径: {}",
+                    "启动 ffmpeg 失败: {}。请安装 ffmpeg，或将 ffmpeg.exe 放到 src-tauri/binaries/ffmpeg.exe，或设置 LEVITAIRE_FFMPEG_PATH。当前路径: {}",
                     e,
                     encoder_path.to_string_lossy()
                 )
@@ -200,19 +202,19 @@ mod tests {
     #[test]
     fn ffmpeg_path_uses_env_var_when_set() {
         // 创建一个临时文件模拟 ffmpeg
-        let tmp = std::env::temp_dir().join("_floatory_test_ffmpeg_env.exe");
+        let tmp = std::env::temp_dir().join("_levitaire_test_ffmpeg_env.exe");
         std::fs::write(&tmp, b"").ok();
-        std::env::set_var("FLOATORY_FFMPEG_PATH", tmp.to_string_lossy().as_ref());
+        std::env::set_var("LEVITAIRE_FFMPEG_PATH", tmp.to_string_lossy().as_ref());
         let result = ffmpeg_path(&[]);
         // 清理放在断言之前，确保即使断言失败也不会残留环境变量
-        std::env::remove_var("FLOATORY_FFMPEG_PATH");
+        std::env::remove_var("LEVITAIRE_FFMPEG_PATH");
         let _ = std::fs::remove_file(&tmp);
         assert_eq!(result, tmp);
     }
 
     #[test]
     fn ffmpeg_path_falls_back_to_candidates() {
-        std::env::remove_var("FLOATORY_FFMPEG_PATH");
+        std::env::remove_var("LEVITAIRE_FFMPEG_PATH");
         // 传入一个不存在的候选路径，但当前目录或 exe 目录可能存在 ffmpeg，
         // 因此只验证函数不会 panic，返回值为某个 PathBuf
         let non_existent = PathBuf::from("_ certainly_not_exists_ffmpeg_xyz.exe");
@@ -223,8 +225,8 @@ mod tests {
 
     #[test]
     fn ffmpeg_path_uses_extra_candidate_when_present() {
-        std::env::remove_var("FLOATORY_FFMPEG_PATH");
-        let tmp = std::env::temp_dir().join("_floatory_test_extra_ffmpeg.exe");
+        std::env::remove_var("LEVITAIRE_FFMPEG_PATH");
+        let tmp = std::env::temp_dir().join("_levitaire_test_extra_ffmpeg.exe");
         std::fs::write(&tmp, b"").ok();
         let result = ffmpeg_path(&[tmp.clone()]);
         let _ = std::fs::remove_file(&tmp);

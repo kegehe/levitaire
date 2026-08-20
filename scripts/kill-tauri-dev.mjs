@@ -4,11 +4,11 @@ import { execFileSync } from "child_process";
 // Stop it before starting dev so the current Rust binary and Vite server own every window.
 if (process.platform === "win32") {
   try {
-    execFileSync("taskkill", ["/IM", "floatory.exe", "/F"], {
+    execFileSync("taskkill", ["/IM", "levitaire.exe", "/F"], {
       stdio: "ignore",
     });
-    console.log("Stopped existing Floatory instance");
+    console.log("Stopped existing Levitaire instance");
   } catch {
-    // No existing Floatory instance is running.
+    // No existing Levitaire instance is running.
   }
 }

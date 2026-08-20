@@ -25,12 +25,25 @@ use std::sync::{Arc, Mutex};
 
 use engine::{OcrEngine, OcrResult};
 
-/// 全局 OCR 服务：初始为 None，后台线程初始化后设为 Some。
-/// 支持先 get 返回 None，后 set 填入值的延迟初始化模式。
+/// 全局 OCR 服务单例：初始为 None，首次实际使用 OCR 时由 `ensure_ocr_service()` 懒加载初始化。
+/// 避免应用启动时加载 OCR 模型（占用内存与启动开销），用户从不截图识图时零成本。
 static GLOBAL_OCR_SERVICE: Mutex<Option<Arc<Mutex<OcrService>>>> = Mutex::new(None);
 
-/// 获取全局 OCR 服务的克隆引用。
-/// 返回 None 表示尚未初始化完成（后台线程仍在加载引擎）。
+/// 用户在设置中选择的引擎偏好（配置持久化，启动时由 main.rs 注入）。
+/// 在 `ensure_ocr_service()` 首次懒加载初始化时作为 `prefer` 传入 `OcrService::new`。
+/// 仅在服务初始化前有意义；服务初始化后引擎切换直接操作 OcrService 实例。
+static PREFERRED_ENGINE: Mutex<Option<EngineId>> = Mutex::new(None);
+
+/// 设置用户偏好的 OCR 引擎（None 表示未设置，按默认策略自动选择）。
+/// 由 main.rs 启动时从持久化配置读取并调用。
+pub fn set_preferred_engine(id: Option<EngineId>) {
+    if let Ok(mut guard) = PREFERRED_ENGINE.lock() {
+        *guard = id;
+    }
+}
+
+/// 获取全局 OCR 服务的克隆引用（纯读取，不触发加载）。
+/// 返回 None 表示尚未初始化（尚未实际使用过 OCR）。
 pub fn get_ocr_service() -> Option<Arc<Mutex<OcrService>>> {
     GLOBAL_OCR_SERVICE
         .lock()
@@ -42,16 +55,28 @@ pub fn get_ocr_service() -> Option<Arc<Mutex<OcrService>>> {
         .and_then(|guard| guard.clone())
 }
 
-/// 注册全局 OCR 服务引用（在后台线程中调用）。
-pub fn set_ocr_service(service: OcrService) {
-    match GLOBAL_OCR_SERVICE.lock() {
-        Ok(mut guard) => {
-            *guard = Some(Arc::new(Mutex::new(service)));
-        }
+/// 获取全局 OCR 服务，若尚未初始化则立即懒加载（阻塞当前线程直到初始化完成）。
+/// 与 `get_ocr_service()` 的区别：本函数在服务未就绪时会触发引擎与模型加载。
+/// 加载模型可能耗时数百毫秒，调用方应确保在非主线程（如 `spawn_blocking` 阻塞池）中调用，
+/// 避免阻塞 UI 主线程。多线程并发首次调用时，后到者会在锁上等待首次初始化完成。
+pub fn ensure_ocr_service() -> Option<Arc<Mutex<OcrService>>> {
+    let mut guard = match GLOBAL_OCR_SERVICE.lock() {
+        Ok(g) => g,
         Err(e) => {
-            crate::utils::logger::log("ocr", &format!("设置 OCR 服务锁失败（可能锁中毒）: {}", e));
+            crate::utils::logger::log("ocr", &format!("获取 OCR 服务锁失败（可能锁中毒）: {}", e));
+            return None;
         }
+    };
+    if guard.is_none() {
+        crate::utils::logger::log("ocr", "OCR 服务未初始化，首次使用触发懒加载...");
+        let prefer = PREFERRED_ENGINE.lock().ok().and_then(|g| *g);
+        if let Some(id) = prefer {
+            crate::utils::logger::log("ocr", &format!("应用配置的引擎偏好: {}", id.as_str()));
+        }
+        let service = OcrService::new(prefer, None);
+        *guard = Some(Arc::new(Mutex::new(service)));
     }
+    guard.clone()
 }
 
 /// 引擎标识
@@ -89,7 +114,7 @@ impl EngineId {
 /// - 处理大图自动分块 + COM 线程隔离
 ///
 /// 通过 `GLOBAL_OCR_SERVICE` (Mutex<Option<Arc<Mutex<OcrService>>>>) 全局单例访问，
-/// 在 main.rs setup 中调用 `set_ocr_service()` 初始化。
+/// 首次实际使用 OCR 时由 `ensure_ocr_service()` 懒加载初始化。
 pub struct OcrService {
     pub active_engine: EngineId,
     windows: Option<Arc<dyn OcrEngine>>,
@@ -133,15 +158,17 @@ impl OcrService {
                 }
             };
 
-        // 确定激活引擎
-        let active_engine = Self::select_active(prefer, windows.is_some(), paddle.is_some());
+        // 确定激活引擎（windows 需实际可用，而非仅成功创建——WindowsOcrEngine 创建总是 Ok，
+        // 内部通过 is_available 记录运行时就绪状态，与 paddle 用 None 表示不可用的语义对齐）
+        let windows_available = windows.as_ref().is_some_and(|e| e.is_available());
+        let active_engine = Self::select_active(prefer, windows_available, paddle.is_some());
 
         crate::utils::logger::log(
             "ocr",
             &format!(
                 "OCR 服务初始化完成，激活引擎: {} (windows={}, paddle={})",
                 active_engine.as_str(),
-                windows.is_some(),
+                windows_available,
                 paddle.is_some(),
             ),
         );
@@ -158,13 +185,13 @@ impl OcrService {
             Some(EngineId::Paddle) if has_paddle => EngineId::Paddle,
             Some(EngineId::Windows) if has_windows => EngineId::Windows,
             Some(_) => {
-                // 指定引擎不可用，回退
+                // 指定引擎不可用，回退到可用引擎；全部不可用时回退 Windows（识别时再报错）
                 if has_windows {
                     EngineId::Windows
                 } else if has_paddle {
                     EngineId::Paddle
                 } else {
-                    EngineId::Windows // 无可用引擎，保持原偏好（调用时再报错）
+                    EngineId::Windows
                 }
             }
             None => {
@@ -191,7 +218,7 @@ impl OcrService {
     /// 切换激活引擎。返回是否切换成功。
     pub fn switch_engine(&mut self, id: EngineId) -> bool {
         let available = match id {
-            EngineId::Windows => self.windows.is_some(),
+            EngineId::Windows => self.windows.as_ref().is_some_and(|e| e.is_available()),
             EngineId::Paddle => self.paddle.is_some(),
         };
         if available {
@@ -201,10 +228,11 @@ impl OcrService {
         available
     }
 
-    /// 获取所有可用引擎 ID 列表（供前端设置页展示）
+    /// 获取所有可用引擎 ID 列表（供前端设置页展示）。
+    /// 仅返回实际可用的引擎：windows 需 is_available，paddle 以 Option 是否为 None 表示不可用。
     pub fn available_engines(&self) -> Vec<EngineId> {
         let mut ids = Vec::new();
-        if self.windows.is_some() {
+        if self.windows.as_ref().is_some_and(|e| e.is_available()) {
             ids.push(EngineId::Windows);
         }
         if self.paddle.is_some() {

@@ -2,7 +2,10 @@ import { describe, it, expect } from "vitest";
 import { dedup } from "./dedup";
 import type { DedupMode } from "../constants/dedupConfig";
 
-const mode = (granularity: DedupMode["granularity"], charSubMode: DedupMode["charSubMode"] = "all"): DedupMode => ({
+const mode = (
+  granularity: DedupMode["granularity"],
+  charSubMode: DedupMode["charSubMode"] = "all",
+): DedupMode => ({
   granularity,
   charSubMode,
 });
