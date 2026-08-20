@@ -1,0 +1,102 @@
+/* 独立更新提示窗（update-prompt） */
+
+.update-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100vh;
+  padding: 14px 16px;
+  background: var(--color-panel-bg, #1e1f24);
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.1));
+  border-radius: 12px;
+  color: var(--color-fg, #e8eaf0);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+.update-prompt-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-accent, #6aa1ff);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.update-prompt-version {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-fg, #e8eaf0);
+}
+
+.update-prompt-notes {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-dim-fg, #9aa2b1);
+  white-space: pre-wrap;
+  max-height: 64px;
+  overflow-y: auto;
+}
+
+.update-prompt-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.update-prompt-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.14));
+  background: transparent;
+  color: var(--color-fg, #e8eaf0);
+  cursor: pointer;
+  transition: background-color var(--transition-fast, 0.15s);
+}
+.update-prompt-btn:hover {
+  background: var(--button-hover-bg, rgba(255, 255, 255, 0.08));
+}
+.update-prompt-btn-primary {
+  background: var(--color-accent, #6aa1ff);
+  border-color: var(--color-accent, #6aa1ff);
+  color: #fff;
+}
+.update-prompt-btn-primary:hover {
+  filter: brightness(1.05);
+}
+
+.update-prompt-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: auto;
+}
+.update-prompt-progress-track {
+  height: 6px;
+  border-radius: 4px;
+  background: var(--button-hover-bg, rgba(255, 255, 255, 0.1));
+  overflow: hidden;
+}
+.update-prompt-progress-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--color-accent, #6aa1ff);
+  transition: width 0.2s ease;
+}
+.update-prompt-hint {
+  font-size: 12px;
+  color: var(--color-dim-fg, #9aa2b1);
+}
+
+.update-prompt-error {
+  font-size: 12px;
+  color: var(--color-danger-fg, #ff6b6b);
+  max-height: 48px;
+  overflow-y: auto;
+}

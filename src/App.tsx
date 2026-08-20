@@ -14,6 +14,7 @@ const SystemMonitor = lazy(() => import("./tools/system-monitor/SystemMonitor"))
 const PomodoroTool = lazy(() => import("./tools/pomodoro/PomodoroTool"));
 const QuickInputTool = lazy(() => import("./tools/quick-input/QuickInputTool"));
 const Settings = lazy(() => import("./components/Settings"));
+const UpdatePrompt = lazy(() => import("./components/UpdatePrompt"));
 
 /** screenshot-overlay 窗口的模式切换器 */
 function OverlaySwitcher() {
@@ -96,6 +97,8 @@ function App() {
     content = <PomodoroTool />;
   } else if (windowLabel === "quick-input-overlay") {
     content = <QuickInputTool />;
+  } else if (windowLabel === "update-prompt") {
+    content = <UpdatePrompt />;
   } else {
     content = <Settings />;
   }

@@ -40,6 +40,7 @@ mod recording;
 mod screenshot;
 mod sound;
 mod tts;
+mod updater;
 mod utils;
 
 use tauri::{
@@ -181,6 +182,11 @@ fn main() {
 
             // 初始化录屏状态（录制线程随录制开关启停，此处仅注册 state）
             app.manage(recording::RecordingState::default());
+
+            // 初始化在线更新状态，并启动后台周期检测：
+            // 首次延迟检查 + 每 24h 复检，检测到新版本时由 update-prompt 窗口询问
+            app.manage(updater::UpdaterState::default());
+            updater::start_periodic_check(app.handle().clone());
 
             // OCR 服务改为首次实际使用时懒加载（见 ocr::ensure_ocr_service），
             // 启动时不再加载模型，避免占用内存与启动开销。
@@ -429,6 +435,9 @@ fn main() {
             commands::call_ai,
             commands::call_ai_stream,
             commands::cancel_ai_stream,
+            updater::get_update_status,
+            updater::dismiss_update,
+            updater::install_update,
             commands::get_ai_config,
             commands::update_ai_config,
             commands::get_theme_preferences,

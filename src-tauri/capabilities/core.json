@@ -11,7 +11,8 @@
     "monitor-overlay",
     "recording-controls",
     "quick-input-overlay",
-    "pomodoro-overlay"
+    "pomodoro-overlay",
+    "update-prompt"
   ],
   "permissions": [
     "core:default",
