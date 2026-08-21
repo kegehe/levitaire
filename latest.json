@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0",
+  "notes": "Levitaire v0.1.0（含自动更新检测）",
+  "pub_date": "2026-08-20T16:06:22.520Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDJmaEVLNWd6a3NQc0xNbkVURnc5Y1Y5WkRjdk1GWCtCaHJ3aWhDUitQZ01xS0IxSUo1cFpkM3p3djNtZVVIcC84cXExazlyejNwKzhuTFdNd0tKSEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MjQxOTgyCWZpbGU6TGV2aXRhaXJlXzAuMS4wX3g2NC1zZXR1cC5leGUKVWNsdFBFYXFXN3dneTZaWVpZMUFhN1NKV0haa1NmTFJMQ0hGQlVUVVk1a25hcWhIZFN6a2o0TDBKaTBzdE53VzZuNHE2T1dVbXdGMmgyWDRTSTA0Q1E9PQo=",
+      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.0/Levitaire_0.1.0_x64-setup.exe"
+    }
+  }
+}
