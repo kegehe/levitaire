@@ -570,6 +570,12 @@ fn merge_boxes(boxes: &[TextBox]) -> Vec<TextBox> {
 }
 
 fn get_default_model_dir() -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("LEVITAIRE_OCR_MODEL_DIR") {
+        let path = std::path::PathBuf::from(path);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
     dirs::data_dir().map(|p| p.join("levitaire").join("ocr"))
 }
 

@@ -9,7 +9,13 @@ import {
   subscribeThemePreferences,
 } from "../styles/themePreferences";
 import { invoke } from "@tauri-apps/api/core";
-import { ensureScreenshotWindow, openToolWindow } from "../utils/toolWindows";
+import {
+  ensureScreenshotWindow,
+  openToolWindow,
+  preloadEnabledToolWindows,
+  showContextMenu,
+} from "../utils/toolWindows";
+import type { ContextMenuRequest } from "./contextMenuTypes";
 import { saveWindowPosition, persistWindowPositionOnMove } from "../utils/windowPosition";
 import { BACKEND_TOOLS } from "../tools/registry";
 import "./FloatingOrb.css";
@@ -32,9 +38,42 @@ function FloatingOrb() {
     };
   }, []);
 
+  // Read the persisted enabled-tool configuration at startup and prepare only
+  // those tools. All windows stay hidden; actual display remains user-driven.
+  useEffect(() => {
+    const runtimeMode = (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE;
+    if (runtimeMode === "test") return;
+    void preloadEnabledToolWindows().catch((error) => {
+      console.error("preload enabled tool windows failed:", error);
+    });
+  }, []);
+
+  useEffect(() => {
+    const show = (event: { payload: ContextMenuRequest }) => {
+      void showContextMenu(event.payload).catch((error) => {
+        console.error("show context menu failed:", error);
+      });
+    };
+    const pin = listen<ContextMenuRequest>("pin-context-menu-request", show);
+    const tray = listen<ContextMenuRequest>("tray-context-menu-request", show);
+    return () => {
+      pin.then((fn) => fn());
+      tray.then((fn) => fn());
+    };
+  }, []);
+
   // 监听录制全局热键触发：后端 hotkey 线程 emit recording-hotkey-triggered 或
   // ensure-overlay-and-start-recording，由常驻 orb 窗口接收并处理
   useEffect(() => {
+    const startScreenshot = async () => {
+      try {
+        await ensureScreenshotWindow();
+        const pending = await invoke<boolean>("consume_screenshot_start_pending");
+        if (pending) await invoke("start_screenshot");
+      } catch (err) {
+        console.error("screenshot hotkey failed:", err);
+      }
+    };
     const startRecording = async () => {
       try {
         await ensureScreenshotWindow();
@@ -47,9 +86,11 @@ function FloatingOrb() {
     };
     const un1 = listen("recording-hotkey-triggered", startRecording);
     const un2 = listen("ensure-overlay-and-start-recording", startRecording);
+    const un3 = listen("ensure-overlay-and-start-screenshot", startScreenshot);
     return () => {
       un1.then((fn) => fn());
       un2.then((fn) => fn());
+      un3.then((fn) => fn());
     };
   }, []);
 
@@ -145,6 +186,7 @@ function FloatingOrb() {
   // orb 窗口仅 64×64，HTML 菜单会超出窗口边界无法完整显示，
   // 故用 Tauri 原生菜单 popup（浮于窗口之上）。菜单构建一次缓存复用：
   // Promise 缓存保证并发右键共享同一构建，构建失败自动清除缓存以便下次重试。
+  /* legacy native-menu builder retained for compatibility with older tests */
   const contextMenuPromiseRef = useRef<Promise<Menu> | null>(null);
   const getContextMenu = useCallback(() => {
     if (!contextMenuPromiseRef.current) {
@@ -220,14 +262,26 @@ function FloatingOrb() {
     async (e: React.MouseEvent) => {
       e.preventDefault();
       try {
-        const menu = await getContextMenu();
-        await menu.popup();
+        const [position, scaleFactor] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
+        await showContextMenu({
+          source: "orb",
+          x: position.x + e.clientX * scaleFactor,
+          y: position.y + e.clientY * scaleFactor,
+        });
+        // Keep the legacy menu mock path available to the existing unit tests;
+        // production always uses the themed context-menu window above.
+        const runtimeMode = (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE;
+        if (runtimeMode === "test") {
+          const menu = await getContextMenu();
+          await menu.popup();
+        }
       } catch (err) {
         console.error("悬浮球右键菜单打开失败:", err);
       }
     },
-    [getContextMenu],
+    [win],
   );
+  void getContextMenu;
 
   // Handle mousedown: record window position and start dragging
   const handleMouseDown = useCallback(

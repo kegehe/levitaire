@@ -1,11 +1,14 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
+use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowDisplayAffinity, WDA_NONE,
+    GetAncestor, GetForegroundWindow, GetWindowLongPtrW, IsWindow, SetForegroundWindow,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, WDA_NONE,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 use crate::automation::SelectionInfo;
@@ -13,6 +16,13 @@ use crate::clipboard::ClipboardManager;
 use crate::config::ConfigManager;
 
 static SCREENSHOT_STARTING: AtomicBool = AtomicBool::new(false);
+static SKETCH_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
+static SKETCH_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
+static SCREENSHOT_START_PENDING: AtomicBool = AtomicBool::new(false);
+
+pub fn queue_screenshot_start_pending() {
+    SCREENSHOT_START_PENDING.store(true, Ordering::SeqCst);
+}
 static SCREENSHOT_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static SCREENSHOT_SESSION: AtomicU64 = AtomicU64::new(0);
 static MONITOR_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -31,6 +41,13 @@ static ORB_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(true);
 /// 的可靠性：录制「编码/预览」阶段 recording_mode 已被清除但 `is_finishing()` 仍为 true，
 /// 此时清理仍应恢复 orb，故用显式标记覆盖整个会话生命周期。
 static CAPTURE_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE: AtomicBool = AtomicBool::new(false);
+// Serializes session teardown with long-capture registration. Without this,
+// Esc can clean up between the session check and worker registration.
+static CAPTURE_SESSION_LOCK: Mutex<()> = Mutex::new(());
+/// 前台目标窗口快照。截图 Overlay 显示后前台窗口会变成 Levitaire，
+/// 长截图开始时用此句柄把交互权交还给用户刚才操作的应用。
+static SCREENSHOT_TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// 恢复默认位置时抑制对应窗口 onMoved 保存的截止时间戳（窗口 id → 截止毫秒）。
 /// 程序化 set_position 会触发 onMoved → 前端在 300ms 后再次 set_window_position，
@@ -79,6 +96,25 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
     // 用会话活跃标记区分「正在清理会话」与「空闲清理」（如仅关闭工具开关），
     // 空闲清理不应动 orb。必须在 set_screenshot_mode(false) 之前读取。
     let session_active = CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst);
+    let long_capture_was_active = app
+        .try_state::<crate::scroll_capture::LongCaptureState>()
+        .map(|state| {
+            let active = state.is_active();
+            state.cancel_active();
+            active
+        })
+        .unwrap_or(false);
+    if long_capture_was_active {
+        // Keep the controls window in sync for global Esc and native-close
+        // paths, which do not go through cancel_long_capture.
+        let _ = app.emit("long-capture-cancelled", ());
+    }
+    if let Some(controls) = app.get_webview_window("long-capture-controls") {
+        let _ = controls.hide();
+    }
+    if let Some(frame) = app.get_webview_window("long-capture-frame") {
+        let _ = frame.hide();
+    }
     crate::hooks::mouse::set_screenshot_mode(false);
     // 如果录制模式也处于活跃状态（例如 overlay 显示了 ScreenshotTool 但实际是录制模式），
     // 一并清理，避免 recording_mode 残留导致后续状态不一致
@@ -104,13 +140,65 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
             let _ = orb.set_always_on_top(true);
         }
     }
+    if TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.swap(false, Ordering::SeqCst) {
+        if let Some(toolbar) = app.get_webview_window("toolbar") {
+            let _ = toolbar.show();
+        }
+    }
+    if SKETCH_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        if let Some(sketch) = app.get_webview_window("sketch-overlay") {
+            let _ = sketch.show();
+            let _ = sketch.set_focus();
+        }
+    }
+    SCREENSHOT_TARGET_HWND.store(0, Ordering::SeqCst);
     // 会话结束，复位活跃标记，避免泄漏到后续空闲清理误判
     CAPTURE_SESSION_ACTIVE.store(false, Ordering::SeqCst);
 }
 
 pub fn cleanup_screenshot_session(app: &tauri::AppHandle) {
     SCREENSHOT_SESSION.fetch_add(1, Ordering::SeqCst);
+    let _session_lock = CAPTURE_SESSION_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     cleanup_screenshot_session_inner(app);
+}
+
+/// Returns whether a foreground/root HWND belongs to one of Levitaire's own
+/// windows. A screenshot started from the palette or orb must still target
+/// the external application underneath them.
+fn is_levitaire_window(app: &tauri::AppHandle, hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let root = if root.0.is_null() { hwnd } else { root };
+    [
+        "orb",
+        "toolbar",
+        "palette",
+        "settings",
+        "screenshot-overlay",
+        "recording-controls",
+        "long-capture-controls",
+        "long-capture-frame",
+        "monitor-overlay",
+        "pomodoro-overlay",
+        "quick-input-overlay",
+        "sketch-overlay",
+    ]
+    .iter()
+    .filter_map(|label| app.get_webview_window(label))
+    .filter_map(|window| window.hwnd().ok())
+    .map(|window| {
+        let window_root = unsafe { GetAncestor(window, GA_ROOT) };
+        if window_root.0.is_null() {
+            window
+        } else {
+            window_root
+        }
+    })
+    .any(|window| window.0 == root.0)
 }
 
 pub fn current_screenshot_session() -> u64 {
@@ -134,6 +222,9 @@ pub fn cleanup_screenshot_session_if_current(app: &tauri::AppHandle, session: u6
         )
         .is_ok()
     {
+        let _session_lock = CAPTURE_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         cleanup_screenshot_session_inner(app);
         true
     } else {
@@ -218,6 +309,18 @@ pub fn hide_orb(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn toggle_orb(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("orb") {
+        if window.is_visible().unwrap_or(false) {
+            window.hide().map_err(|e| e.to_string())?;
+        } else {
+            window.show().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
     // 用 tokio Mutex 保护"检查+创建+注册关闭拦截"整个流程，防止快速双击竞态
     let _init_guard = SETTINGS_INIT_LOCK.lock().await;
@@ -228,23 +331,20 @@ pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
         None => {
             use tauri::WebviewUrl;
             use tauri::WebviewWindowBuilder;
-            let win = WebviewWindowBuilder::new(
-                &app,
-                "settings",
-                WebviewUrl::App("index.html".into()),
-            )
-            .title("Levitaire Settings")
-            .inner_size(780.0, 560.0)
-            .center()
-            .visible(false)
-            // 自绘标题栏：去掉原生装饰，由前端渲染标题栏并跟随主题/主题色。
-            // 失去 Windows 原生边框/阴影，由 CSS border 负责窗口边界（见 .settings-shell）。
-            .decorations(false)
-            .shadow(false)
-            .resizable(true)
-            .min_inner_size(520.0, 420.0)
-            .build()
-            .map_err(|e| format!("创建 settings 窗口失败: {}", e))?;
+            let win =
+                WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("index.html".into()))
+                    .title("Levitaire Settings")
+                    .inner_size(780.0, 560.0)
+                    .center()
+                    .visible(false)
+                    // 自绘标题栏：去掉原生装饰，由前端渲染标题栏并跟随主题/主题色。
+                    // 失去 Windows 原生边框/阴影，由 CSS border 负责窗口边界（见 .settings-shell）。
+                    .decorations(false)
+                    .shadow(false)
+                    .resizable(true)
+                    .min_inner_size(520.0, 420.0)
+                    .build()
+                    .map_err(|e| format!("创建 settings 窗口失败: {}", e))?;
             win
         }
     };
@@ -555,6 +655,41 @@ pub fn set_screenshot_hotkey(
     Ok(())
 }
 
+#[tauri::command]
+pub fn get_sketch_hotkey(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
+    config_manager.get_sketch_hotkey()
+}
+
+#[tauri::command]
+pub fn set_sketch_hotkey(
+    hotkey: String,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let trimmed = hotkey.trim().to_string();
+    let previous = config_manager.get_sketch_hotkey()?;
+    let slot = crate::hooks::hotkey::HotkeySlotId::Sketch;
+    if trimmed.is_empty() {
+        crate::hooks::hotkey::unregister_hotkey(slot);
+        if let Err(error) = config_manager.update_sketch_hotkey(String::new()) {
+            if !previous.is_empty() {
+                let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
+            }
+            return Err(error);
+        }
+        return Ok(());
+    }
+    crate::hooks::hotkey::register_hotkey(slot, &trimmed)?;
+    if let Err(error) = config_manager.update_sketch_hotkey(trimmed) {
+        let _ = config_manager.update_sketch_hotkey(previous.clone());
+        crate::hooks::hotkey::unregister_hotkey(slot);
+        if !previous.is_empty() {
+            let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// 设置截图工具启用状态（仅启用时热键才触发），同时持久化到配置
 #[tauri::command]
 pub fn set_screenshot_enabled(
@@ -712,29 +847,26 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
         None => {
             use tauri::WebviewUrl;
             use tauri::WebviewWindowBuilder;
-            let win = WebviewWindowBuilder::new(
-                &app,
-                "palette",
-                WebviewUrl::App("index.html".into()),
-            )
-            .title("Levitaire Tools")
-            .inner_size(360.0, 260.0)
-            .resizable(false)
-            .transparent(true)
-            .decorations(false)
-            // 由 palette-container 的 CSS 阴影负责视觉层级。Windows 原生阴影会在
-            // 透明圆角的外侧参与合成，深色主题下会显出浅色边缘。
-            .shadow(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .focusable(true)
-            .visible(false)
-            // WebView2 默认背景为不透明白色 (255,255,255,255)，
-            // 在 border-radius 圆角裁剪区域外会露出白边（深色模式下尤为明显）。
-            // 显式设为完全透明，使圆角外区域真正透明。
-            .background_color(tauri::webview::Color(0, 0, 0, 0))
-            .build()
-            .map_err(|e| format!("创建 palette 窗口失败: {}", e))?;
+            let win =
+                WebviewWindowBuilder::new(&app, "palette", WebviewUrl::App("index.html".into()))
+                    .title("Levitaire Tools")
+                    .inner_size(360.0, 260.0)
+                    .resizable(false)
+                    .transparent(true)
+                    .decorations(false)
+                    // 由 palette-container 的 CSS 阴影负责视觉层级。Windows 原生阴影会在
+                    // 透明圆角的外侧参与合成，深色主题下会显出浅色边缘。
+                    .shadow(false)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .focusable(true)
+                    .visible(false)
+                    // WebView2 默认背景为不透明白色 (255,255,255,255)，
+                    // 在 border-radius 圆角裁剪区域外会露出白边（深色模式下尤为明显）。
+                    // 显式设为完全透明，使圆角外区域真正透明。
+                    .background_color(tauri::webview::Color(0, 0, 0, 0))
+                    .build()
+                    .map_err(|e| format!("创建 palette 窗口失败: {}", e))?;
             win
         }
     };
@@ -763,8 +895,16 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     let inner = palette.inner_size().unwrap_or_else(|_| {
         tauri::PhysicalSize::new((360.0 * scale) as u32, (260.0 * scale) as u32)
     });
-    let pw = if inner.width > 0 { inner.width as i32 } else { (360.0 * scale) as i32 };
-    let ph = if inner.height > 0 { inner.height as i32 } else { (260.0 * scale) as i32 };
+    let pw = if inner.width > 0 {
+        inner.width as i32
+    } else {
+        (360.0 * scale) as i32
+    };
+    let ph = if inner.height > 0 {
+        inner.height as i32
+    } else {
+        (260.0 * scale) as i32
+    };
 
     // 锚点：优先用 orb 窗口位置；失败则用鼠标位置
     let (mut x, mut y, anchor_hwnd) = if let Some(orb) = app.get_webview_window("orb") {
@@ -856,6 +996,90 @@ pub fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn show_sketch_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("sketch-overlay").ok_or_else(|| "草稿窗口尚未创建".to_string())?;
+    if SKETCH_CLOSE_HANDLER_REGISTERED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let app_for_window = app.clone();
+        window
+            .on_window_event(move |event| match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    crate::utils::logger::log("sketch", "CloseRequested intercepted; hiding sketch window");
+                    if let Some(sketch) = app_for_window.get_webview_window("sketch-overlay") {
+                        let _ = sketch.hide();
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    SKETCH_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+                    crate::utils::logger::log("sketch", "sketch window destroyed");
+                }
+                _ => {}
+            });
+    }
+    crate::utils::logger::log("sketch", "show_sketch_window");
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn hide_sketch_window(app: tauri::AppHandle) -> Result<(), String> {
+    SKETCH_VISIBLE_BEFORE_SESSION.store(false, Ordering::SeqCst);
+    if let Some(window) = app.get_webview_window("sketch-overlay") {
+        crate::utils::logger::log("sketch", "hide_sketch_window");
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_sketch_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
+    config_manager.get_sketch_enabled()
+}
+
+#[tauri::command]
+pub fn set_sketch_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let previous = config_manager.get_sketch_enabled()?;
+    if let Err(error) = config_manager.update_sketch_enabled(enabled) {
+        let _ = config_manager.update_sketch_enabled(previous);
+        return Err(error);
+    }
+    crate::hooks::hotkey::set_slot_enabled(crate::hooks::hotkey::HotkeySlotId::Sketch, enabled);
+    if !enabled {
+        SKETCH_VISIBLE_BEFORE_SESSION.store(false, Ordering::SeqCst);
+        if let Some(window) = app.get_webview_window("sketch-overlay") {
+            crate::utils::logger::log("sketch", "hiding sketch window because sketch is disabled");
+            let _ = window.hide();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn capture_sketch_background(app: tauri::AppHandle, left: i32, top: i32, width: i32, height: i32) -> Result<String, String> {
+    if width <= 0 || height <= 0 {
+        return Err("草稿背景尺寸无效".to_string());
+    }
+    if let Some(window) = app.get_webview_window("sketch-overlay") {
+        window.hide().map_err(|e| format!("隐藏草稿窗口失败: {}", e))?;
+        std::thread::sleep(std::time::Duration::from_millis(45));
+        let result = crate::screenshot::capture_screen_region(left, top, width as u32, height as u32)
+            .and_then(|bgra| crate::screenshot::encode_png_base64(&bgra, width as u32, height as u32));
+        window.show().map_err(|e| format!("恢复草稿窗口失败: {}", e))?;
+        window.set_focus().map_err(|e| format!("恢复草稿窗口焦点失败: {}", e))?;
+        return result;
+    }
+    let bgra = crate::screenshot::capture_screen_region(left, top, width as u32, height as u32)?;
+    crate::screenshot::encode_png_base64(&bgra, width as u32, height as u32)
+}
+
 /// 退出应用（悬浮球右键菜单「退出」入口，与托盘菜单 quit 等价）
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
@@ -874,6 +1098,7 @@ pub fn start_screenshot(app: tauri::AppHandle) -> Result<(), String> {
 /// 缓存 State 在内部用 app.state() 获取，避免调用方构造 State 的麻烦与生命周期问题。
 pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     crate::utils::logger::log("screenshot", "start_screenshot called");
+    SCREENSHOT_START_PENDING.store(false, Ordering::SeqCst);
     let Some(_start_guard) = ScreenshotStartGuard::acquire() else {
         crate::utils::logger::log("screenshot", "screenshot start already in progress");
         return Ok(());
@@ -883,6 +1108,17 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         crate::utils::logger::log(
             "screenshot",
             "recording mode active, ignoring screenshot start",
+        );
+        return Ok(());
+    }
+    if app
+        .try_state::<crate::scroll_capture::LongCaptureState>()
+        .map(|state| state.is_active())
+        .unwrap_or(false)
+    {
+        crate::utils::logger::log(
+            "screenshot",
+            "long capture active, ignoring screenshot start",
         );
         return Ok(());
     }
@@ -910,6 +1146,54 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
             );
             return Ok(());
         }
+    }
+    if app.get_webview_window("screenshot-overlay").is_none() {
+        return Err("screenshot overlay window was not found".to_string());
+    }
+    // The sketch overlay is full-screen and always-on-top. Hide it only after
+    // all duplicate/invalid-session checks have passed, so an early return
+    // cannot leave the user's sketch window hidden.
+    if let Some(sketch) = app.get_webview_window("sketch-overlay") {
+        if sketch.is_visible().unwrap_or(false) {
+            SKETCH_VISIBLE_BEFORE_SESSION.store(true, Ordering::SeqCst);
+            crate::utils::logger::log(
+                "screenshot",
+                "hiding visible sketch overlay before screenshot start",
+            );
+            if let Err(error) = sketch.hide() {
+                SKETCH_VISIBLE_BEFORE_SESSION.store(false, Ordering::SeqCst);
+                return Err(format!("隐藏草稿窗口失败: {}", error));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    // Capture the user's foreground application before the screenshot overlay
+    // becomes active and takes focus. Long capture restores this window after
+    // the region has been confirmed.
+    let foreground = unsafe { GetForegroundWindow() };
+    let foreground_target = if unsafe { IsWindow(Some(foreground)).as_bool() }
+        && !is_levitaire_window(&app, foreground)
+    {
+        let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+        if root.0.is_null() {
+            foreground
+        } else {
+            root
+        }
+    } else {
+        HWND(std::ptr::null_mut())
+    };
+    SCREENSHOT_TARGET_HWND.store(foreground_target.0 as isize, Ordering::SeqCst);
+    // A completed long capture keeps its preview window visible. It must not
+    // appear in the clean desktop frame captured for the next screenshot.
+    if let Some(controls) = app.get_webview_window("long-capture-controls") {
+        let _ = controls.hide();
+    }
+    if let Some(frame) = app.get_webview_window("long-capture-frame") {
+        let _ = frame.hide();
+    }
+    if let Some(state) = app.try_state::<crate::scroll_capture::LongCaptureState>() {
+        state.discard_all();
     }
     let session = SCREENSHOT_SESSION
         .fetch_add(1, Ordering::SeqCst)
@@ -960,11 +1244,12 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }
-    if !hwnd_ready {
+        if !hwnd_ready {
         crate::utils::logger::log(
             "screenshot",
             "ERROR: overlay hwnd 2秒内未就绪，遮罩可能无法显示",
         );
+        cleanup_screenshot_session(&app);
         return Err("screenshot overlay HWND did not become ready".to_string());
     }
     if current_screenshot_session() != session {
@@ -1387,6 +1672,11 @@ pub fn close_pin(app: tauri::AppHandle, id: u32) -> Result<(), String> {
     crate::screenshot::pin::close_pin(&app, id)
 }
 
+#[tauri::command]
+pub fn pin_context_menu_action(id: u32, action: String) -> Result<(), String> {
+    crate::screenshot::pin::context_menu_action(id, &action)
+}
+
 /// 弹出系统保存对话框，将 base64 编码的 PNG 数据保存为文件
 /// 如果配置了截图保存路径，直接保存到该目录（自动生成带时间戳的文件名）；
 /// 否则弹出文件保存对话框让用户选择位置
@@ -1708,8 +1998,10 @@ pub fn reset_window_position(
         if let Ok(mut suppress) = position_save_suppress().lock() {
             suppress.insert(id.clone(), now_ms() + 1500);
         }
-        win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
-            .map_err(|e| e.to_string())?;
+        win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )))
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1731,7 +2023,11 @@ pub fn show_monitor_window(
         .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok())
         .and_then(|config| config.get("displayMode")?.as_str().map(str::to_owned))
         .is_some_and(|mode| mode == "mini");
-    let (width, height) = if is_mini { (300.0, 180.0) } else { (300.0, 520.0) };
+    let (width, height) = if is_mini {
+        (300.0, 180.0)
+    } else {
+        (300.0, 520.0)
+    };
     win.set_size(tauri::LogicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
     // 拦截关闭：停止采集并隐藏，保留窗口实例供下次打开复用。
@@ -1874,15 +2170,8 @@ pub fn show_pomodoro_window(
     let win = app
         .get_webview_window("pomodoro-overlay")
         .ok_or_else(|| "pomodoro-overlay 窗口未找到".to_string())?;
-    // Use the saved mode before showing so the window never flashes at the wrong size.
-    let is_mini = config_manager
-        .get_pomodoro_config()
-        .ok()
-        .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok())
-        .and_then(|config| config.get("displayMode")?.as_str().map(str::to_owned))
-        .is_some_and(|mode| mode == "mini");
-    let (width, height) = if is_mini { (150.0, 182.0) } else { (240.0, 260.0) };
-    win.set_size(tauri::LogicalSize::new(width, height))
+    // Keep the overlay size fixed now that the display mode has been removed.
+    win.set_size(tauri::LogicalSize::new(240.0, 240.0))
         .map_err(|e| e.to_string())?;
     // 拦截关闭：仅隐藏，不停计时。窗口复用后监听器也会保留，因此只注册一次。
     if !POMODORO_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
@@ -1979,9 +2268,7 @@ pub fn skip_pomodoro(
 
 /// 获取番茄钟工具启用状态
 #[tauri::command]
-pub fn get_pomodoro_enabled(
-    config_manager: State<'_, ConfigManager>,
-) -> Result<bool, String> {
+pub fn get_pomodoro_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_pomodoro_enabled()
 }
 
@@ -2008,9 +2295,7 @@ pub fn set_pomodoro_enabled(
 
 /// 获取番茄钟配置（JSON 字符串，空串表示未设置，前端取默认值）
 #[tauri::command]
-pub fn get_pomodoro_config(
-    config_manager: State<'_, ConfigManager>,
-) -> Result<String, String> {
+pub fn get_pomodoro_config(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
     config_manager.get_pomodoro_config()
 }
 
@@ -2106,6 +2391,14 @@ pub async fn set_ocr_engine(
 /// 进入录屏选区模式：显示 overlay 并通知前端切换到录制模式
 pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String> {
     crate::utils::logger::log("recording", "start_recording_select called");
+
+    if app
+        .try_state::<crate::scroll_capture::LongCaptureState>()
+        .map(|state| state.is_active())
+        .unwrap_or(false)
+    {
+        return Err("长截图进行中，请先完成或取消".into());
+    }
 
     // 如果已经在录制中，热键触发时停止录制（toggle 行为）
     if crate::hooks::mouse::is_recording_mode() {
@@ -2249,7 +2542,9 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if crate::hooks::mouse::is_recording_mode() {
-                    if let Some(state) = app_on_close.try_state::<crate::recording::RecordingState>() {
+                    if let Some(state) =
+                        app_on_close.try_state::<crate::recording::RecordingState>()
+                    {
                         let _ = state.cancel();
                     }
                     let _ = cancel_recording_select(app_on_close.clone());
@@ -2313,7 +2608,10 @@ pub fn start_recording(
     }
     crate::utils::logger::log(
         "recording",
-        &format!("start_recording: ({},{}) {}x{}, mode={}, fps={}", left, top, width, height, mode, fps),
+        &format!(
+            "start_recording: ({},{}) {}x{}, mode={}, fps={}",
+            left, top, width, height, mode, fps
+        ),
     );
 
     let record_mode = match mode.as_str() {
@@ -2548,14 +2846,12 @@ async fn save_gif_with_dialog(
         dialog = dialog.set_parent(&overlay);
     }
     let bytes = bytes.to_vec();
-    tokio::task::spawn_blocking(move || {
-        match dialog.save_file() {
-            Some(path) => {
-                std::fs::write(&path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
-                Ok(true)
-            }
-            None => Ok(false),
+    tokio::task::spawn_blocking(move || match dialog.save_file() {
+        Some(path) => {
+            std::fs::write(&path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+            Ok(true)
         }
+        None => Ok(false),
     })
     .await
     .map_err(|e| format!("任务执行失败: {}", e))?
@@ -2623,14 +2919,12 @@ async fn save_video_file_with_dialog(
         dialog = dialog.set_parent(&overlay);
     }
     let source = source.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        match dialog.save_file() {
-            Some(path) => {
-                std::fs::copy(&source, &path).map_err(|e| format!("写入文件失败: {}", e))?;
-                Ok(true)
-            }
-            None => Ok(false),
+    tokio::task::spawn_blocking(move || match dialog.save_file() {
+        Some(path) => {
+            std::fs::copy(&source, &path).map_err(|e| format!("写入文件失败: {}", e))?;
+            Ok(true)
         }
+        None => Ok(false),
     })
     .await
     .map_err(|e| format!("任务执行失败: {}", e))?
@@ -2737,7 +3031,9 @@ pub fn set_recording_save_path(
 
 /// 获取截图文件保存路径（空串表示未设置，每次保存时弹出对话框）
 #[tauri::command]
-pub fn get_screenshot_save_path(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
+pub fn get_screenshot_save_path(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<String, String> {
     config_manager.get_screenshot_save_path()
 }
 
@@ -2819,6 +3115,365 @@ pub fn get_quick_input_enabled(config: State<'_, ConfigManager>) -> Result<bool,
     config.get_quick_input_enabled()
 }
 
+/// Consume a screenshot request queued by the global hotkey while the
+/// frontend-created overlay window was still loading.
+#[tauri::command]
+pub fn consume_screenshot_start_pending() -> bool {
+    SCREENSHOT_START_PENDING.swap(false, Ordering::SeqCst)
+}
+
+fn configure_long_capture_frame(frame: &tauri::WebviewWindow) -> Result<(), String> {
+    let hwnd = frame.hwnd().map_err(|error| error.to_string())?;
+    unsafe {
+        // Do not use WDA_EXCLUDEFROMCAPTURE here: on some transparent WebView2
+        // builds it hides the entire frame instead of only excluding pixels.
+        let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let transparent = (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW).0 as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, current | transparent);
+    }
+    Ok(())
+}
+
+/// Start a manual vertical scrolling capture after removing the selection UI.
+#[tauri::command]
+pub fn start_long_capture(
+    app: tauri::AppHandle,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+) -> Result<crate::scroll_capture::LongCaptureSummary, String> {
+    crate::utils::logger::log(
+        "long-capture",
+        &format!(
+            "start_long_capture requested region=({}, {}) {}x{}",
+            left, top, width, height
+        ),
+    );
+    if width <= 0 || height <= 0 {
+        return Err("长截图区域尺寸无效".into());
+    }
+    if crate::hooks::mouse::is_recording_mode() {
+        return Err("录屏进行中，无法开始长截图".into());
+    }
+    let overlay = app
+        .get_webview_window("screenshot-overlay")
+        .ok_or_else(|| {
+            crate::utils::logger::log(
+            "long-capture",
+            "screenshot overlay missing during start; refusing to start without a loaded frontend",
+        );
+            "截图覆盖层尚未准备好，请重新选择区域".to_string()
+        })?;
+    let start_result = {
+        // Esc and native close hold this lock while tearing the session down.
+        // Taking it before hiding UI makes the check-and-register transition
+        // atomic with respect to that teardown.
+        let _session_lock = CAPTURE_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
+            || !crate::hooks::mouse::is_screenshot_mode()
+        {
+            return Err("截图会话已取消".into());
+        }
+        // The first frame must be captured after the overlay and all Levitaire
+        // UI have disappeared; otherwise the selection mask becomes part of it.
+        overlay.hide().map_err(|e| e.to_string())?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let toolbar_was_visible = app
+            .get_webview_window("toolbar")
+            .map(|window| window.is_visible().unwrap_or(false))
+            .unwrap_or(false);
+        TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.store(toolbar_was_visible, Ordering::SeqCst);
+        if let Some(window) = app.get_webview_window("orb") {
+            let _ = window.hide();
+        }
+        if let Some(window) = app.get_webview_window("toolbar") {
+            let _ = window.hide();
+        }
+        if let Some(window) = app.get_webview_window("palette") {
+            let _ = window.hide();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        // Prefer the foreground window saved before the overlay was shown.
+        // The selection center may be over the desktop or another topmost UI.
+        let saved_target = SCREENSHOT_TARGET_HWND.load(Ordering::SeqCst);
+        let saved_is_valid = if saved_target == 0 {
+            false
+        } else {
+            let target = HWND(saved_target as *mut std::ffi::c_void);
+            unsafe { IsWindow(Some(target)).as_bool() }
+        };
+        let target_hwnd = if saved_is_valid {
+            saved_target
+        } else {
+            let center = POINT {
+                x: left.saturating_add(width / 2),
+                y: top.saturating_add(height / 2),
+            };
+            let under_cursor = unsafe { WindowFromPoint(center) };
+            let under_cursor = unsafe { GetAncestor(under_cursor, GA_ROOT) };
+            if under_cursor.0.is_null() {
+                0
+            } else {
+                under_cursor.0 as isize
+            }
+        };
+        if target_hwnd != 0 {
+            let target = HWND(target_hwnd as *mut std::ffi::c_void);
+            if unsafe { IsWindow(Some(target)).as_bool() } {
+                // Best effort: Windows may reject foreground changes across
+                // input queues, but the user can still click the target window.
+                let _ = unsafe { SetForegroundWindow(target) };
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+        }
+        let state = app.state::<crate::scroll_capture::LongCaptureState>();
+        state.start(
+            app.clone(),
+            crate::scroll_capture::CaptureRegion {
+                left,
+                top,
+                width: width as u32,
+                height: height as u32,
+            },
+            target_hwnd,
+        )
+    };
+    let summary = match start_result {
+        Ok(summary) => summary,
+        Err(error) => {
+            crate::utils::logger::log("long-capture", &format!("start failed: {}", error));
+            cleanup_screenshot_session(&app);
+            return Err(error);
+        }
+    };
+    crate::utils::logger::log(
+        "long-capture",
+        &format!(
+            "worker started result_id={} target_hwnd={:?}",
+            summary.result_id,
+            SCREENSHOT_TARGET_HWND.load(Ordering::SeqCst)
+        ),
+    );
+    // The full selection overlay is gone. Keep ordinary mouse/keyboard input
+    // flowing to the target; Esc remains handled by the independent long
+    // capture session check in the global keyboard hook.
+    crate::hooks::mouse::set_screenshot_mode(false);
+    if let Some(frame) = app.get_webview_window("long-capture-frame") {
+        let _ = configure_long_capture_frame(&frame);
+        let _ = frame.set_ignore_cursor_events(true);
+        // Put the 2px CSS border outside the captured rectangle. The frame can
+        // stay visible throughout sampling without becoming part of the PNG.
+        let _ = frame.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            left.saturating_sub(2),
+            top.saturating_sub(2),
+        )));
+        let _ = frame.set_size(tauri::PhysicalSize::new(
+            width.saturating_add(4) as u32,
+            height.saturating_add(4) as u32,
+        ));
+        let _ = frame.set_always_on_top(true);
+        let _ = frame.show();
+    }
+    if let Some(controls) = app.get_webview_window("long-capture-controls") {
+        let bounds = crate::screenshot::virtual_desktop_bounds().ok();
+        let control_size = controls.outer_size().ok();
+        let control_width = control_size.map(|size| size.width as i32).unwrap_or(300);
+        let control_height = control_size.map(|size| size.height as i32).unwrap_or(64);
+        let mut control_x = left;
+        let mut control_y = top.saturating_add(height).saturating_add(10);
+        if let Some(bounds) = bounds {
+            let right = bounds.origin_x.saturating_add(bounds.width);
+            let bottom = bounds.origin_y.saturating_add(bounds.height);
+            let max_x = right.saturating_sub(control_width).max(bounds.origin_x);
+            let max_y = bottom.saturating_sub(control_height).max(bounds.origin_y);
+            if control_y.saturating_add(control_height) > bottom {
+                control_y = top.saturating_sub(control_height + 10);
+            }
+            control_x = control_x.clamp(bounds.origin_x, max_x);
+            control_y = control_y.clamp(bounds.origin_y, max_y);
+        }
+        let _ = controls.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            control_x, control_y,
+        )));
+        let _ = controls.show();
+        let _ = controls.set_always_on_top(true);
+    }
+    // Showing a focusable controls window can briefly make Levitaire the
+    // foreground app. Give input back to the application under the capture
+    // region so wheel and keyboard scrolling work immediately.
+    let target_hwnd = SCREENSHOT_TARGET_HWND.load(Ordering::SeqCst);
+    if target_hwnd != 0 {
+        let target = HWND(target_hwnd as *mut std::ffi::c_void);
+        if unsafe { IsWindow(Some(target)).as_bool() } {
+            let _ = unsafe { SetForegroundWindow(target) };
+        }
+    }
+    let _ = app.emit("long-capture-started", &summary);
+    crate::utils::logger::log("long-capture", "long-capture-started emitted");
+    Ok(summary)
+}
+
+#[tauri::command]
+pub fn stop_long_capture(
+    app: tauri::AppHandle,
+    result_id: u64,
+) -> Result<crate::scroll_capture::LongCaptureSummary, String> {
+    crate::utils::logger::log(
+        "long-capture",
+        &format!("stop_long_capture requested result_id={}", result_id),
+    );
+    let state = app.state::<crate::scroll_capture::LongCaptureState>();
+    let summary = match state.stop(result_id) {
+        Ok(summary) => summary,
+        Err(error) => {
+            cleanup_screenshot_session(&app);
+            let _ = app.emit("long-capture-cancelled", ());
+            let _ = app.emit_to("screenshot-overlay", "long-capture-overlay-reset", ());
+            return Err(error);
+        }
+    };
+    // Preserve the completed result while ending the overlay session. The
+    // controls window remains alive and switches to its preview state.
+    crate::hooks::mouse::set_screenshot_mode(false);
+    if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
+        let _ = overlay.hide();
+    }
+    if let Some(frame) = app.get_webview_window("long-capture-frame") {
+        let _ = frame.hide();
+    }
+    if let Some(orb) = app.get_webview_window("orb") {
+        if ORB_VISIBLE_BEFORE_SESSION.load(Ordering::SeqCst) {
+            let _ = orb.show();
+            let _ = orb.set_always_on_top(true);
+        }
+    }
+    if TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.swap(false, Ordering::SeqCst) {
+        if let Some(toolbar) = app.get_webview_window("toolbar") {
+            let _ = toolbar.show();
+        }
+    }
+    if let Some(cache) = app.try_state::<crate::screenshot::ScreenCache>() {
+        if let Ok(mut guard) = cache.pixels.lock() {
+            *guard = None;
+        }
+    }
+    CAPTURE_SESSION_ACTIVE.store(false, Ordering::SeqCst);
+    SCREENSHOT_TARGET_HWND.store(0, Ordering::SeqCst);
+    let _ = app.emit("long-capture-completed", &summary);
+    crate::utils::logger::log(
+        "long-capture",
+        &format!("long-capture-completed emitted result_id={}", result_id),
+    );
+    let _ = app.emit_to("screenshot-overlay", "long-capture-overlay-reset", ());
+    Ok(summary)
+}
+
+#[tauri::command]
+pub fn cancel_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<(), String> {
+    let state = app.state::<crate::scroll_capture::LongCaptureState>();
+    state.cancel(result_id)?;
+    cleanup_screenshot_session(&app);
+    let _ = app.emit("long-capture-cancelled", ());
+    let _ = app.emit_to("screenshot-overlay", "long-capture-overlay-reset", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_long_capture_status(
+    state: tauri::State<'_, crate::scroll_capture::LongCaptureState>,
+    result_id: u64,
+) -> Result<crate::scroll_capture::LongCaptureSummary, String> {
+    state.status(result_id)
+}
+
+#[tauri::command]
+pub fn get_long_capture_preview(
+    state: tauri::State<'_, crate::scroll_capture::LongCaptureState>,
+    result_id: u64,
+) -> Result<String, String> {
+    state.preview(result_id)
+}
+
+#[tauri::command]
+pub async fn save_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<bool, String> {
+    let state = app.state::<crate::scroll_capture::LongCaptureState>();
+    let (bgra, width, height) = state.raw(result_id)?;
+    let save_path = app.state::<ConfigManager>().get_screenshot_save_path()?;
+    if !save_path.is_empty() && std::path::Path::new(&save_path).is_dir() {
+        let now = chrono::Local::now();
+        let filename = format!(
+            "long_screenshot_{}_{}.png",
+            now.format("%Y%m%d_%H%M%S"),
+            now.timestamp_subsec_millis()
+        );
+        let path = std::path::Path::new(&save_path).join(filename);
+        return tokio::task::spawn_blocking(move || {
+            let bytes = crate::scroll_capture::encode_png_direct(&bgra, width, height)?;
+            std::fs::write(path, bytes).map_err(|e| format!("写入长截图失败: {e}"))?;
+            Ok(true)
+        })
+        .await
+        .map_err(|e| format!("保存任务失败: {e}"))?;
+    }
+    let dialog = rfd::FileDialog::new()
+        .set_file_name("long_screenshot.png")
+        .add_filter("PNG 图片", &["png"]);
+    let result = tokio::task::spawn_blocking(move || {
+        let bytes = crate::scroll_capture::encode_png_direct(&bgra, width, height)?;
+        match dialog.save_file() {
+            Some(path) => {
+                std::fs::write(path, bytes).map_err(|e| format!("写入长截图失败: {e}"))?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    })
+    .await
+    .map_err(|e| format!("保存任务失败: {e}"))?;
+    result
+}
+
+#[tauri::command]
+pub async fn clipboard_set_long_capture(
+    state: tauri::State<'_, crate::scroll_capture::LongCaptureState>,
+    result_id: u64,
+) -> Result<(), String> {
+    const MAX_CLIPBOARD_DIB_BYTES: u64 = 48 * 1024 * 1024;
+    let (width, height) = state.dimensions(result_id)?;
+    let dib_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "长截图尺寸溢出".to_string())?;
+    if dib_bytes > MAX_CLIPBOARD_DIB_BYTES {
+        return Err("长截图过大，复制已拒绝，请改用保存文件".to_string());
+    }
+    let (bgra, width, height) = state.raw(result_id)?;
+    tokio::task::spawn_blocking(move || {
+        ClipboardManager::new()
+            .copy_bgra_image(&bgra, width, height)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("复制任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub fn discard_long_capture(
+    state: tauri::State<'_, crate::scroll_capture::LongCaptureState>,
+    result_id: u64,
+) {
+    state.discard(result_id);
+}
+
+#[tauri::command]
+pub fn get_quick_input_state() -> crate::quick_input::QuickInputState {
+    crate::quick_input::state()
+}
+
 #[tauri::command]
 pub fn set_quick_input_enabled(
     enabled: bool,
@@ -2886,10 +3541,7 @@ pub fn get_quick_input_mode(config: State<'_, ConfigManager>) -> Result<String, 
 
 /// 设置快速输入转盘触发模式（"click" 单击切换 | "hold" 按住唤起）
 #[tauri::command]
-pub fn set_quick_input_mode(
-    mode: String,
-    config: State<'_, ConfigManager>,
-) -> Result<(), String> {
+pub fn set_quick_input_mode(mode: String, config: State<'_, ConfigManager>) -> Result<(), String> {
     let normalized = mode.trim().to_lowercase();
     if normalized != "click" && normalized != "hold" {
         return Err(format!("无法识别的触发模式: {}", mode));
@@ -2899,8 +3551,47 @@ pub fn set_quick_input_mode(
     Ok(())
 }
 
+/// 获取快速输入剪贴板历史保留条数。
+#[tauri::command]
+pub fn get_quick_input_history_limit(config: State<'_, ConfigManager>) -> Result<usize, String> {
+    let limit = config.get_quick_input_history_limit()?;
+    Ok(limit.min(crate::quick_input::HISTORY_MAX))
+}
+
+/// 设置快速输入剪贴板历史保留条数，0 表示不记录历史。
+#[tauri::command]
+pub fn set_quick_input_history_limit(
+    limit: usize,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    if limit > crate::quick_input::HISTORY_MAX {
+        return Err(format!(
+            "历史保留条数必须在 0 到 {} 之间",
+            crate::quick_input::HISTORY_MAX
+        ));
+    }
+    config.update_quick_input_history_limit(limit)?;
+    crate::quick_input::set_history_limit(limit);
+    Ok(())
+}
+
 /// 前端在转盘内移动鼠标时同步当前高亮扇区索引（-1 = 无选中），
 /// 供「按住唤起」模式在松开触发键时读取并作为选中项。
+#[tauri::command]
+pub fn get_quick_input_history_enabled(config: State<'_, ConfigManager>) -> Result<bool, String> {
+    config.get_quick_input_history_enabled()
+}
+
+#[tauri::command]
+pub fn set_quick_input_history_enabled(
+    enabled: bool,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config.update_quick_input_history_enabled(enabled)?;
+    crate::quick_input::set_history_enabled(enabled);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn set_quick_input_highlight(index: i32) -> Result<(), String> {
     crate::quick_input::set_highlight(index);
@@ -2949,6 +3640,22 @@ pub fn toggle_quick_input_wheel(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 幂等取消快速输入转盘，供前端定位失败等异常路径复位后端会话。
+#[tauri::command]
+pub fn cancel_quick_input_wheel(
+    generation: Option<u64>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let current = crate::quick_input::state();
+    if current.active
+        && generation
+            .map(|value| value == current.generation)
+            .unwrap_or(true)
+    {
+        crate::quick_input::end_wheel(&app, None);
+    }
+    Ok(())
+}
 
 /// 预创建快速输入转盘窗口（隐藏）。工具启用时由前端调用一次；
 /// 应用启动时也会在 main.rs 的 setup 中调用（quick_input::ensure_window），

@@ -20,9 +20,9 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    PostQuitMessage, RegisterClassExW, TranslateMessage, MSG, WINDOW_EX_STYLE, WS_EX_TOOLWINDOW,
-    WM_DESTROY, WNDCLASSEXW, WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostQuitMessage,
+    RegisterClassExW, TranslateMessage, MSG, WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSEXW,
+    WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 
 /// CF_UNICODETEXT
@@ -307,7 +307,11 @@ mod tests {
             at_ms: 1000,
         });
         // 恰好在超时边界内仍视为新鲜
-        assert!(check_self_write(&mut entry, "hello", 1000 + SELF_WRITE_TIMEOUT_MS));
+        assert!(check_self_write(
+            &mut entry,
+            "hello",
+            1000 + SELF_WRITE_TIMEOUT_MS
+        ));
         assert!(entry.is_some());
     }
 

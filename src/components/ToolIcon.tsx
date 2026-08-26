@@ -10,7 +10,8 @@ export type ToolIconName =
   | "X"
   | "Rocket"
   | "Compass"
-  | "Timer";
+  | "Timer"
+  | "Pencil";
 
 interface ToolIconProps {
   name: ToolIconName;
@@ -124,6 +125,14 @@ function ToolIcon({ name, size = 20, className = "", style }: ToolIconProps) {
           <path d="M12 7.5c-1.2-2.6-3.4-3.4-4.8-2.7 1 .5 1.6 1.5 1.8 2.9" />
           <path d="M12 7.5c1.2-2.6 3.4-3.4 4.8-2.7-1 .5-1.6 1.5-1.8 2.9" />
           <path d="M12 7.5V5" />
+        </svg>
+      );
+
+    case "Pencil":
+      return (
+        <svg {...common}>
+          <path d="M4 20l4.2-1 9.6-9.6a2 2 0 0 0-2.8-2.8L5.4 16.2z" />
+          <path d="M13.5 7.5l3 3" />
         </svg>
       );
 

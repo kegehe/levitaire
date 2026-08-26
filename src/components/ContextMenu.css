@@ -1,0 +1,63 @@
+.context-menu {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 100%;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.22), var(--shadow-sm);
+  color: var(--color-fg);
+  font-family: var(--font-sans, "Segoe UI", sans-serif);
+  font-size: 13px;
+  letter-spacing: 0;
+  user-select: none;
+}
+
+.context-menu-group + .context-menu-group {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--color-border);
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 34px;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 20px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--transition-fast, 0.15s), color var(--transition-fast, 0.15s);
+}
+
+.context-menu-item svg {
+  flex: 0 0 17px;
+  color: var(--color-fg-muted);
+}
+
+.context-menu-item:hover,
+.context-menu-item:focus-visible {
+  outline: none;
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.context-menu-item:hover svg,
+.context-menu-item:focus-visible svg {
+  color: currentColor;
+}
+
+.context-menu-item.is-destructive:hover,
+.context-menu-item.is-destructive:focus-visible {
+  background: rgb(218 72 72 / 0.13);
+  color: var(--color-danger-fg, #d84a4a);
+}

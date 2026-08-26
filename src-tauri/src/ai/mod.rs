@@ -694,11 +694,12 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_ai_call() {
-        let api_key = std::env::var("LEVITAIRE_AI_API_KEY").expect("请设置环境变量 LEVITAIRE_AI_API_KEY");
+        let api_key =
+            std::env::var("LEVITAIRE_AI_API_KEY").expect("请设置环境变量 LEVITAIRE_AI_API_KEY");
         let base_url = std::env::var("LEVITAIRE_AI_BASE_URL")
             .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-        let model = std::env::var("LEVITAIRE_AI_MODEL")
-            .unwrap_or_else(|_| "claude-sonnet-5".to_string());
+        let model =
+            std::env::var("LEVITAIRE_AI_MODEL").unwrap_or_else(|_| "claude-sonnet-5".to_string());
 
         let config = AiConfig {
             api_key,

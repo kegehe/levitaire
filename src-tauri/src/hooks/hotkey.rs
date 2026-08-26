@@ -29,8 +29,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const HOTKEY_ID_SCREENSHOT: i32 = 9001;
 /// 录屏热键 ID
 const HOTKEY_ID_RECORDING: i32 = 9003;
+const HOTKEY_ID_SKETCH: i32 = 9004;
 /// 槽位数量
-const SLOT_COUNT: usize = 2;
+const SLOT_COUNT: usize = 3;
 /// 自定义消息：注册热键（lparam = *mut HotkeyRequest）
 const WM_REGISTER_HOTKEY: u32 = WM_USER + 1;
 /// 自定义消息：反注册热键
@@ -41,6 +42,7 @@ const WM_UNREGISTER_HOTKEY: u32 = WM_USER + 2;
 pub enum HotkeySlotId {
     Screenshot,
     Recording,
+    Sketch,
 }
 
 impl HotkeySlotId {
@@ -48,12 +50,14 @@ impl HotkeySlotId {
         match self {
             Self::Screenshot => HOTKEY_ID_SCREENSHOT,
             Self::Recording => HOTKEY_ID_RECORDING,
+            Self::Sketch => HOTKEY_ID_SKETCH,
         }
     }
     fn index(self) -> usize {
         match self {
             Self::Screenshot => 0,
             Self::Recording => 1,
+            Self::Sketch => 2,
         }
     }
 }
@@ -100,7 +104,7 @@ static HOTKEY_STATE: HotkeyState = HotkeyState {
     hwnd: AtomicU32::new(0),
     suppress_until_ms: AtomicU64::new(0),
     app_handle: OnceLock::new(),
-    slots: [HotkeySlot::new(), HotkeySlot::new()],
+    slots: [HotkeySlot::new(), HotkeySlot::new(), HotkeySlot::new()],
 };
 
 /// 当前时间戳（毫秒）
@@ -189,6 +193,7 @@ unsafe extern "system" fn hotkey_wndproc(
             let slot = match id {
                 HOTKEY_ID_SCREENSHOT => HotkeySlotId::Screenshot,
                 HOTKEY_ID_RECORDING => HotkeySlotId::Recording,
+                HOTKEY_ID_SKETCH => HotkeySlotId::Sketch,
                 _ => return LRESULT(0),
             };
             // 注册后短期内忽略触发：录入快捷键时组合键仍按着，注册瞬间会立即触发一次
@@ -210,7 +215,18 @@ unsafe extern "system" fn hotkey_wndproc(
                         // which can be unavailable while that WebView reloads.
                         let app = app.clone();
                         std::thread::spawn(move || {
-                            if let Err(error) = crate::commands::start_screenshot_inner(app) {
+                            if app.get_webview_window("screenshot-overlay").is_none() {
+                                // The overlay is a frontend-created window. Ask
+                                // the resident orb to create it and start the
+                                // session instead of failing with "overlay not loaded".
+                                crate::commands::queue_screenshot_start_pending();
+                                let _ = app.emit("ensure-overlay-and-start-screenshot", ());
+                                crate::utils::logger::log(
+                                    "hotkey",
+                                    "overlay missing; requested frontend screenshot startup",
+                                );
+                            } else if let Err(error) = crate::commands::start_screenshot_inner(app)
+                            {
                                 crate::utils::logger::log(
                                     "hotkey",
                                     &format!("failed to start screenshot from hotkey: {}", error),
@@ -229,7 +245,9 @@ unsafe extern "system" fn hotkey_wndproc(
                                 // overlay 已存在，直接启动录制选区
                                 let inner_app = app_clone.clone();
                                 std::thread::spawn(move || {
-                                    if let Err(error) = crate::commands::start_recording_select_inner(inner_app) {
+                                    if let Err(error) =
+                                        crate::commands::start_recording_select_inner(inner_app)
+                                    {
                                         crate::utils::logger::log(
                                             "hotkey",
                                             &format!("failed to start recording: {}", error),
@@ -237,6 +255,14 @@ unsafe extern "system" fn hotkey_wndproc(
                                     }
                                 });
                             }
+                        });
+                    }
+                    HotkeySlotId::Sketch => {
+                        let app_clone = app.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            // The frontend positions the overlay from the current cursor monitor
+                            // before showing it, which also handles an existing window.
+                            let _ = app_clone.emit("ensure-sketch-window", ());
                         });
                     }
                 }
@@ -254,6 +280,7 @@ unsafe extern "system" fn hotkey_wndproc(
             let slot = match wparam.0 as i32 {
                 HOTKEY_ID_SCREENSHOT => HotkeySlotId::Screenshot,
                 HOTKEY_ID_RECORDING => HotkeySlotId::Recording,
+                HOTKEY_ID_SKETCH => HotkeySlotId::Sketch,
                 _ => return LRESULT(0),
             };
             unregister_hotkey_inner(slot);
@@ -579,8 +606,10 @@ mod tests {
     fn test_slot_id_mapping() {
         assert_eq!(HotkeySlotId::Screenshot.id(), HOTKEY_ID_SCREENSHOT);
         assert_eq!(HotkeySlotId::Recording.id(), HOTKEY_ID_RECORDING);
+        assert_eq!(HotkeySlotId::Sketch.id(), HOTKEY_ID_SKETCH);
         assert_eq!(HotkeySlotId::Screenshot.index(), 0);
         assert_eq!(HotkeySlotId::Recording.index(), 1);
+        assert_eq!(HotkeySlotId::Sketch.index(), 2);
     }
 
     #[test]

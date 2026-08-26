@@ -8,11 +8,28 @@ fn init_ort_dylib() {
     use std::path::PathBuf;
     let candidates: &[fn() -> Option<PathBuf>] = &[
         // 1. ORT_DYLIB_PATH 环境变量（用户显式指定，最高优先级）
-        || std::env::var("ORT_DYLIB_PATH").ok().map(PathBuf::from).filter(|p| p.exists()),
+        || {
+            std::env::var("ORT_DYLIB_PATH")
+                .ok()
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+        },
         // 2. 仓库 libs/ 目录（开发模式 cargo tauri dev）
         || {
-            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("libs").join("onnxruntime.dll");
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("libs")
+                .join("onnxruntime.dll");
             p.exists().then_some(p)
+        },
+        // Tauri 发布包的 resource_dir 通常位于 exe 同级 resources/。
+        || {
+            let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+            [
+                exe_dir.join("onnxruntime.dll"),
+                exe_dir.join("resources").join("onnxruntime.dll"),
+            ]
+            .into_iter()
+            .find(|p| p.exists())
         },
     ];
     for candidate in candidates {
@@ -38,15 +55,15 @@ mod pomodoro;
 mod quick_input;
 mod recording;
 mod screenshot;
+mod scroll_capture;
 mod sound;
 mod tts;
 mod updater;
 mod utils;
 
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Emitter, Manager,
 };
 
 fn main() {
@@ -100,6 +117,20 @@ fn main() {
 
             // 初始化截图启用标志（热键触发时检查）
             hooks::hotkey::set_screenshot_enabled(startup_config.screenshot_enabled);
+            hooks::hotkey::set_slot_enabled(hooks::hotkey::HotkeySlotId::Sketch, startup_config.sketch_enabled);
+            let startup_sketch_hotkey = startup_config.sketch_hotkey.clone();
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    if startup_sketch_hotkey.is_empty() {
+                        break;
+                    }
+                    match hooks::hotkey::register_hotkey(hooks::hotkey::HotkeySlotId::Sketch, &startup_sketch_hotkey) {
+                        Ok(_) => break,
+                        Err(error) if error == "热键线程未就绪" => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        Err(error) => { crate::utils::logger::log("hotkey", &format!("草稿快捷键注册失败: {}", error)); break; }
+                    }
+                }
+            });
             // 初始化文字工具栏启用标志（鼠标钩子选区检测时检查）
             hooks::mouse::set_text_toolbar_enabled(startup_config.text_toolbar_enabled);
 
@@ -111,11 +142,25 @@ fn main() {
 
             // 初始化快速输入转盘触发键（启用且键有效时设置 vk_code）
             {
-                // 从本地文件恢复持久化的剪贴板历史（重启后不丢失）
+                // 先应用历史保留条数，再从本地文件恢复，确保旧历史按新设置裁剪。
+                let qi_history_enabled = config_manager
+                    .get_quick_input_history_enabled()
+                    .unwrap_or(true);
+                quick_input::set_history_enabled(qi_history_enabled);
+                let qi_history_limit = config_manager
+                    .get_quick_input_history_limit()
+                    .unwrap_or(quick_input::HISTORY_DEFAULT_LIMIT);
+                quick_input::set_history_limit(qi_history_limit);
                 quick_input::load_history();
                 let qi_enabled = config_manager.get_quick_input_enabled().unwrap_or(false);
-                let qi_key = config_manager.get_quick_input_trigger_key().unwrap_or_default();
-                let qi_key = if qi_key.is_empty() { "CapsLock".to_string() } else { qi_key };
+                let qi_key = config_manager
+                    .get_quick_input_trigger_key()
+                    .unwrap_or_default();
+                let qi_key = if qi_key.is_empty() {
+                    "CapsLock".to_string()
+                } else {
+                    qi_key
+                };
                 let vk = if qi_enabled {
                     quick_input::parse_trigger_key(&qi_key).unwrap_or(0)
                 } else {
@@ -141,6 +186,20 @@ fn main() {
             app.manage(config_manager);
             // 截图全屏画面缓存（进入截图模式时填充，退出时清空）
             app.manage(screenshot::ScreenCache::default());
+            app.manage(scroll_capture::LongCaptureState::default());
+
+            // PaddleOCR 模型随安装包分发，优先使用 resource_dir/ocr；
+            // 若资源不存在，paddle_ocr 会回退到用户数据目录以兼容旧版本。
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let model_dir = resource_dir.join("ocr");
+                if model_dir.is_dir() {
+                    std::env::set_var("LEVITAIRE_OCR_MODEL_DIR", &model_dir);
+                    crate::utils::logger::log(
+                        "ocr",
+                        &format!("使用安装包内 OCR 模型目录: {}", model_dir.display()),
+                    );
+                }
+            }
 
             // 应用 OCR 引擎偏好：写入 ocr 模块全局变量，OCR 服务懒加载初始化时
             // 会读取该偏好（见 ocr::ensure_ocr_service）。未设置时 EngineId::from_str 返回 None，
@@ -194,15 +253,6 @@ fn main() {
             // settings 和 palette 窗口的关闭拦截已移至 show_settings/show_palette 命令中
             // （延迟创建窗口时，在首次 show 时注册关闭拦截）
 
-            // 创建系统托盘菜单
-            let toggle_orb =
-                MenuItem::with_id(app, "toggle_orb", "显示/隐藏浮球", true, None::<&str>)?;
-            let show_settings =
-                MenuItem::with_id(app, "show_settings", "设置", true, None::<&str>)?;
-            let separator = PredefinedMenuItem::separator(app)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&toggle_orb, &show_settings, &separator, &quit])?;
-
             // 创建系统托盘图标
             // 运行时从 icons/icon.png 读取，避免依赖编译时嵌入的旧图标
             let tray_icon = {
@@ -217,9 +267,17 @@ fn main() {
                         tauri::image::Image::new_owned(rgba.into_raw(), w, h)
                     }
                     Err(e) => {
-                        crate::utils::logger::log("tray", &format!("无法加载图标文件 {}: {e}，回退到默认图标", icon_path.display()));
+                        crate::utils::logger::log(
+                            "tray",
+                            &format!(
+                                "无法加载图标文件 {}: {e}，回退到默认图标",
+                                icon_path.display()
+                            ),
+                        );
                         app.default_window_icon()
-                            .expect("未找到默认图标，请检查 src-tauri/icons/ 目录下是否存在图标文件")
+                            .expect(
+                                "未找到默认图标，请检查 src-tauri/icons/ 目录下是否存在图标文件",
+                            )
                             .to_owned()
                     }
                 }
@@ -227,7 +285,6 @@ fn main() {
             let _tray = TrayIconBuilder::new()
                 .icon(tray_icon)
                 .tooltip("Levitaire")
-                .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
@@ -258,6 +315,23 @@ fn main() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Right,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        position,
+                        ..
+                    } = event
+                    {
+                        let _ = tray.app_handle().emit(
+                            "tray-context-menu-request",
+                            serde_json::json!({
+                                "source": "tray",
+                                "x": position.x,
+                                "y": position.y,
+                            }),
+                        );
+                        return;
+                    }
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: tauri::tray::MouseButtonState::Up,
@@ -379,7 +453,8 @@ fn main() {
                     {
                         use windows::Win32::Foundation::RECT;
                         use windows::Win32::UI::WindowsAndMessaging::{
-                            SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+                            SystemParametersInfoW, SPI_GETWORKAREA,
+                            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
                         };
                         let mut rc = RECT::default();
                         let ok = unsafe {
@@ -419,17 +494,33 @@ fn main() {
             commands::hide_toolbar,
             commands::show_orb,
             commands::hide_orb,
+            commands::toggle_orb,
             commands::show_palette,
             commands::hide_palette,
+            commands::show_sketch_window,
+            commands::hide_sketch_window,
+            commands::get_sketch_enabled,
+            commands::set_sketch_enabled,
+            commands::capture_sketch_background,
             commands::start_screenshot,
+            commands::consume_screenshot_start_pending,
             commands::cancel_screenshot,
             commands::get_virtual_desktop_bounds,
             commands::get_screen_cache_png,
             commands::capture_region,
+            commands::start_long_capture,
+            commands::stop_long_capture,
+            commands::cancel_long_capture,
+            commands::get_long_capture_status,
+            commands::get_long_capture_preview,
+            commands::save_long_capture,
+            commands::clipboard_set_long_capture,
+            commands::discard_long_capture,
             commands::clipboard_set_image,
             commands::ocr_region,
             commands::pin_image,
             commands::close_pin,
+            commands::pin_context_menu_action,
             commands::show_settings,
             commands::exit_app,
             commands::call_ai,
@@ -450,6 +541,8 @@ fn main() {
             commands::set_qrcode_preview,
             commands::get_screenshot_hotkey,
             commands::set_screenshot_hotkey,
+            commands::get_sketch_hotkey,
+            commands::set_sketch_hotkey,
             commands::set_screenshot_enabled,
             commands::get_screenshot_enabled,
             commands::set_text_toolbar_enabled,
@@ -526,11 +619,16 @@ fn main() {
             commands::get_tools_autostart,
             commands::set_tools_autostart,
             commands::get_quick_input_enabled,
+            commands::get_quick_input_state,
             commands::set_quick_input_enabled,
             commands::get_quick_input_trigger_key,
             commands::set_quick_input_trigger_key,
             commands::get_quick_input_mode,
             commands::set_quick_input_mode,
+            commands::get_quick_input_history_limit,
+            commands::set_quick_input_history_limit,
+            commands::get_quick_input_history_enabled,
+            commands::set_quick_input_history_enabled,
             commands::set_quick_input_highlight,
             commands::get_quick_input_snippets,
             commands::set_quick_input_snippets,
@@ -539,6 +637,7 @@ fn main() {
             commands::quick_input_paste,
             commands::ensure_quick_input_window,
             commands::toggle_quick_input_wheel,
+            commands::cancel_quick_input_wheel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

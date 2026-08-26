@@ -104,7 +104,14 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             // A full-screen or edge-to-edge recording has no safe location for
             // overlay controls. Keep these controls global and outside capture.
             let in_recording = crate::hooks::mouse::is_recording_mode();
+            let in_long_capture = KB_STATE
+                .app_handle
+                .get()
+                .and_then(|app| app.try_state::<crate::scroll_capture::LongCaptureState>())
+                .map(|state| state.is_active())
+                .unwrap_or(false);
             let in_screenshot = crate::hooks::mouse::is_screenshot_mode()
+                || in_long_capture
                 || crate::commands::is_screenshot_starting();
             let ctrl_pressed = (GetKeyState(VK_CONTROL.0 as i32) as u16) & 0x8000 != 0;
             let shift_pressed = (GetKeyState(VK_SHIFT.0 as i32) as u16) & 0x8000 != 0;
@@ -251,6 +258,16 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         KB_STATE.processing.store(false, Ordering::SeqCst);
                     }
                 }
+            } else if in_long_capture && matches!(vk_code, 0x28 | 0x22 | 0x20 | 0x23) {
+                // Down, PageDown, Space and End can all advance a scrollable
+                // target without producing WM_MOUSEWHEEL. Notify the worker
+                // while allowing the key to reach the target application.
+                if let Some(app) = KB_STATE.app_handle.get() {
+                    if let Some(state) = app.try_state::<crate::scroll_capture::LongCaptureState>()
+                    {
+                        state.notify_activity_at_cursor();
+                    }
+                }
             }
         }
 
@@ -259,10 +276,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         // hold 模式：按住唤出，松开按当前高亮扇区确认输入。
         // 跳过程序模拟的按键（SendInput 注入的事件标记为 LLKHF_INJECTED）。
         let trigger_vk = crate::quick_input::trigger_vk();
-        if trigger_vk != 0
-            && vk_code == trigger_vk as u32
-            && kb_ref.flags.0 & 0x10 == 0
-        {
+        if trigger_vk != 0 && vk_code == trigger_vk as u32 && kb_ref.flags.0 & 0x10 == 0 {
             // 日志仅做纯内存操作（无 GetWindowTextW 等跨进程调用），
             // 避免阻塞 WH_KEYBOARD_LL 回调导致钩子被系统静默卸载。
             crate::utils::logger::log(
@@ -302,7 +316,8 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 return LRESULT(1);
             } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
                 // 松开触发器时复位按下标志，允许下一次按下再次触发。
-                if crate::quick_input::is_hold_mode() && crate::quick_input::is_active()
+                if crate::quick_input::is_hold_mode()
+                    && crate::quick_input::is_active()
                     && crate::quick_input::is_trigger_down()
                 {
                     // 按住唤起模式：松开即结束转盘，并按当前高亮扇区确认输入。

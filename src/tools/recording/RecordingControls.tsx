@@ -58,10 +58,14 @@ function RecordingControls() {
     document.body.style.margin = "0";
 
     // Signal that React has rendered before the native window is shown.
+    const unReadyRequest = listen("recording-controls-ready-request", () => {
+      void emit("recording-controls-ready");
+    });
     void emit("recording-controls-ready");
     syncState();
 
     const unlisten = Promise.all([
+      unReadyRequest,
       listen("recording-progress", (event) => {
         const data = event.payload as { type: string; elapsedMs?: number; frameCount?: number };
         // 结束类事件：直接隐藏控制窗口

@@ -6,6 +6,7 @@ import {
   ArrowDown,
   X,
   Check,
+  Save,
   Settings,
   Undo2,
   Loader2,
@@ -37,6 +38,7 @@ import {
   Hash,
   Palette,
   RemoveFormatting,
+  Trash2,
   Calculator,
   Volume2,
   Play,
@@ -64,6 +66,10 @@ import {
   Eraser,
   Languages,
   RefreshCw,
+  ZoomIn,
+  ZoomOut,
+  Minus,
+  Circle,
 } from "lucide-react";
 import type { LucideProps } from "lucide-react";
 
@@ -75,6 +81,7 @@ const ICON_MAP = {
   ArrowDown,
   X,
   Check,
+  Save,
   Settings,
   Undo2,
   Loader2,
@@ -106,6 +113,7 @@ const ICON_MAP = {
   Hash,
   Palette,
   RemoveFormatting,
+  Trash2,
   Calculator,
   Volume2,
   Play,
@@ -133,6 +141,10 @@ const ICON_MAP = {
   Eraser,
   Languages,
   RefreshCw,
+  ZoomIn,
+  ZoomOut,
+  Minus,
+  Circle,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;

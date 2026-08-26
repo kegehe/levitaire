@@ -1,17 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
 import {
   fetchPomodoroConfig,
-  savePomodoroConfig,
   DEFAULT_POMODORO_CONFIG,
   POMODORO_STAGE_LABELS,
   POMODORO_STAGE_COLORS,
   type PomodoroConfig,
-  type PomodoroDisplayMode,
   type PomodoroStage,
 } from "../../constants/pomodoroConfig";
 import {
@@ -31,11 +29,6 @@ interface PomodoroStatePayload {
   rounds_done: number;
 }
 
-const POMODORO_WINDOW_SIZES: Record<PomodoroDisplayMode, { width: number; height: number }> = {
-  full: { width: 240, height: 260 },
-  mini: { width: 150, height: 182 },
-};
-
 const RING_RADIUS = 52;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
@@ -54,19 +47,15 @@ function PomodoroTool() {
   const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [state, setState] = useState<PomodoroStatePayload | null>(null);
   const [config, setConfig] = useState<PomodoroConfig>(DEFAULT_POMODORO_CONFIG);
-  const configRef = useRef<PomodoroConfig>(DEFAULT_POMODORO_CONFIG);
   const actionPending = useRef(false);
 
   const stage: PomodoroStage = state?.stage ?? "focus";
-  const remaining = state?.remaining_secs ?? configRef.current.workMinutes * 60;
-  const total = state?.total_secs ?? configRef.current.workMinutes * 60;
+  const remaining = state?.remaining_secs ?? config.workMinutes * 60;
+  const total = state?.total_secs ?? config.workMinutes * 60;
   const running = state?.running ?? false;
-  const isMini = config.displayMode === "mini";
   const progress = total > 0 ? Math.min(1, Math.max(0, remaining / total)) : 0;
   const roundsBeforeLongBreak = Math.max(1, config.roundsBeforeLongBreak);
   const done = state?.rounds_done ?? 0;
-  // 取余计算本循环已完成轮数：恰满一轮（rounds_done 为阈值整数倍）时余数为 0，
-  // 若正处于长休息，应显示满格 N/N；否则（含长休息结束回专注）按余数显示。
   const roundsInCycle =
     stage === "long_break" && done > 0 && done % roundsBeforeLongBreak === 0
       ? roundsBeforeLongBreak
@@ -88,7 +77,13 @@ function PomodoroTool() {
 
   // 通知后端窗口已就绪（toolWindows 等待此事件后 show）
   useEffect(() => {
+    const unlistenReadyRequest = listen("pomodoro-window-ready-request", () => {
+      void emit("pomodoro-window-ready");
+    });
     void emit("pomodoro-window-ready");
+    return () => {
+      unlistenReadyRequest.then((fn) => fn());
+    };
   }, []);
 
   // 设置窗口的 localStorage 不应作为运行中跨窗口同步机制。
@@ -109,7 +104,6 @@ function PomodoroTool() {
       .catch(() => {});
     fetchPomodoroConfig().then((stored) => {
       if (!cancelled) {
-        configRef.current = stored;
         setConfig(stored);
       }
     });
@@ -118,18 +112,15 @@ function PomodoroTool() {
     };
   }, []);
 
-  // 监听设置页配置变更事件：刷新显示配置，displayMode 变更时同步窗口尺寸
+  // 监听设置页配置变更事件，及时更新未开始阶段的倒计时长度。
   useEffect(() => {
     const unlisten = listen<PomodoroConfig>("levitaire-pomodoro-config-changed", (event) => {
-      configRef.current = event.payload;
       setConfig(event.payload);
-      const size = POMODORO_WINDOW_SIZES[event.payload.displayMode];
-      win.setSize(new LogicalSize(size.width, size.height)).catch(console.error);
     });
     return () => {
       unlisten.then((fn) => fn()).catch(console.error);
     };
-  }, [win]);
+  }, []);
 
   // 订阅后端 tick / complete 事件刷新 UI
   useEffect(() => {
@@ -202,33 +193,23 @@ function PomodoroTool() {
     }
   }, []);
 
-  const toggleDisplayMode = useCallback(async () => {
-    const nextMode: PomodoroDisplayMode = isMini ? "full" : "mini";
-    const nextConfig = { ...configRef.current, displayMode: nextMode };
-    configRef.current = nextConfig;
-    setConfig(nextConfig);
-    try {
-      await savePomodoroConfig(nextConfig);
-    } catch (error) {
-      console.error("Failed to save pomodoro config:", error);
-    }
-    const size = POMODORO_WINDOW_SIZES[nextMode];
-    win.setSize(new LogicalSize(size.width, size.height)).catch(console.error);
-  }, [isMini, win]);
+  const onTitleBarMouseDown = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      if ((event.target as HTMLElement).closest(".pomo-icon-btn")) return;
+      event.preventDefault();
+      win.startDragging().catch((error) => {
+        console.error("Failed to start dragging pomodoro window:", error);
+      });
+    },
+    [win],
+  );
 
   return (
     <div className="pomo-container">
-      <div className={`pomo-body${isMini ? " is-mini" : ""}`} data-tauri-drag-region="">
-        <div className="pomo-titlebar" data-tauri-drag-region="">
+      <div className="pomo-body">
+        <div className="pomo-titlebar" onMouseDown={onTitleBarMouseDown}>
           <span className="pomo-title">番茄钟</span>
-          <button
-            className="pomo-icon-btn"
-            aria-label={isMini ? "切换到标准模式" : "切换到迷你模式"}
-            data-tooltip={isMini ? "切换到标准模式" : "切换到迷你模式"}
-            onClick={toggleDisplayMode}
-          >
-            <Icon name={isMini ? "Maximize2" : "Minimize2"} size={14} />
-          </button>
           <button
             className="pomo-icon-btn"
             aria-label="关闭番茄钟"
@@ -260,67 +241,40 @@ function PomodoroTool() {
           </div>
         </div>
 
-        {isMini ? (
-          <div className="pomo-mini-controls">
-            <button
-              className="pomo-icon-btn pomo-mini-ctrl"
-              aria-label="重置当前阶段"
-              data-tooltip="重置当前阶段"
-              onClick={doReset}
-            >
-              <Icon name="RotateCcw" size={13} />
-            </button>
-            <button
-              className="pomo-icon-btn pomo-mini-ctrl pomo-mini-toggle"
-              aria-label={running ? "暂停" : "开始"}
-              data-tooltip={running ? "暂停" : "开始"}
-              onClick={toggleRunning}
-            >
-              <Icon name={running ? "Pause" : "Play"} size={14} />
-            </button>
-            <button
-              className="pomo-icon-btn pomo-mini-ctrl"
-              aria-label="跳过当前阶段"
-              data-tooltip="跳过当前阶段"
-              onClick={doSkip}
-            >
-              <Icon name="SkipForward" size={13} />
-            </button>
-          </div>
-        ) : (
-          <>
-            <div className="pomo-controls">
-              <button className="pomo-btn pomo-btn-primary" onClick={toggleRunning}>
-                <Icon name={running ? "Pause" : "Play"} size={16} />
-                <span>{running ? "暂停" : "开始"}</span>
-              </button>
-              <button
-                className="pomo-btn"
-                aria-label="重置当前阶段"
-                data-tooltip="重置当前阶段"
-                onClick={doReset}
-              >
-                <Icon name="RotateCcw" size={15} />
-              </button>
-              <button
-                className="pomo-btn"
-                aria-label="跳过当前阶段"
-                data-tooltip="跳过当前阶段"
-                onClick={doSkip}
-              >
-                <Icon name="SkipForward" size={15} />
-              </button>
-            </div>
-            <div className="pomo-rounds">
-              {Array.from({ length: roundsBeforeLongBreak }, (_, i) => (
-                <span key={i} className={`pomo-round-dot${i < roundsInCycle ? " is-done" : ""}`} />
-              ))}
-              <span className="pomo-rounds-text">
-                {roundsInCycle}/{roundsBeforeLongBreak} 轮
-              </span>
-            </div>
-          </>
-        )}
+        <div
+          className="pomo-rounds"
+          aria-label={`本循环已完成 ${roundsInCycle}/${roundsBeforeLongBreak} 轮`}
+        >
+          {Array.from({ length: roundsBeforeLongBreak }, (_, i) => (
+            <span key={i} className={`pomo-round-dot${i < roundsInCycle ? " is-done" : ""}`} />
+          ))}
+          <span className="pomo-rounds-text">
+            {roundsInCycle}/{roundsBeforeLongBreak} 轮
+          </span>
+        </div>
+
+        <div className="pomo-controls">
+          <button className="pomo-btn pomo-btn-primary" onClick={toggleRunning}>
+            <Icon name={running ? "Pause" : "Play"} size={16} />
+            <span>{running ? "暂停" : "开始"}</span>
+          </button>
+          <button
+            className="pomo-btn"
+            aria-label="重置当前阶段"
+            data-tooltip="重置当前阶段"
+            onClick={doReset}
+          >
+            <Icon name="RotateCcw" size={15} />
+          </button>
+          <button
+            className="pomo-btn"
+            aria-label="跳过当前阶段"
+            data-tooltip="跳过当前阶段"
+            onClick={doSkip}
+          >
+            <Icon name="SkipForward" size={15} />
+          </button>
+        </div>
       </div>
     </div>
   );

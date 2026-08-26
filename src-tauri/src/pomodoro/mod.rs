@@ -224,8 +224,7 @@ impl PomodoroState {
         std::thread::spawn(move || {
             // 500ms 心跳。基于 end_time 差值计算，即使心跳被延迟也能保证剩余时间准确。
             while let Some(st) = app_handle.try_state::<PomodoroState>() {
-                if st.generation.load(Ordering::SeqCst) != gen
-                    || !st.running.load(Ordering::SeqCst)
+                if st.generation.load(Ordering::SeqCst) != gen || !st.running.load(Ordering::SeqCst)
                 {
                     break;
                 }
@@ -243,7 +242,9 @@ impl PomodoroState {
                     // end_time 为 None 既可能是到点，也可能是 pause/reset/stop 恰好
                     // 清空了它。仅当仍处于运行态且代次未变时才视为到点，否则退出，
                     // 避免暂停瞬间旧线程读到 None 误判到点、重复推进阶段。
-                    if !st.running.load(Ordering::SeqCst) || st.generation.load(Ordering::SeqCst) != gen {
+                    if !st.running.load(Ordering::SeqCst)
+                        || st.generation.load(Ordering::SeqCst) != gen
+                    {
                         break;
                     }
                     // 到点：完成当前阶段，切换下一阶段
@@ -353,8 +354,7 @@ impl PomodoroState {
         let cfg = self.config();
         *stage = match *stage {
             PomodoroStage::Focus => {
-                self.rounds_done
-                    .store(rounds + 1, Ordering::SeqCst);
+                self.rounds_done.store(rounds + 1, Ordering::SeqCst);
                 if (rounds + 1) % cfg.rounds_before_long_break.max(1) == 0 {
                     PomodoroStage::LongBreak
                 } else {
@@ -513,7 +513,7 @@ mod tests {
     /// 启动恢复链路：持久化 JSON（新格式）→ 反序列化 → set_config，提醒方式正确生效
     #[test]
     fn test_restore_from_persisted_json() {
-        let json = r#"{"workMinutes":45,"shortBreakMinutes":5,"longBreakMinutes":15,"roundsBeforeLongBreak":4,"autoStartNext":false,"notifySoundType":"tone","notifySound":true,"displayMode":"full"}"#;
+        let json = r#"{"workMinutes":45,"shortBreakMinutes":5,"longBreakMinutes":15,"roundsBeforeLongBreak":4,"autoStartNext":false,"notifySoundType":"tone","notifySound":true}"#;
         let config: PomodoroConfig = serde_json::from_str(json).unwrap();
         let state = PomodoroState::default();
         state.set_config(config);
@@ -526,7 +526,7 @@ mod tests {
     /// 启动恢复链路：旧版本持久化 JSON（仅 notifySound）→ 反序列化 → 提醒方式回退静音
     #[test]
     fn test_restore_from_legacy_json_notify_sound_false() {
-        let json = r#"{"workMinutes":25,"shortBreakMinutes":5,"longBreakMinutes":15,"roundsBeforeLongBreak":4,"autoStartNext":false,"notifySound":false,"displayMode":"full"}"#;
+        let json = r#"{"workMinutes":25,"shortBreakMinutes":5,"longBreakMinutes":15,"roundsBeforeLongBreak":4,"autoStartNext":false,"notifySound":false}"#;
         let config: PomodoroConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.effective_notify_sound(), PomodoroNotifySound::None);
         let state = PomodoroState::default();

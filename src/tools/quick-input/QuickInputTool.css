@@ -7,6 +7,7 @@
   height: 100vh;
   background: transparent;
   user-select: none;
+  pointer-events: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -14,26 +15,55 @@
 
 .quick-input-wheel {
   overflow: visible;
-  /* 柔和的外投影，让转盘从桌面上"浮起" */
-  filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.32));
+  /* 两层阴影分别提供轮廓和悬浮感，避免深色主题下边缘糊成一片 */
+  filter: drop-shadow(0 2px 4px rgb(0 0 0 / 0.2)) drop-shadow(0 12px 24px rgb(0 0 0 / 0.22));
+  animation: quick-input-wheel-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
-/* 底盘：作为扇区的统一基底，提供清晰的圆形轮廓外缘 */
-.quick-input-base {
-  fill: var(--color-bg);
+@keyframes quick-input-wheel-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 外圈：把扇区边界与桌面背景分开，并为转盘保留一圈呼吸空间 */
+.quick-input-outer-ring {
+  fill: var(--color-bg-sunken);
+  stroke: var(--color-border-strong);
+  stroke-width: 1;
+  opacity: 0.92;
+}
+
+.quick-input-outer-highlight {
+  fill: none;
   stroke: var(--color-border);
   stroke-width: 1;
+  opacity: 0.95;
+}
+
+/* 底盘：为扇区提供稳定的圆形平台 */
+.quick-input-base {
+  fill: var(--color-bg-elevated);
+  stroke: var(--color-border);
+  stroke-width: 1.25;
 }
 
 /* 扇区默认态 */
 .quick-input-sector {
-  fill: var(--color-bg-elevated);
+  fill: var(--color-bg);
   stroke: var(--color-border);
-  stroke-width: 1.5;
+  stroke-width: 1.25;
+  stroke-linejoin: round;
   transition:
     fill 0.1s ease,
     stroke 0.1s ease,
-    stroke-width 0.1s ease;
+    stroke-width 0.1s ease,
+    filter 0.1s ease;
 }
 
 /* 剪贴板历史项：用稍深的底色与预设词区分 */
@@ -45,8 +75,8 @@
 .quick-input-sector-active {
   fill: var(--color-accent);
   stroke: var(--color-accent-hover);
-  stroke-width: 2;
-  filter: drop-shadow(0 0 8px var(--color-accent-subtle));
+  stroke-width: 2.25;
+  filter: drop-shadow(0 0 7px var(--color-accent-subtle));
 }
 
 /* 扇区标签 */
@@ -54,38 +84,59 @@
   fill: var(--color-fg);
   font-size: 12.5px;
   font-weight: 600;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
   pointer-events: none;
-  /* 默认态不加投影，避免残留发虚 */
+  paint-order: stroke fill;
+  stroke: var(--color-bg);
+  stroke-width: 2px;
+  stroke-linejoin: round;
 }
 
 /* 高亮扇区的标签：反白为 on-accent 色，并加淡投影保证可读 */
 .quick-input-sector-active + .quick-input-label {
   fill: var(--color-fg-on-accent);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  stroke: var(--color-accent);
+  stroke-width: 1.5px;
 }
 
-/* 中心死区圆：按钮质感，内阴影 + 描边；高亮时放大展示完整标签，r 过渡平滑 */
+/* 中心环：让死区与扇区边界保持清晰 */
+.quick-input-center-ring {
+  fill: none;
+  stroke: var(--color-border);
+  stroke-width: 1;
+  opacity: 0.9;
+}
+
+/* 中心死区圆：作为稳定的选择反馈锚点 */
 .quick-input-center {
-  fill: var(--color-bg);
+  fill: var(--color-bg-elevated);
   stroke: var(--color-border-strong);
-  stroke-width: 1.5;
-  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.25));
+  stroke-width: 1.75;
+  filter: drop-shadow(0 2px 4px rgb(0 0 0 / 0.2));
   transition:
     r 0.15s ease,
     fill 0.15s ease,
     stroke 0.15s ease;
 }
 
+.quick-input-center-active {
+  fill: var(--color-brand-subtle);
+  stroke: var(--color-accent);
+  stroke-width: 2;
+}
+
 /* 中心完整标签：高亮扇区的原始文本，居中显示在放大的中心圆内 */
 .quick-input-center-label {
   fill: var(--color-fg);
   font-weight: 600;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
+  paint-order: stroke fill;
+  stroke: var(--color-brand-subtle);
+  stroke-width: 1.5px;
   pointer-events: none;
 }
 
-/* 类型标记图标：预设词=书签（brand 色）、历史=时钟（中性灰），与底色差异共同区分两类条目 */
+/* 类型标记图标：预设词=书签、历史=时钟 */
 .quick-input-type-icon {
   color: var(--color-fg-muted);
   pointer-events: none;
@@ -100,9 +151,21 @@
   color: var(--color-fg-on-accent);
 }
 
-/* 分组分隔线：预设词区与剪贴板历史区的分界，虚线与普通扇区边界区分 */
+/* 分组分隔线：预设词区与剪贴板历史区的分界 */
 .quick-input-divider {
-  stroke: var(--color-border-strong);
-  stroke-width: 2;
-  stroke-dasharray: 4 3;
+  stroke: var(--color-fg-subtle);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 3;
+  opacity: 0.9;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quick-input-wheel {
+    animation: none;
+  }
+
+  .quick-input-sector,
+  .quick-input-center {
+    transition: none;
+  }
 }

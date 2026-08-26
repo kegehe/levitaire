@@ -1,0 +1,772 @@
+//! Manual vertical scrolling capture. The worker owns raw frames and the final
+//! BGRA image so large captures never travel through the webview as base64.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use tauri::Emitter;
+use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+
+const MAX_LONG_CAPTURE_PIXELS: u64 = 30_000_000;
+// Sample at a bounded cadence while the user is scrolling. A pure debounce
+// would keep extending its deadline for every wheel message, so continuous
+// scrolling would produce only one frame after the user stopped.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(70);
+
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureRegion {
+    pub left: i32,
+    pub top: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl CaptureRegion {
+    pub fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.left
+            && y >= self.top
+            && x < self.left.saturating_add(self.width as i32)
+            && y < self.top.saturating_add(self.height as i32)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LongCaptureSummary {
+    pub result_id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub frame_count: u32,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+struct StoredResult {
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    status: CaptureStatus,
+    message: Option<String>,
+    bgra: Vec<u8>,
+}
+
+impl StoredResult {
+    fn summary(&self, result_id: u64) -> LongCaptureSummary {
+        LongCaptureSummary {
+            result_id,
+            width: self.width,
+            height: self.height,
+            frame_count: self.frame_count,
+            status: self.status.as_str().to_string(),
+            message: self.message.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureStatus {
+    Capturing,
+    Partial,
+    Completed,
+}
+
+impl CaptureStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Capturing => "capturing",
+            Self::Partial => "partial",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+struct ActiveCapture {
+    result_id: u64,
+    region: CaptureRegion,
+    target_hwnd: isize,
+    sender: mpsc::Sender<WorkerCommand>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+enum WorkerCommand {
+    /// direction: 1 for downward scrolling, -1 for upward scrolling, 0 for
+    /// keyboard/activity sampling where the direction is unknown.
+    Wheel {
+        direction: i8,
+    },
+    Stop(mpsc::Sender<()>),
+    Cancel(mpsc::Sender<()>),
+}
+
+#[derive(Default)]
+pub struct LongCaptureState {
+    next_id: AtomicU64,
+    active: Mutex<Option<ActiveCapture>>,
+    results: Arc<Mutex<HashMap<u64, StoredResult>>>,
+}
+
+impl LongCaptureState {
+    pub fn is_active(&self) -> bool {
+        self.active
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn start(
+        &self,
+        app: tauri::AppHandle,
+        region: CaptureRegion,
+        target_hwnd: isize,
+    ) -> Result<LongCaptureSummary, String> {
+        validate_region(region)?;
+        let mut active = self.active.lock().map_err(|e| e.to_string())?;
+        if active.is_some() {
+            return Err("已有长截图正在进行".into());
+        }
+
+        // Keep the result store bounded. A new capture replaces an unclosed
+        // preview from an earlier session rather than retaining another 30MP
+        // allocation indefinitely.
+        self.results.lock().map_err(|e| e.to_string())?.clear();
+
+        let initial = crate::screenshot::capture_screen_region(
+            region.left,
+            region.top,
+            region.width,
+            region.height,
+        )?;
+        let result_id = self.next_id.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+        let result = StoredResult {
+            width: region.width,
+            height: region.height,
+            frame_count: 1,
+            status: CaptureStatus::Capturing,
+            message: None,
+            bgra: initial.clone(),
+        };
+        self.results
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(result_id, result);
+
+        let (sender, receiver) = mpsc::channel();
+        let results = Arc::clone(&self.results);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker_loop(
+                    result_id,
+                    app.clone(),
+                    region,
+                    initial,
+                    receiver,
+                    results,
+                    worker_cancelled,
+                )
+            }));
+            if result.is_err() {
+                crate::utils::logger::log(
+                    "long-capture",
+                    &format!("worker panicked result_id={}", result_id),
+                );
+            }
+        });
+        *active = Some(ActiveCapture {
+            result_id,
+            region,
+            target_hwnd,
+            sender,
+            cancelled,
+        });
+        self.status(result_id)
+    }
+
+    pub fn notify_wheel(&self, x: i32, y: i32, delta: i16) {
+        if delta == 0 {
+            return;
+        }
+        let direction = if delta < 0 { 1 } else { -1 };
+        let Ok(active) = self.active.lock() else {
+            return;
+        };
+        if let Some(active) = active
+            .as_ref()
+            .filter(|active| activity_belongs_to_capture(active, x, y))
+        {
+            crate::utils::logger::log(
+                "long-capture",
+                &format!("wheel accepted at ({},{}) delta={}", x, y, delta),
+            );
+            let _ = active.sender.send(WorkerCommand::Wheel { direction });
+        } else {
+            crate::utils::logger::log(
+                "long-capture",
+                &format!(
+                    "wheel ignored at ({},{}) delta={} (outside capture target)",
+                    x, y, delta
+                ),
+            );
+        }
+    }
+
+    pub fn notify_activity(&self, x: i32, y: i32) {
+        let Ok(active) = self.active.lock() else {
+            return;
+        };
+        if let Some(active) = active
+            .as_ref()
+            .filter(|active| activity_belongs_to_capture(active, x, y))
+        {
+            let _ = active.sender.send(WorkerCommand::Wheel { direction: 0 });
+        }
+    }
+
+    pub fn notify_activity_at_cursor(&self) {
+        let mut point = windows::Win32::Foundation::POINT::default();
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point) }.is_ok() {
+            self.notify_activity(point.x, point.y);
+        }
+    }
+
+    pub fn stop(&self, result_id: u64) -> Result<LongCaptureSummary, String> {
+        let sender = {
+            let active = self.active.lock().map_err(|e| e.to_string())?;
+            let active = active
+                .as_ref()
+                .filter(|active| active.result_id == result_id)
+                .ok_or_else(|| "会话已过期".to_string())?;
+            active.sender.clone()
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        sender
+            .send(WorkerCommand::Stop(done_tx))
+            .map_err(|_| "长截图采集线程已停止".to_string())?;
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "等待长截图最后一帧超时".to_string())?;
+        let mut active = self.active.lock().map_err(|e| e.to_string())?;
+        if active
+            .as_ref()
+            .is_some_and(|active| active.result_id == result_id)
+        {
+            active.take();
+        }
+        self.status(result_id)
+    }
+
+    pub fn cancel(&self, result_id: u64) -> Result<(), String> {
+        let active = self.take_active(result_id)?;
+        active
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (done_tx, done_rx) = mpsc::channel();
+        if active.sender.send(WorkerCommand::Cancel(done_tx)).is_ok() {
+            let _ = done_rx.recv_timeout(Duration::from_secs(5));
+        }
+        self.results
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remove(&result_id);
+        Ok(())
+    }
+
+    pub fn cancel_active(&self) {
+        let active = self.active.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(active) = active {
+            active
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let (done_tx, done_rx) = mpsc::channel();
+            if active.sender.send(WorkerCommand::Cancel(done_tx)).is_ok() {
+                // Wait for an in-flight capture before cleanup hides the controls.
+                // The cancellation flag also prevents a late capture from showing it.
+                let _ = done_rx.recv_timeout(Duration::from_secs(5));
+            }
+            if let Ok(mut results) = self.results.lock() {
+                results.remove(&active.result_id);
+            }
+        }
+    }
+
+    pub fn status(&self, result_id: u64) -> Result<LongCaptureSummary, String> {
+        self.results
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&result_id)
+            .map(|result| result.summary(result_id))
+            .ok_or_else(|| "长截图结果不存在或已释放".to_string())
+    }
+
+    pub fn preview(&self, result_id: u64) -> Result<String, String> {
+        let results = self.results.lock().map_err(|e| e.to_string())?;
+        let result = results
+            .get(&result_id)
+            .ok_or_else(|| "长截图结果不存在或已释放".to_string())?;
+        // The capture is already bounded by MAX_LONG_CAPTURE_PIXELS. Return
+        // the original pixels here so the preview never enlarges a blurry
+        // thumbnail; save/copy continue to use the same raw result.
+        crate::screenshot::encode_png_base64(&result.bgra, result.width, result.height)
+    }
+
+    pub fn raw(&self, result_id: u64) -> Result<(Vec<u8>, u32, u32), String> {
+        let results = self.results.lock().map_err(|e| e.to_string())?;
+        let result = results
+            .get(&result_id)
+            .ok_or_else(|| "长截图结果不存在或已释放".to_string())?;
+        Ok((result.bgra.clone(), result.width, result.height))
+    }
+
+    pub fn dimensions(&self, result_id: u64) -> Result<(u32, u32), String> {
+        let results = self.results.lock().map_err(|e| e.to_string())?;
+        let result = results
+            .get(&result_id)
+            .ok_or_else(|| "长截图结果不存在或已释放".to_string())?;
+        Ok((result.width, result.height))
+    }
+
+    pub fn discard_all(&self) {
+        if let Ok(mut results) = self.results.lock() {
+            results.clear();
+        }
+    }
+
+    pub fn discard(&self, result_id: u64) {
+        if let Ok(mut results) = self.results.lock() {
+            results.remove(&result_id);
+        }
+    }
+
+    fn take_active(&self, result_id: u64) -> Result<ActiveCapture, String> {
+        let mut active = self.active.lock().map_err(|e| e.to_string())?;
+        match active.take() {
+            Some(active) if active.result_id == result_id => Ok(active),
+            Some(other) => {
+                *active = Some(other);
+                Err("长截图会话已过期".into())
+            }
+            None => Err("没有进行中的长截图会话".into()),
+        }
+    }
+}
+
+fn activity_belongs_to_capture(active: &ActiveCapture, x: i32, y: i32) -> bool {
+    // The pointer may be over a child window or a scrollbar whose root HWND
+    // differs from the foreground snapshot. The fixed capture region is the
+    // authoritative interaction boundary, so accept activity inside it first.
+    if active.region.contains(x, y) {
+        return true;
+    }
+    if active.target_hwnd == 0 {
+        return false;
+    }
+    point_belongs_to_target(active.target_hwnd, x, y)
+}
+
+fn point_belongs_to_target(target_hwnd: isize, x: i32, y: i32) -> bool {
+    if target_hwnd == 0 {
+        return false;
+    }
+    let point = POINT { x, y };
+    let window = unsafe { WindowFromPoint(point) };
+    if window.0.is_null() {
+        return false;
+    }
+    let root = unsafe { GetAncestor(window, GA_ROOT) };
+    let root = if root.0.is_null() { window } else { root };
+    root.0 as isize == target_hwnd
+}
+
+fn validate_region(region: CaptureRegion) -> Result<(), String> {
+    if region.width == 0 || region.height == 0 || region.width > 32_768 || region.height > 32_768 {
+        return Err("长截图区域尺寸无效".into());
+    }
+    if u64::from(region.width) * u64::from(region.height) > MAX_LONG_CAPTURE_PIXELS {
+        return Err("长截图区域像素过大".into());
+    }
+    Ok(())
+}
+
+fn worker_loop(
+    result_id: u64,
+    app: tauri::AppHandle,
+    region: CaptureRegion,
+    mut previous: Vec<u8>,
+    receiver: mpsc::Receiver<WorkerCommand>,
+    results: Arc<Mutex<HashMap<u64, StoredResult>>>,
+    _cancelled: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut pending = false;
+    let mut deadline = Instant::now();
+    let mut pending_direction: i8 = 1;
+    loop {
+        let timeout = if pending {
+            deadline.saturating_duration_since(Instant::now())
+        } else {
+            Duration::from_secs(24 * 60 * 60)
+        };
+        match receiver.recv_timeout(timeout) {
+            Ok(WorkerCommand::Wheel { direction }) => {
+                // Capture at most once per interval, even if the user keeps
+                // spinning the wheel. This preserves intermediate content
+                // instead of waiting for a quiet period that may never come.
+                if pending && Instant::now() >= deadline {
+                    capture_and_merge(
+                        result_id,
+                        &app,
+                        region,
+                        &mut previous,
+                        &results,
+                        pending_direction,
+                    );
+                }
+                pending = true;
+                if direction != 0 {
+                    pending_direction = direction;
+                }
+                if deadline <= Instant::now() {
+                    deadline = Instant::now() + SAMPLE_INTERVAL;
+                }
+            }
+            Ok(WorkerCommand::Stop(done)) => {
+                crate::utils::logger::log(
+                    "long-capture",
+                    &format!("worker stop requested result_id={}", result_id),
+                );
+                if pending {
+                    capture_and_merge(
+                        result_id,
+                        &app,
+                        region,
+                        &mut previous,
+                        &results,
+                        pending_direction,
+                    );
+                }
+                set_completed(result_id, &results);
+                crate::utils::logger::log(
+                    "long-capture",
+                    &format!("worker stop completed result_id={}", result_id),
+                );
+                let _ = done.send(());
+                break;
+            }
+            Ok(WorkerCommand::Cancel(done)) => {
+                let _ = done.send(());
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if pending => {
+                pending = false;
+                capture_and_merge(
+                    result_id,
+                    &app,
+                    region,
+                    &mut previous,
+                    &results,
+                    pending_direction,
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+fn capture_and_merge(
+    result_id: u64,
+    app: &tauri::AppHandle,
+    region: CaptureRegion,
+    previous: &mut Vec<u8>,
+    results: &Arc<Mutex<HashMap<u64, StoredResult>>>,
+    direction: i8,
+) {
+    // The frame remains visible while sampling, so the border does not flash.
+    let captured = crate::screenshot::capture_screen_region(
+        region.left,
+        region.top,
+        region.width,
+        region.height,
+    );
+    let current = match captured {
+        Ok(frame) => frame,
+        Err(error) => {
+            set_partial(result_id, results, format!("抓取新画面失败: {error}"));
+            return;
+        }
+    };
+    // For upward movement, reverse the comparison: the current frame's bottom
+    // overlaps the previous frame's top, so the unique rows belong before the
+    // accumulated image rather than after it.
+    let overlap = if direction < 0 {
+        find_overlap(&current, previous, region.width, region.height)
+    } else {
+        find_overlap(previous, &current, region.width, region.height)
+    };
+    match overlap {
+        Overlap::Duplicate => {}
+        Overlap::Found(overlap) => {
+            let add_rows = region.height.saturating_sub(overlap);
+            let mut results_guard = match results.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let Some(result) = results_guard.get_mut(&result_id) else {
+                return;
+            };
+            let new_height = match result.height.checked_add(add_rows) {
+                Some(value)
+                    if u64::from(value) * u64::from(result.width) <= MAX_LONG_CAPTURE_PIXELS =>
+                {
+                    value
+                }
+                _ => {
+                    result.status = CaptureStatus::Partial;
+                    result.message = Some("已达到长截图 30MP 上限，结果已保留".into());
+                    return;
+                }
+            };
+            let row_bytes = region.width as usize * 4;
+            let unique_bytes = add_rows as usize * row_bytes;
+            let start = if direction < 0 {
+                unique_bytes
+            } else {
+                overlap as usize * row_bytes
+            };
+            // Direction changes can revisit content already present at the
+            // corresponding edge. Do not duplicate it when the user scrolls
+            // back over an area captured earlier in the same session.
+            let already_present = if direction < 0 {
+                result.bgra.get(..start) == current.get(..start)
+            } else {
+                let suffix_len = current.len().saturating_sub(start);
+                result
+                    .bgra
+                    .get(result.bgra.len().saturating_sub(suffix_len)..)
+                    == current.get(start..)
+            };
+            if already_present {
+                previous.clone_from(&current);
+                return;
+            }
+            if direction < 0 {
+                let mut merged = Vec::with_capacity(result.bgra.len() + unique_bytes);
+                let Some(prefix) = current.get(..start) else {
+                    set_partial(result_id, results, "长截图帧数据不完整".into());
+                    return;
+                };
+                merged.extend_from_slice(prefix);
+                merged.extend_from_slice(&result.bgra);
+                result.bgra = merged;
+            } else {
+                result.bgra.extend_from_slice(&current[start..]);
+            }
+            result.height = new_height;
+            result.frame_count += 1;
+            previous.clone_from(&current);
+        }
+        Overlap::NoMatch => {
+            let message = "滚动过快，未能识别相邻画面的重叠区域；请放慢滚动速度";
+            set_partial(result_id, results, message.into());
+            let _ = app.emit(
+                "long-capture-warning",
+                serde_json::json!({
+                    "resultId": result_id,
+                    "message": message,
+                }),
+            );
+            // Start matching from the latest visible frame so a later, slower
+            // scroll can recover instead of comparing forever with an old
+            // frame from before the gap.
+            previous.clone_from(&current);
+        }
+    }
+}
+
+fn set_partial(result_id: u64, results: &Arc<Mutex<HashMap<u64, StoredResult>>>, message: String) {
+    if let Ok(mut results) = results.lock() {
+        if let Some(result) = results.get_mut(&result_id) {
+            result.status = CaptureStatus::Partial;
+            result.message = Some(message);
+        }
+    }
+}
+
+fn set_completed(result_id: u64, results: &Arc<Mutex<HashMap<u64, StoredResult>>>) {
+    if let Ok(mut results) = results.lock() {
+        if let Some(result) = results.get_mut(&result_id) {
+            if result.status == CaptureStatus::Capturing {
+                result.status = CaptureStatus::Completed;
+            }
+        }
+    }
+}
+
+enum Overlap {
+    Duplicate,
+    Found(u32),
+    NoMatch,
+}
+
+fn find_overlap(previous: &[u8], current: &[u8], width: u32, height: u32) -> Overlap {
+    let max_overlap = height.saturating_sub(1);
+    if max_overlap == 0 {
+        return if overlap_score(previous, current, width, height, height) <= 5 {
+            Overlap::Duplicate
+        } else {
+            Overlap::NoMatch
+        };
+    }
+    // Smooth touchpad/browser scrolling can advance by only one pixel. Keep
+    // the search range valid for small but otherwise legal selections too.
+    let min_overlap = (height / 20).max(1).min(max_overlap);
+    let mut best: Option<(u32, u32)> = None;
+    for overlap in min_overlap..=max_overlap {
+        let score = overlap_score(previous, current, width, height, overlap);
+        if best
+            .map(|(_, best_score)| score < best_score)
+            .unwrap_or(true)
+        {
+            best = Some((overlap, score));
+        }
+    }
+    let full_frame_score = overlap_score(previous, current, width, height, height);
+    match best {
+        // A static frame may contain minor rendering noise. It is a duplicate
+        // only when shifting the candidate does not improve that whole-frame
+        // score; otherwise a one-pixel scroll gets incorrectly discarded.
+        Some((_, score)) if full_frame_score <= 5 && score >= full_frame_score => {
+            Overlap::Duplicate
+        }
+        Some((overlap, score)) if score <= 14 => Overlap::Found(overlap),
+        _ => Overlap::NoMatch,
+    }
+}
+
+fn overlap_score(previous: &[u8], current: &[u8], width: u32, height: u32, overlap: u32) -> u32 {
+    // Do not let the ignored side margin consume a narrow capture entirely.
+    // The command accepts any non-zero width, including a one-pixel region.
+    let margin = (width / 12).min(width.saturating_sub(1) / 2);
+    let usable_width = width.saturating_sub(margin * 2).max(1);
+    let mut total = 0u64;
+    let mut count = 0u64;
+    for sample_y in 0..12u32 {
+        let y = sample_y * overlap.saturating_sub(1) / 11;
+        let previous_y = height - overlap + y;
+        for sample_x in 0..10u32 {
+            let x = margin + sample_x * usable_width.saturating_sub(1) / 9;
+            let a = luma(previous, width, previous_y, x);
+            let b = luma(current, width, y, x);
+            total += a.abs_diff(b) as u64;
+            count += 1;
+        }
+    }
+    (total / count.max(1)) as u32
+}
+
+fn luma(data: &[u8], width: u32, y: u32, x: u32) -> u8 {
+    let index = ((y as usize * width as usize) + x as usize) * 4;
+    let b = data[index] as u16;
+    let g = data[index + 1] as u16;
+    let r = data[index + 2] as u16;
+    ((r * 77 + g * 150 + b * 29) >> 8) as u8
+}
+
+pub(crate) fn encode_png_direct(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let expected = usize::try_from(u64::from(width) * u64::from(height) * 4)
+        .map_err(|_| "PNG 尺寸溢出".to_string())?;
+    if bgra.len() != expected {
+        return Err("像素数据长度与尺寸不匹配".to_string());
+    }
+    let mut rgba = bgra.to_vec();
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let image = image::RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| "构造 PNG 图像失败".to_string())?;
+    let mut output = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut output),
+            image::ImageFormat::Png,
+        )
+        .map_err(|error| format!("PNG 编码失败: {error}"))?;
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(width: u32, rows: &[u8]) -> Vec<u8> {
+        rows.iter()
+            .flat_map(|value| std::iter::repeat_n([*value, *value, *value, 255], width as usize))
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn finds_vertical_overlap() {
+        let previous = frame(32, &(0..80).collect::<Vec<_>>());
+        let current = frame(32, &(30..110).collect::<Vec<_>>());
+        assert!(matches!(
+            find_overlap(&previous, &current, 32, 80),
+            Overlap::Found(50)
+        ));
+    }
+
+    #[test]
+    fn finds_reverse_vertical_overlap() {
+        // When moving upward, the new frame is before the previous frame and
+        // its bottom rows overlap the previous frame's top rows.
+        let current = frame(32, &(0..80).collect::<Vec<_>>());
+        let previous = frame(32, &(30..110).collect::<Vec<_>>());
+        assert!(matches!(
+            find_overlap(&current, &previous, 32, 80),
+            Overlap::Found(50)
+        ));
+    }
+
+    #[test]
+    fn duplicate_does_not_append() {
+        let image = frame(32, &(0..80).collect::<Vec<_>>());
+        assert!(matches!(
+            find_overlap(&image, &image, 32, 80),
+            Overlap::Duplicate
+        ));
+    }
+
+    #[test]
+    fn overlap_handles_a_one_pixel_wide_frame() {
+        let previous = frame(1, &(0..40).collect::<Vec<_>>());
+        let current = frame(1, &(10..50).collect::<Vec<_>>());
+        assert!(matches!(
+            find_overlap(&previous, &current, 1, 40),
+            Overlap::Found(30)
+        ));
+    }
+
+    #[test]
+    fn overlap_accepts_a_one_pixel_scroll_delta() {
+        let previous = frame(32, &(0..80).collect::<Vec<_>>());
+        let current = frame(32, &(1..81).collect::<Vec<_>>());
+        assert!(matches!(
+            find_overlap(&previous, &current, 32, 80),
+            Overlap::Found(79)
+        ));
+    }
+
+    #[test]
+    fn overlap_supports_small_capture_heights() {
+        let previous = frame(8, &[0, 1, 2]);
+        let current = frame(8, &[1, 2, 3]);
+        assert!(matches!(
+            find_overlap(&previous, &current, 8, 3),
+            Overlap::Found(2)
+        ));
+    }
+}

@@ -188,7 +188,7 @@ export const THEME_ACCENTS: readonly ThemeAccent[] = [
 export const THEME_SCHEMES: readonly ThemeScheme[] = [
   {
     id: "signal",
-    label: "Signal",
+    label: "信号",
     light: {
       bg: "#f7f9fa",
       elevated: "#ffffff",
@@ -218,7 +218,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "cloud",
-    label: "Cloud",
+    label: "云端",
     light: {
       bg: "#f9fbff",
       elevated: "#ffffff",
@@ -248,7 +248,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "studio",
-    label: "Studio",
+    label: "工作室",
     light: {
       bg: "#f8faf8",
       elevated: "#ffffff",
@@ -278,7 +278,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "quartz",
-    label: "Quartz",
+    label: "石英",
     light: {
       bg: "#fafbfc",
       elevated: "#ffffff",
@@ -308,7 +308,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "moss",
-    label: "Moss",
+    label: "苔藓",
     light: {
       bg: "#f9fbf8",
       elevated: "#ffffff",
@@ -338,7 +338,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "ember",
-    label: "Ember",
+    label: "余烬",
     light: {
       bg: "#fcfaf9",
       elevated: "#ffffff",
@@ -368,7 +368,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "arctic",
-    label: "Arctic",
+    label: "极地",
     light: {
       bg: "#f9fdfe",
       elevated: "#ffffff",
@@ -398,7 +398,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "mono",
-    label: "Mono",
+    label: "黑白",
     light: {
       bg: "#fafaf8",
       elevated: "#ffffff",
@@ -428,7 +428,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "iris",
-    label: "Iris",
+    label: "鸢尾",
     light: {
       bg: "#fcfbfe",
       elevated: "#ffffff",
@@ -458,7 +458,7 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
   },
   {
     id: "dusk",
-    label: "Dusk",
+    label: "黄昏",
     light: {
       bg: "#f8fbfc",
       elevated: "#ffffff",

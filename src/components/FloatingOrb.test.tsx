@@ -2,13 +2,16 @@ import { act, fireEvent, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { clearMockListeners, menuState, mockHide, triggerMenuAction } from "../test/tauri-mock";
-import { ensureScreenshotWindow } from "../utils/toolWindows";
+import { ensureScreenshotWindow, showContextMenu } from "../utils/toolWindows";
 import FloatingOrb from "./FloatingOrb";
 
 // Mock 依赖模块，聚焦测试右键菜单逻辑
 vi.mock("../utils/toolWindows", () => ({
   ensureScreenshotWindow: vi.fn(async () => ({})),
+  ensureContextMenuWindow: vi.fn(async () => ({})),
+  showContextMenu: vi.fn(async () => undefined),
   openToolWindow: vi.fn(async () => true),
+  preloadEnabledToolWindows: vi.fn(async () => undefined),
 }));
 vi.mock("../utils/windowPosition", () => ({
   saveWindowPosition: vi.fn(),
@@ -25,6 +28,7 @@ vi.mock("../tools/registry", () => ({
 
 const mockInvoke = vi.mocked(invoke);
 const mockEnsureScreenshotWindow = vi.mocked(ensureScreenshotWindow);
+const mockShowContextMenu = vi.mocked(showContextMenu);
 
 async function flush() {
   for (let i = 0; i < 5; i++) {
@@ -52,7 +56,7 @@ describe("FloatingOrb 右键菜单", () => {
 
   it("右键悬浮球时弹出原生菜单", async () => {
     await renderAndOpenContextMenu();
-    expect(menuState.popup).toHaveBeenCalledTimes(1);
+    expect(mockShowContextMenu).toHaveBeenCalledWith(expect.objectContaining({ source: "orb" }));
   });
 
   it("菜单项 id 与托盘菜单隔离，避免全局事件交叉触发", async () => {

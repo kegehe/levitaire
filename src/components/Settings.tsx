@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { emit } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "./Icon";
 import type { IconName } from "./Icon";
 import { AiConfig } from "../types";
@@ -100,6 +101,12 @@ import {
 import { useUpdater } from "../hooks/useUpdater";
 import "./Settings.css";
 import TitleBar from "./TitleBar";
+import {
+  MAX_SKETCH_HISTORY_LIMIT,
+  SKETCH_HISTORY_LIMIT_KEY,
+  readSketchHistoryLimit,
+  writeSketchHistoryLimit,
+} from "../constants/sketchConfig";
 
 /** 设置页左侧菜单项定义 */
 const SETTINGS_TABS = [
@@ -187,6 +194,18 @@ function Settings() {
   const [hotkeyStatus, setHotkeyStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [hotkeyError, setHotkeyError] = useState("");
 
+  // 屏幕草稿快捷键
+  const [sketchHotkey, setSketchHotkey] = useState("Ctrl+Shift+D");
+  const sketchHotkeyRef = useRef(sketchHotkey);
+  sketchHotkeyRef.current = sketchHotkey;
+  const sketchHotkeyRequestRef = useRef(0);
+  const sketchHotkeyQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const [sketchHotkeyRecording, setSketchHotkeyRecording] = useState(false);
+  const [sketchHotkeyStatus, setSketchHotkeyStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [sketchHotkeyError, setSketchHotkeyError] = useState("");
+  const [sketchHistoryLimit, setSketchHistoryLimit] = useState(readSketchHistoryLimit);
+  const [sketchHistoryLimitStatus, setSketchHistoryLimitStatus] = useState<"idle" | "saved">("idle");
+
   // 系统监控配置
   const [systemMonitorConfig, setSystemMonitorConfig] = useState<SystemMonitorConfig>(
     DEFAULT_SYSTEM_MONITOR_CONFIG,
@@ -241,9 +260,33 @@ function Settings() {
   const [qiSnippetsStatus, setQiSnippetsStatus] = useState<"idle" | "saved" | "error">("idle");
   const [qiNewLabel, setQiNewLabel] = useState("");
   const [qiNewText, setQiNewText] = useState("");
-  // 剪贴板历史（后端内存环形缓冲，不持久化，最多 20 条）
+  // 剪贴板历史（后端内存缓冲并持久化，默认保留最新 5 条）
   const [qiHistory, setQiHistory] = useState<Array<{ preview: string; text: string }>>([]);
   const [qiHistoryStatus, setQiHistoryStatus] = useState<"idle" | "cleared" | "error">("idle");
+  const [qiHistoryEnabled, setQiHistoryEnabled] = useState(true);
+  const [qiHistoryEnabledStatus, setQiHistoryEnabledStatus] = useState<"idle" | "saved" | "error">(
+    "idle",
+  );
+  const qiHistoryEnabledRef = useRef(true);
+  const qiHistoryEnabledSaveVersionRef = useRef(0);
+  const [qiHistoryLimit, setQiHistoryLimit] = useState(5);
+  const [qiHistoryLimitStatus, setQiHistoryLimitStatus] = useState<"idle" | "saved" | "error">(
+    "idle",
+  );
+  const qiHistoryLimitRef = useRef(5);
+  const qiHistoryLimitSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const qiHistoryLimitSaveVersionRef = useRef(0);
+
+  // 设置窗口会被隐藏后复用，不能依赖组件重新挂载来更新历史。
+  const refreshQiHistory = useCallback(async () => {
+    try {
+      const history =
+        await invoke<Array<{ preview: string; text: string }>>("get_quick_input_history");
+      setQiHistory(history);
+    } catch (err) {
+      console.error("Failed to refresh quick input history:", err);
+    }
+  }, []);
   // 正在编辑的预设词下标（null 表示未处于编辑状态）
   const [qiEditingIndex, setQiEditingIndex] = useState<number | null>(null);
   const [qiEditLabel, setQiEditLabel] = useState("");
@@ -638,6 +681,7 @@ function Settings() {
       invoke<string>("get_quick_input_mode"),
       invoke<string>("get_quick_input_snippets"),
       invoke<string[]>("get_tools_autostart"),
+      invoke<boolean>("get_quick_input_history_enabled"),
       invoke<Array<{ preview: string; text: string }>>("get_quick_input_history"),
     ]).then(
       ([
@@ -660,6 +704,7 @@ function Settings() {
         qiMode,
         qiSnips,
         autostart,
+        qiHistoryEnabledResult,
         qiHist,
       ]) => {
         if (features.status === "fulfilled") setEnabledFeaturesState(features.value);
@@ -705,10 +750,56 @@ function Settings() {
           }
         }
         if (autostart.status === "fulfilled") setAutostartIdsState(autostart.value);
+        if (qiHistoryEnabledResult.status === "fulfilled") {
+          qiHistoryEnabledRef.current = qiHistoryEnabledResult.value;
+          setQiHistoryEnabled(qiHistoryEnabledResult.value);
+        }
         if (qiHist.status === "fulfilled") setQiHistory(qiHist.value);
       },
     );
   }, []);
+
+  useEffect(() => {
+    invoke<number>("get_quick_input_history_limit")
+      .then((limit) => {
+        // 用户已开始修改时，忽略较晚返回的初始读取结果，避免覆盖用户输入。
+        if (qiHistoryLimitSaveVersionRef.current !== 0) return;
+        const normalized = Math.max(0, Math.min(20, Math.trunc(limit)));
+        qiHistoryLimitRef.current = normalized;
+        setQiHistoryLimit(normalized);
+      })
+      .catch((err) => console.error("Failed to load quick input history limit:", err));
+  }, []);
+
+  // 处理设置窗口被隐藏后再次打开的场景：此时 Settings 组件仍然挂载，
+  // 只有重新读取后端快照才能显示最新剪贴板历史。
+  useEffect(() => {
+    const window = getCurrentWebviewWindow();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void window
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) void refreshQiHistory();
+      })
+      .then((stop) => {
+        if (disposed) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+      })
+      .catch((err) => console.error("Failed to listen for settings focus:", err));
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refreshQiHistory]);
+
+  // 切换到快速输入页时主动刷新，保证用户看到的是当前后端历史。
+  useEffect(() => {
+    if (activeTab === "quick-input") void refreshQiHistory();
+  }, [activeTab, refreshQiHistory]);
 
   // 加载系统监控的启用状态（「启动时自动打开」仅对已启用工具生效）
   useEffect(() => {
@@ -721,6 +812,16 @@ function Settings() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    invoke<string>("get_sketch_hotkey")
+      .then((hotkey) => {
+        if (sketchHotkeyRequestRef.current !== 0) return;
+        setSketchHotkey(hotkey);
+        sketchHotkeyRef.current = hotkey;
+      })
+      .catch((err) => console.error("Failed to load sketch hotkey:", err));
   }, []);
 
   // 加载番茄钟的启用状态（「启动时自动打开」仅对已启用工具生效）
@@ -865,6 +966,95 @@ function Settings() {
       setRecordingHotkeyError(String(err));
       setTimeout(() => setRecordingHotkeyStatus("idle"), 3000);
     }
+  };
+
+  const handleSketchHotkeyKeyDown = (e: React.KeyboardEvent) => {
+    if (!sketchHotkeyRecording) return;
+    e.preventDefault();
+    const mods: string[] = [];
+    if (e.ctrlKey) mods.push("Ctrl");
+    if (e.altKey) mods.push("Alt");
+    if (e.shiftKey) mods.push("Shift");
+    if (e.metaKey) mods.push("Win");
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return;
+    if (e.key === "Escape") { setSketchHotkeyRecording(false); return; }
+    const isFKey = e.key.startsWith("F") && /^F([1-9]|1[0-2])$/.test(e.key);
+    if (mods.length === 0 && !isFKey) {
+      setSketchHotkeyError("快捷键需包含修饰键，或使用 F1-F12 单键");
+      return;
+    }
+    const mainKey = isFKey ? e.key : e.key.length === 1 ? e.key.toUpperCase() : "";
+    if (!mainKey) { setSketchHotkeyError("不支持的按键"); return; }
+    setSketchHotkeyRecording(false);
+    setSketchHotkeyError("");
+    saveSketchHotkey([...mods, mainKey].join("+"));
+  };
+
+  const saveSketchHotkey = async (combo: string) => {
+    const requestId = ++sketchHotkeyRequestRef.current;
+    const previous = sketchHotkeyRef.current;
+    setSketchHotkey(combo);
+    sketchHotkeyRef.current = combo;
+    setSketchHotkeyStatus("saving");
+    setSketchHotkeyError("");
+    try {
+      const request = sketchHotkeyQueueRef.current
+        .catch(() => undefined)
+        .then(() => invoke("set_sketch_hotkey", { hotkey: combo }));
+      sketchHotkeyQueueRef.current = request.catch(() => undefined);
+      await request;
+      if (requestId !== sketchHotkeyRequestRef.current) return;
+      setSketchHotkeyStatus("saved");
+      window.setTimeout(() => {
+        if (requestId === sketchHotkeyRequestRef.current) setSketchHotkeyStatus("idle");
+      }, 2000);
+    } catch (err) {
+      if (requestId !== sketchHotkeyRequestRef.current) return;
+      setSketchHotkey(previous);
+      sketchHotkeyRef.current = previous;
+      setSketchHotkeyStatus("error");
+      setSketchHotkeyError(String(err));
+      window.setTimeout(() => {
+        if (requestId === sketchHotkeyRequestRef.current) setSketchHotkeyStatus("idle");
+      }, 3000);
+    }
+  };
+
+  const clearSketchHotkey = async () => {
+    const requestId = ++sketchHotkeyRequestRef.current;
+    const previous = sketchHotkeyRef.current;
+    sketchHotkeyRef.current = "";
+    setSketchHotkeyStatus("saving");
+    setSketchHotkeyError("");
+    try {
+      const request = sketchHotkeyQueueRef.current
+        .catch(() => undefined)
+        .then(() => invoke("set_sketch_hotkey", { hotkey: "" }));
+      sketchHotkeyQueueRef.current = request.catch(() => undefined);
+      await request;
+      if (requestId !== sketchHotkeyRequestRef.current) return;
+      setSketchHotkey("");
+      setSketchHotkeyStatus("idle");
+      setSketchHotkeyError("");
+    } catch (err) {
+      if (requestId !== sketchHotkeyRequestRef.current) return;
+      setSketchHotkey(previous);
+      sketchHotkeyRef.current = previous;
+      setSketchHotkeyStatus("error");
+      setSketchHotkeyError(String(err));
+    }
+  };
+
+  const changeSketchHistoryLimit = (value: number) => {
+    const normalized = Math.max(1, Math.min(MAX_SKETCH_HISTORY_LIMIT, Math.trunc(value)));
+    setSketchHistoryLimit(writeSketchHistoryLimit(normalized));
+    setSketchHistoryLimitStatus("saved");
+    window.setTimeout(() => setSketchHistoryLimitStatus("idle"), 2000);
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: SKETCH_HISTORY_LIMIT_KEY,
+      newValue: String(normalized),
+      storageArea: localStorage,
+    }));
   };
 
   const pickRecordingSavePath = async () => {
@@ -1100,6 +1290,32 @@ function Settings() {
 
   const cancelEditQiSnippet = () => setQiEditingIndex(null);
 
+  const changeQiHistoryEnabled = async (enabled: boolean) => {
+    const previous = qiHistoryEnabledRef.current;
+    const version = ++qiHistoryEnabledSaveVersionRef.current;
+    qiHistoryEnabledRef.current = enabled;
+    setQiHistoryEnabled(enabled);
+    setQiHistoryEnabledStatus("idle");
+    try {
+      await invoke("set_quick_input_history_enabled", { enabled });
+      if (version !== qiHistoryEnabledSaveVersionRef.current) return;
+      if (!enabled) {
+        setQiHistory([]);
+      } else {
+        await refreshQiHistory();
+      }
+      setQiHistoryEnabledStatus("saved");
+      setTimeout(() => setQiHistoryEnabledStatus("idle"), 2000);
+    } catch (err) {
+      if (version !== qiHistoryEnabledSaveVersionRef.current) return;
+      console.error("Failed to save quick input history enabled state:", err);
+      qiHistoryEnabledRef.current = previous;
+      setQiHistoryEnabled(previous);
+      setQiHistoryEnabledStatus("error");
+      setTimeout(() => setQiHistoryEnabledStatus("idle"), 3000);
+    }
+  };
+
   /** 清空剪贴板历史（后端内存缓冲区） */
   const clearQiHistory = async () => {
     setQiHistoryStatus("idle");
@@ -1113,6 +1329,39 @@ function Settings() {
       setQiHistoryStatus("error");
       setTimeout(() => setQiHistoryStatus("idle"), 3000);
     }
+  };
+
+  /** 保存剪贴板历史保留条数，并立即裁剪当前列表。 */
+  const changeQiHistoryLimit = async (value: number) => {
+    const limit = Math.max(0, Math.min(20, Math.trunc(value)));
+    const previous = qiHistoryLimitRef.current;
+    const version = ++qiHistoryLimitSaveVersionRef.current;
+    qiHistoryLimitRef.current = limit;
+    setQiHistoryLimit(limit);
+    setQiHistoryLimitStatus("idle");
+
+    // 保证快速连续修改按输入顺序写入；过期请求完成后不再改动界面状态。
+    const save = qiHistoryLimitSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => invoke("set_quick_input_history_limit", { limit }).then(() => undefined));
+    qiHistoryLimitSaveQueueRef.current = save;
+
+    void save
+      .then(() => {
+        if (version !== qiHistoryLimitSaveVersionRef.current) return;
+        setQiHistory((history) => history.slice(0, limit));
+        setQiHistoryLimitStatus("saved");
+        setTimeout(() => setQiHistoryLimitStatus("idle"), 2000);
+      })
+      .catch((err) => {
+        if (version !== qiHistoryLimitSaveVersionRef.current) return;
+        console.error("Failed to save quick input history limit:", err);
+        qiHistoryLimitRef.current = previous;
+        setQiHistoryLimit(previous);
+        setQiHistory((history) => history.slice(0, previous));
+        setQiHistoryLimitStatus("error");
+        setTimeout(() => setQiHistoryLimitStatus("idle"), 3000);
+      });
   };
 
   const pickScreenshotSavePath = async () => {
@@ -1220,45 +1469,47 @@ function Settings() {
                   </span>
                 )}
               </div>
-              <div className="settings-item">
-                <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-theme">
-                    主题
-                  </label>
-                  <select
-                    id="settings-theme"
-                    value={theme}
-                    onChange={(e) => {
-                      setTheme(e.target.value as "light" | "dark");
-                      setThemePreferencesError(false);
-                    }}
-                    className="settings-select"
-                  >
-                    <option value="light">浅色</option>
-                    <option value="dark">深色</option>
-                  </select>
+              <div className="settings-theme-row">
+                <div className="settings-item">
+                  <div className="settings-inline-group">
+                    <label className="settings-label" htmlFor="settings-theme">
+                      主题
+                    </label>
+                    <select
+                      id="settings-theme"
+                      value={theme}
+                      onChange={(e) => {
+                        setTheme(e.target.value as "light" | "dark");
+                        setThemePreferencesError(false);
+                      }}
+                      className="settings-select"
+                    >
+                      <option value="light">浅色</option>
+                      <option value="dark">深色</option>
+                    </select>
+                  </div>
                 </div>
-              </div>
-              <div className="settings-item">
-                <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-theme-scheme">
-                    界面风格
-                  </label>
-                  <select
-                    id="settings-theme-scheme"
-                    value={themeScheme}
-                    onChange={(e) => {
-                      setThemeScheme(e.target.value as ThemeSchemeId);
-                      setThemePreferencesError(false);
-                    }}
-                    className="settings-select"
-                  >
-                    {THEME_SCHEMES.map((scheme) => (
-                      <option key={scheme.id} value={scheme.id}>
-                        {scheme.label}
-                      </option>
-                    ))}
-                  </select>
+                <div className="settings-item">
+                  <div className="settings-inline-group">
+                    <label className="settings-label" htmlFor="settings-theme-scheme">
+                      界面风格
+                    </label>
+                    <select
+                      id="settings-theme-scheme"
+                      value={themeScheme}
+                      onChange={(e) => {
+                        setThemeScheme(e.target.value as ThemeSchemeId);
+                        setThemePreferencesError(false);
+                      }}
+                      className="settings-select"
+                    >
+                      {THEME_SCHEMES.map((scheme) => (
+                        <option key={scheme.id} value={scheme.id}>
+                          {scheme.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               </div>
               <div className="settings-item">
@@ -1418,10 +1669,7 @@ function Settings() {
                       <span className="settings-hint">
                         发现新版本 <b>{updater.availableVersion}</b>
                       </span>
-                      <button
-                        className="settings-save-btn"
-                        onClick={updater.downloadAndInstall}
-                      >
+                      <button className="settings-save-btn" onClick={updater.downloadAndInstall}>
                         <Icon name="Download" size={14} /> 下载并安装
                       </button>
                     </div>
@@ -1434,7 +1682,8 @@ function Settings() {
                   )}
                   {updater.status === "installing" && (
                     <span className="settings-hint">
-                      <Icon name="Loader2" size={14} className="settings-save-spinner" /> 正在安装，稍后会自动重启…
+                      <Icon name="Loader2" size={14} className="settings-save-spinner" />{" "}
+                      正在安装，稍后会自动重启…
                     </span>
                   )}
                   {updater.status === "error" && (
@@ -1507,8 +1756,56 @@ function Settings() {
                 )}
               </div>
               <div className="settings-item">
-                <label className="settings-label">保存路径</label>
+                <label className="settings-label" htmlFor="settings-sketch-hotkey">
+                  屏幕草稿快捷键
+                </label>
                 <div className="settings-inline-group">
+                  <input
+                    id="settings-sketch-hotkey"
+                    type="text"
+                    value={sketchHotkeyRecording ? "按下组合键…" : sketchHotkey}
+                    readOnly
+                    placeholder="点击设置快捷键"
+                    onFocus={() => { setSketchHotkeyRecording(true); setSketchHotkeyError(""); }}
+                    onBlur={() => setSketchHotkeyRecording(false)}
+                    onKeyDown={handleSketchHotkeyKeyDown}
+                    className="settings-input"
+                    style={{ width: 180 }}
+                  />
+                  {sketchHotkey && (
+                    <button className="settings-toggle-btn" onClick={clearSketchHotkey} title="清除快捷键" aria-label="清除快捷键">
+                      <Icon name="X" size={16} />
+                    </button>
+                  )}
+                </div>
+                {sketchHotkeyStatus === "saving" && <span className="settings-hint">保存中…</span>}
+                {sketchHotkeyStatus === "saved" && <span className="settings-hint">已保存</span>}
+                {sketchHotkeyError && <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>{sketchHotkeyError}</p>}
+              </div>
+              <div className="settings-item">
+                <label className="settings-label" htmlFor="settings-sketch-history-limit">草稿历史保留条数</label>
+                <div className="settings-inline-group">
+                  <input
+                    id="settings-sketch-history-limit"
+                    className="settings-input"
+                    type="number"
+                    min={1}
+                    max={MAX_SKETCH_HISTORY_LIMIT}
+                    step={1}
+                    value={sketchHistoryLimit}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      if (Number.isFinite(value)) changeSketchHistoryLimit(value);
+                    }}
+                    style={{ width: 84 }}
+                  />
+                  <span className="settings-hint">最多 {MAX_SKETCH_HISTORY_LIMIT} 条，默认 10 条</span>
+                </div>
+                {sketchHistoryLimitStatus === "saved" && <span className="settings-hint">已保存</span>}
+              </div>
+              <div className="settings-item">
+                <label className="settings-label">保存路径</label>
+                <div className="settings-inline-group settings-path-group">
                   <input
                     type="text"
                     value={screenshotSavePath}
@@ -1628,7 +1925,7 @@ function Settings() {
               </div>
               <div className="settings-item">
                 <label className="settings-label">保存路径</label>
-                <div className="settings-inline-group">
+                <div className="settings-inline-group settings-path-group">
                   <input
                     type="text"
                     value={recordingSavePath}
@@ -1954,11 +2251,37 @@ function Settings() {
                   <label className="settings-label">剪贴板历史</label>
                   <span
                     className="settings-hint-inline"
-                    title="自动记录复制到剪贴板的文本，最新在前，最多 20 条；可在转盘扇区中选中输入。"
+                    title="自动记录复制到剪贴板的文本，最新在前；可设置保留条数，设为 0 可关闭历史记录。"
                   >
                     <Icon name="AlertCircle" size={14} aria-hidden="true" />
                   </span>
                 </div>
+                <div className="qi-history-toggle-row">
+                  <span className="settings-label qi-history-toggle-label">使用剪贴板历史</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={qiHistoryEnabled}
+                    aria-label="使用剪贴板历史"
+                    className={`qi-history-switch${qiHistoryEnabled ? " is-on" : ""}`}
+                    onClick={() => void changeQiHistoryEnabled(!qiHistoryEnabled)}
+                  >
+                    <span className="qi-history-switch-thumb" />
+                  </button>
+                </div>
+                {qiHistoryEnabledStatus === "saved" && (
+                  <span className="settings-hint">已保存</span>
+                )}
+                {qiHistoryEnabledStatus === "error" && (
+                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    保存失败
+                  </span>
+                )}
+                {!qiHistoryEnabled && (
+                  <p className="settings-hint qi-history-disabled-hint">
+                    已关闭，剪贴板历史不会记录或用于转盘；保留条数设置将在重新开启后生效。
+                  </p>
+                )}
                 <div className="qi-snippet-list">
                   {qiHistory.length === 0 && (
                     <p className="settings-hint" style={{ opacity: 0.6 }}>
@@ -1971,6 +2294,34 @@ function Settings() {
                     </div>
                   ))}
                 </div>
+                <div className="settings-item-head" style={{ marginTop: 10 }}>
+                  <label className="settings-label" htmlFor="settings-qi-history-limit">
+                    保留条数
+                  </label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      id="settings-qi-history-limit"
+                      className="settings-input"
+                      type="number"
+                      min={0}
+                      max={20}
+                      step={1}
+                      value={qiHistoryLimit}
+                      onChange={(e) => {
+                        const value = Number(e.target.value);
+                        if (Number.isFinite(value)) void changeQiHistoryLimit(value);
+                      }}
+                      style={{ width: 84 }}
+                    />
+                    <span className="settings-hint">条（0 表示不记录）</span>
+                  </div>
+                </div>
+                {qiHistoryLimitStatus === "saved" && <span className="settings-hint">已保存</span>}
+                {qiHistoryLimitStatus === "error" && (
+                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    保存失败
+                  </span>
+                )}
                 <div className="qi-history-actions">
                   <button
                     className="settings-danger-btn"

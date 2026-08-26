@@ -3,9 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 /** 番茄钟阶段（与后端 PomodoroStage snake_case 序列化一致） */
 export type PomodoroStage = "focus" | "short_break" | "long_break";
 
-/** 番茄钟悬浮窗显示模式 */
-export type PomodoroDisplayMode = "full" | "mini";
-
 /** 到点提醒方式 */
 export type PomodoroNotifySound = "voice" | "tone" | "none";
 
@@ -25,7 +22,6 @@ export interface PomodoroConfig {
   notifySoundType: PomodoroNotifySound;
   /** 到点是否播放提示音（兼容旧配置：notifySoundType 缺失时回退） */
   notifySound: boolean;
-  displayMode: PomodoroDisplayMode;
 }
 
 /** 默认配置：25 分钟专注 + 5 分钟短休息 + 15 分钟长休息，每 4 轮长休息 */
@@ -37,7 +33,6 @@ export const DEFAULT_POMODORO_CONFIG: PomodoroConfig = {
   autoStartNext: false,
   notifySoundType: "voice",
   notifySound: true,
-  displayMode: "full",
 };
 
 /** 可选的到点提醒方式档位 */
@@ -138,7 +133,6 @@ export function normalizePomodoroConfig(raw: unknown): PomodoroConfig {
         : DEFAULT_POMODORO_CONFIG.autoStartNext,
     notifySoundType,
     notifySound: notifySoundType !== "none",
-    displayMode: r.displayMode === "mini" ? "mini" : "full",
   };
 }
 

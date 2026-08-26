@@ -13,9 +13,10 @@ import {
   subscribeThemePreferences,
 } from "../../styles/themePreferences";
 import "./ScreenshotTool.css";
+import { ensureLongCaptureControlsWindow, ensureLongCaptureFrameWindow } from "../../utils/toolWindows";
 
 /** 截图模式：绘制选区 / 选区完成后进入标注 */
-type Mode = "selecting" | "annotating";
+type Mode = "selecting" | "long-capturing" | "annotating";
 
 interface Selection {
   left: number;
@@ -37,6 +38,7 @@ interface PanelPosition {
 
 /** 选区方式：区域拖框 / 窗口识别 */
 type SelectMode = "region" | "window";
+type CaptureKind = "normal" | "long";
 
 /** 窗口信息（后端 enumerate_windows 的返回映射，坐标为虚拟桌面绝对物理像素） */
 interface WindowInfo {
@@ -77,6 +79,7 @@ function ScreenshotTool() {
   const modeRef = useRef<Mode>("selecting");
   modeRef.current = mode;
   const [selectMode, setSelectMode] = useState<SelectMode>("region");
+  const [captureKind, setCaptureKind] = useState<CaptureKind>("normal");
   const [windows, setWindows] = useState<WindowInfo[]>([]);
   const [selectedWindow, setSelectedWindow] = useState<WindowInfo | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -86,6 +89,7 @@ function ScreenshotTool() {
   const [ocrText, setOcrText] = useState<string | null>(null);
   const [ocrSelection, setOcrSelection] = useState("");
   const [ocrPanelPosition, setOcrPanelPosition] = useState<PanelPosition | null>(null);
+  const [toolbarAbove, setToolbarAbove] = useState(false);
   const [ready, setReady] = useState(false);
   const readyRef = useRef(false);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -98,6 +102,7 @@ function ScreenshotTool() {
   // 错误提示自动清除的计时器句柄
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ocrTextRef = useRef<HTMLTextAreaElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const ocrPanelDrag = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
   // 失焦退出防抖计时器：失焦后延迟一小段时间再退出，期间若重新获焦则取消，
   // 兼顾「失焦应退出标注态」与「RDP/远程桌面等环境下 overlay 频繁瞬时失焦」。
@@ -106,6 +111,20 @@ function ScreenshotTool() {
   useLayoutEffect(() => {
     applyThemePreferences(getStoredThemePreferences());
   }, []);
+
+  // 标注工具栏默认显示在选区下方；底部空间不足时翻到选区上方。
+  // 使用实际尺寸而不是固定高度，兼容窄屏换行和错误提示导致的高度变化。
+  useLayoutEffect(() => {
+    if (mode !== "annotating" || !selection || !image || !toolbarRef.current) return;
+    const toolbarRect = toolbarRef.current.getBoundingClientRect();
+    const gap = 6;
+    const belowTop = selection.top + selection.height + gap;
+    const aboveTop = selection.top - toolbarRect.height - gap;
+    const belowFits = belowTop + toolbarRect.height <= window.innerHeight - VIEWPORT_PADDING;
+    const aboveFits = aboveTop >= VIEWPORT_PADDING;
+    const shouldPlaceAbove = !belowFits && aboveFits;
+    setToolbarAbove((current) => (current === shouldPlaceAbove ? current : shouldPlaceAbove));
+  }, [mode, selection, image, busy, error]);
 
   useEffect(() => {
     const unlistenTheme = subscribeThemePreferences();
@@ -230,6 +249,7 @@ function ScreenshotTool() {
       setSelection(null);
       setMode("selecting");
       setSelectMode("region");
+      setCaptureKind("normal");
       setWindows([]);
       setSelectedWindow(null);
       setImage(null);
@@ -241,6 +261,28 @@ function ScreenshotTool() {
       // 同步清空标注与失焦抑制，避免下次截图残留
       clearRef.current();
       suppressFocusReset.current = false;
+    });
+    return () => {
+      un.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    const un = listen("long-capture-overlay-reset", () => {
+      genRef.current++;
+      setSelection(null);
+      setMode("selecting");
+      setSelectMode("region");
+      setCaptureKind("normal");
+      setWindows([]);
+      setSelectedWindow(null);
+      setImage(null);
+      setBusy(null);
+      setOcrText(null);
+      setOcrSelection("");
+      setOcrPanelPosition(null);
+      dragStart.current = null;
+      clearRef.current();
     });
     return () => {
       un.then((fn) => fn());
@@ -266,7 +308,7 @@ function ScreenshotTool() {
       // 框选态必须容忍焦点短暂切换。全局热键唤起时 Windows 可能在
       // overlay show/set_focus 后补发一次失焦事件；此时取消会让遮罩闪退。
       // Esc 已由全局键盘钩子兜底，因此框选态仍可可靠退出。
-      if (modeRef.current === "selecting") return;
+      if (modeRef.current === "selecting" || modeRef.current === "long-capturing") return;
       // 失焦：suppressFocusReset 期间（save/pin/copy 夺焦）不退出
       if (suppressFocusReset.current) return;
       if (blurTimer.current) clearTimeout(blurTimer.current);
@@ -295,6 +337,7 @@ function ScreenshotTool() {
     setSelection(null);
     setMode("selecting");
     setSelectMode("region");
+    setCaptureKind("normal");
     setWindows([]);
     setSelectedWindow(null);
     setImage(null);
@@ -372,6 +415,42 @@ function ScreenshotTool() {
     };
     setSelection({ left, top, width, height });
     setBusy("capture");
+    if (captureKind === "long") {
+      const gen = genRef.current;
+      // Keep the overlay session alive while the target application is restored.
+      // The overlay is hidden by Rust, but this state prevents transient focus
+      // changes from cancelling the capture before the controls are usable.
+      setMode("long-capturing");
+      try {
+        await Promise.all([ensureLongCaptureControlsWindow(), ensureLongCaptureFrameWindow()]);
+        if (gen !== genRef.current) return;
+        await invoke("start_long_capture", {
+          left: phys.left,
+          top: phys.top,
+          width: phys.width,
+          height: phys.height,
+        });
+      } catch (err) {
+        console.error("start_long_capture failed:", err);
+        if (gen === genRef.current) {
+          const message =
+            typeof err === "string"
+              ? err
+              : ((err as { message?: string })?.message ?? "长截图启动失败，请重新选择区域");
+          showError(message);
+          setMode("selecting");
+          setSelection(null);
+          // start_long_capture may have cleaned up the native session. Re-open
+          // the overlay so the user can retry without restarting the app.
+          void invoke("start_screenshot").catch((restartError) => {
+            console.error("restart screenshot after long capture failure:", restartError);
+          });
+        }
+      } finally {
+        if (gen === genRef.current) setBusy(null);
+      }
+      return;
+    }
     // 代际在 await 前捕获：capture_region 期间若用户 Esc 取消，genRef 自增，
     // await 返回后比对即可丢弃这次已取消的截屏，避免状态复活。
     // capture_region 从 start_screenshot 时截取的全屏缓存裁剪，不 hide/show overlay，
@@ -610,14 +689,29 @@ function ScreenshotTool() {
       {mode === "selecting" && (
         <div className="ss-area-tabs" onPointerDown={(e) => e.stopPropagation()}>
           <button
-            className={`ss-area-tab ${selectMode === "region" ? "active" : ""}`}
-            onClick={() => setSelectMode("region")}
+            className={`ss-area-tab ${captureKind === "long" ? "active" : ""}`}
+            onClick={() => {
+              setCaptureKind("long");
+              setSelectMode("region");
+            }}
+          >
+            <Icon name="ArrowDown" size={14} /> 长图
+          </button>
+          <button
+            className={`ss-area-tab ${captureKind === "normal" && selectMode === "region" ? "active" : ""}`}
+            onClick={() => {
+              setCaptureKind("normal");
+              setSelectMode("region");
+            }}
           >
             <Icon name="Scissors" size={14} /> 区域
           </button>
           <button
-            className={`ss-area-tab ${selectMode === "window" ? "active" : ""}`}
-            onClick={() => setSelectMode("window")}
+            className={`ss-area-tab ${captureKind === "normal" && selectMode === "window" ? "active" : ""}`}
+            onClick={() => {
+              setCaptureKind("normal");
+              setSelectMode("window");
+            }}
           >
             <Icon name="AppWindow" size={14} /> 窗口
           </button>
@@ -628,7 +722,7 @@ function ScreenshotTool() {
       )}
 
       {/* 窗口识别模式：窗口列表，点击后按窗口区域自动框选截取 */}
-      {mode === "selecting" && selectMode === "window" && (
+      {mode === "selecting" && captureKind === "normal" && selectMode === "window" && (
         <div className="ss-window-list" onPointerDown={(e) => e.stopPropagation()}>
           {windows.length === 0 ? (
             <p className="ss-window-empty">未检测到可截图的窗口</p>
@@ -701,6 +795,11 @@ function ScreenshotTool() {
             : "正在准备截图…"}
         </div>
       )}
+      {error && mode !== "annotating" && (
+        <div className="ss-capture-error" role="alert">
+          {error}
+        </div>
+      )}
 
       {mode === "annotating" && selection && image && (
         <>
@@ -730,9 +829,12 @@ function ScreenshotTool() {
             onOcr={ocr}
             onPin={pinToDesktop}
             onCancel={cancel}
+            toolbarRef={toolbarRef}
             style={{
               left: selection.left,
-              top: selection.top + selection.height + 6,
+              ...(toolbarAbove
+                ? { top: "auto", bottom: window.innerHeight - selection.top + 6 }
+                : { top: selection.top + selection.height + 6 }),
             }}
           />
           {ocrText !== null && (

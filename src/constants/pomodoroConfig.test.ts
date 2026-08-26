@@ -26,7 +26,6 @@ describe("normalizePomodoroConfig", () => {
       autoStartNext: true,
       notifySoundType: "tone",
       notifySound: true,
-      displayMode: "mini",
     };
     expect(normalizePomodoroConfig(cfg)).toEqual(cfg);
   });
@@ -51,7 +50,6 @@ describe("normalizePomodoroConfig", () => {
     const r = normalizePomodoroConfig({ workMinutes: 45 });
     expect(r.workMinutes).toBe(45);
     expect(r.shortBreakMinutes).toBe(DEFAULT_POMODORO_CONFIG.shortBreakMinutes);
-    expect(r.displayMode).toBe("full");
   });
 
   it("时长越界被钳制", () => {
@@ -73,9 +71,9 @@ describe("normalizePomodoroConfig", () => {
     expect(r.autoStartNext).toBe(DEFAULT_POMODORO_CONFIG.autoStartNext);
   });
 
-  it("displayMode 仅接受 full/mini", () => {
-    expect(normalizePomodoroConfig({ displayMode: "mini" }).displayMode).toBe("mini");
-    expect(normalizePomodoroConfig({ displayMode: "other" }).displayMode).toBe("full");
+  it("忽略旧配置中的显示模式字段", () => {
+    const result = normalizePomodoroConfig({ displayMode: "mini" });
+    expect(result).toEqual(DEFAULT_POMODORO_CONFIG);
   });
 
   it("旧配置仅 notifySound=false 时回退为静音", () => {
@@ -121,7 +119,6 @@ describe("fetchPomodoroConfig", () => {
     mockInvoke.mockResolvedValueOnce(JSON.stringify({ workMinutes: 45, displayMode: "mini" }));
     const result = await fetchPomodoroConfig();
     expect(result.workMinutes).toBe(45);
-    expect(result.displayMode).toBe("mini");
     expect(mockInvoke).toHaveBeenCalledWith("get_pomodoro_config");
   });
 
@@ -153,7 +150,7 @@ describe("fetchPomodoroConfig", () => {
 describe("savePomodoroConfig", () => {
   it("调用 set_pomodoro_config 并以 JSON 字符串持久化", async () => {
     mockInvoke.mockResolvedValueOnce(undefined);
-    const cfg: PomodoroConfig = { ...DEFAULT_POMODORO_CONFIG, displayMode: "mini" };
+    const cfg: PomodoroConfig = { ...DEFAULT_POMODORO_CONFIG };
     await savePomodoroConfig(cfg);
     expect(mockInvoke).toHaveBeenCalledWith("set_pomodoro_config", {
       config: JSON.stringify(cfg),

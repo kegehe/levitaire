@@ -59,6 +59,23 @@
   pointer-events: none;
 }
 
+.ss-capture-error {
+  position: fixed;
+  left: 50%;
+  top: 72px;
+  transform: translateX(-50%);
+  max-width: min(620px, calc(100vw - 32px));
+  padding: 8px 14px;
+  color: var(--color-danger-fg, #fff);
+  background: var(--color-danger, #b4233c);
+  border: 1px solid color-mix(in srgb, var(--color-danger, #b4233c) 70%, #fff);
+  border-radius: 6px;
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  text-align: center;
+  z-index: 40;
+}
+
 .ss-toolbar-wrap {
   position: absolute;
   z-index: 10;
@@ -342,6 +359,38 @@
   font-weight: 600;
   color: var(--color-fg);
   background: transparent;
+}
+
+.ss-color-custom {
+  position: relative;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.ss-color-custom-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.ss-color-custom-input:disabled {
+  cursor: default;
+}
+
+.ss-color-custom-swatch {
+  display: block;
+  pointer-events: none;
+}
+
+.ss-color-custom:focus-within .ss-color-custom-swatch {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
 }
 
 /* 粗细 */

@@ -188,7 +188,13 @@ function SystemMonitor() {
   }, []);
 
   useEffect(() => {
-    emit("monitor-window-ready").catch(console.error);
+    const unlistenReadyRequest = listen("monitor-window-ready-request", () => {
+      void emit("monitor-window-ready");
+    });
+    void emit("monitor-window-ready");
+    return () => {
+      unlistenReadyRequest.then((fn) => fn());
+    };
   }, []);
 
   // 设置窗口的 localStorage 不应作为运行中跨窗口同步机制。

@@ -43,6 +43,42 @@ impl ClipboardManager {
         Ok(())
     }
 
+    /// Copy an existing top-down BGRA frame without a PNG decode/encode roundtrip.
+    pub fn copy_bgra_image(
+        &self,
+        bgra: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let expected = usize::try_from(u64::from(width) * u64::from(height) * 4)?;
+        if bgra.len() != expected {
+            return Err("BGRA 数据长度与尺寸不匹配".into());
+        }
+        let row_size = width as usize * 4;
+        let mut dib_data = Vec::with_capacity(bgra.len());
+        for row in bgra.chunks_exact(row_size).rev() {
+            dib_data.extend(row.iter().enumerate().map(
+                |(index, value)| {
+                    if index % 4 == 3 {
+                        0xff
+                    } else {
+                        *value
+                    }
+                },
+            ));
+        }
+        unsafe {
+            OpenClipboard(None)?;
+            let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+                EmptyClipboard().map_err(|_| "EmptyClipboard failed")?;
+                write_dib_handle(&dib_data, width, height)
+            })();
+            let _ = CloseClipboard();
+            result?;
+        }
+        Ok(())
+    }
+
     /// 将 GIF 动图写入剪贴板：
     /// - 注册的 "GIF" 格式：写入完整动图数据，保留动画（核心格式，供支持 GIF 粘贴的应用使用）
     /// - CF_DIB 位图格式：首帧静态图，作为可选兼容回退，保证不支持 GIF 格式的应用也能粘贴出静态图
@@ -198,10 +234,7 @@ unsafe fn write_dib_handle(
     );
 
     if GlobalUnlock(hmem).is_err() {
-        crate::utils::logger::log(
-            "clipboard",
-            "GlobalUnlock returned error (non-critical)",
-        );
+        crate::utils::logger::log("clipboard", "GlobalUnlock returned error (non-critical)");
     }
 
     if SetClipboardData(CF_DIB, Some(HANDLE(hmem.0))).is_err() {
@@ -292,9 +325,7 @@ mod tests {
     #[ignore = "需要交互式桌面会话且会覆盖系统剪贴板"]
     fn test_copy_gif_writes_animation_to_clipboard() {
         use windows::Win32::Foundation::HGLOBAL;
-        use windows::Win32::System::DataExchange::{
-            GetClipboardData, IsClipboardFormatAvailable,
-        };
+        use windows::Win32::System::DataExchange::{GetClipboardData, IsClipboardFormatAvailable};
         use windows::Win32::System::Memory::GlobalSize;
 
         let gif_bytes = sample_gif_bytes();

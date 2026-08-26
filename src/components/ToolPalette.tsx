@@ -17,6 +17,7 @@ import {
 } from "../tools/registry";
 import {
   ensureScreenshotWindow,
+  ensureSketchWindow,
   ensureMonitorWindow,
   ensurePomodoroWindow,
   waitForNewMonitorWindowReady,
@@ -163,7 +164,11 @@ function ToolPalette() {
       setEnabledTools(restored);
       enabledIdsRef.current = restored;
     };
-    if (id === "screenshot") {
+    if (id === "sketch") {
+      invoke("set_sketch_enabled", { enabled })
+        .then(() => pendingToggle.current = Math.max(0, pendingToggle.current - 1))
+        .catch((err) => { console.error("Failed to set sketch enabled:", err); rollback(); });
+    } else if (id === "screenshot") {
       invoke("set_screenshot_enabled", { enabled })
         .then(() => {
           pendingToggle.current = Math.max(0, pendingToggle.current - 1);
@@ -250,12 +255,16 @@ function ToolPalette() {
     }
     try {
       if (tool.activation === "immediate") {
-        if (tool.id !== "system-monitor") {
+        if (tool.id !== "system-monitor" && tool.id !== "sketch") {
           await invoke("hide_palette").catch(console.error);
         }
         if (tool.id === "screenshot") {
           await ensureScreenshotWindow();
-          await invoke("start_screenshot").catch(console.error);
+          await invoke("start_screenshot");
+        } else if (tool.id === "sketch") {
+          await ensureSketchWindow();
+          await invoke("show_sketch_window");
+          await invoke("hide_palette");
         } else if (tool.id === "system-monitor") {
           try {
             const monitorWindow = await ensureMonitorWindow();
@@ -284,6 +293,9 @@ function ToolPalette() {
         // selection 类：工具 chunk 已在上方 loader() 预加载，隐藏面板，等待用户选中文字时由后端 selection-found 触发显示
         await invoke("hide_palette").catch(console.error);
       }
+    } catch (err) {
+      console.error(`${tool.id} 启动失败:`, err);
+      setActivateError(`${tool.name}启动失败，请重试`);
     } finally {
       setActivating(false);
     }

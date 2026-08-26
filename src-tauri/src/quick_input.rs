@@ -12,10 +12,12 @@
 //! 鼠标移动/点击事件由后端 hook emit，不依赖前端 DOM（无焦点窗口收不到 DOM 事件）。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU16, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
+use std::sync::Mutex;
 #[cfg(not(test))]
 use std::sync::OnceLock;
-use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -34,6 +36,9 @@ static OVERLAY_HWND: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null
 
 /// 转盘激活状态的起始时间戳（毫秒），用于区分「正在显示中」与「激活卡死」
 static QUICK_INPUT_ACTIVE_AT: AtomicU64 = AtomicU64::new(0);
+static QUICK_INPUT_X: AtomicI32 = AtomicI32::new(0);
+static QUICK_INPUT_Y: AtomicI32 = AtomicI32::new(0);
+static QUICK_INPUT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 自愈阈值：active 置位后转盘持续不可见超过该时长才判定为卡死并自愈复位。
 /// 避免误伤「刚触发、窗口正在 show」窗口期内的快速二次触发（该窗口期应正常走关闭分支）。
@@ -62,6 +67,23 @@ pub const MODE_HOLD: u8 = 2;
 /// 转盘模式是否激活
 pub fn is_active() -> bool {
     QUICK_INPUT_ACTIVE.load(Ordering::SeqCst)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuickInputState {
+    pub active: bool,
+    pub x: i32,
+    pub y: i32,
+    pub generation: u64,
+}
+
+pub fn state() -> QuickInputState {
+    QuickInputState {
+        active: is_active(),
+        x: QUICK_INPUT_X.load(Ordering::SeqCst),
+        y: QUICK_INPUT_Y.load(Ordering::SeqCst),
+        generation: QUICK_INPUT_GENERATION.load(Ordering::SeqCst),
+    }
 }
 
 /// 当前是否处于「按住唤起」模式
@@ -172,43 +194,86 @@ pub fn begin_wheel(app: &tauri::AppHandle) {
         CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
         return;
     };
+    crate::utils::logger::log(
+        "quick_input",
+        &format!(
+            "begin_wheel: overlay found, visible_before={}",
+            wheel_visible()
+        ),
+    );
     // 顺手刷新 HWND 缓存：begin_wheel 已持有窗口句柄，若缓存过期（窗口重建等）
     // 会导致 wheel_visible() 误报不可见、toggle 误走自愈分支。
     if let Ok(hwnd) = win.hwnd() {
         OVERLAY_HWND.store(hwnd.0, Ordering::SeqCst);
     }
+    let pos =
+        crate::automation::get_mouse_position().unwrap_or(crate::automation::Point { x: 0, y: 0 });
+    QUICK_INPUT_X.store(pos.x, Ordering::SeqCst);
+    QUICK_INPUT_Y.store(pos.y, Ordering::SeqCst);
+    let generation = QUICK_INPUT_GENERATION
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
     // 先写时间戳再置 active：避免并发 toggle_wheel 读到 active=true 时拿到上一次
     // 未复位的旧 ACTIVE_AT（可能是数小时前）而误判 stale 触发自愈。
     QUICK_INPUT_ACTIVE_AT.store(now_ms(), Ordering::SeqCst);
     QUICK_INPUT_ACTIVE.store(true, Ordering::SeqCst);
     // 开始时复位高亮，避免上一次会话的残留高亮被「按住唤起」模式在松开时误读
     CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
-    let pos =
-        crate::automation::get_mouse_position().unwrap_or(crate::automation::Point { x: 0, y: 0 });
-    if let Err(e) = app.emit_to(
-        "quick-input-overlay",
-        "quick-input-start",
-        serde_json::json!({ "x": pos.x, "y": pos.y }),
-    ) {
-        // emit 失败（窗口不可用/IPC 异常）：回滚激活态，让下一次触发能重新尝试，
-        // 否则 QUICK_INPUT_ACTIVE 卡在 true 会吞掉全局鼠标点击并让 toggle 永远走关闭分支。
+    // 后端先定位并显示窗口，避免前端事件监听尚未就绪导致转盘完全不出现。
+    let half = (160.0 * win.scale_factor().unwrap_or(1.0)).round() as i32;
+    if let Err(e) = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        pos.x - half,
+        pos.y - half,
+    ))) {
         crate::utils::logger::log(
             "quick_input",
-            &format!("begin_wheel emit failed, rolled back active: {}", e),
+            &format!("begin_wheel: set position failed: {}", e),
         );
         QUICK_INPUT_ACTIVE.store(false, Ordering::SeqCst);
         CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+        let _ = win.hide();
+        return;
+    }
+    if let Err(e) = win.set_always_on_top(true).and_then(|_| win.show()) {
+        crate::utils::logger::log("quick_input", &format!("begin_wheel: show failed: {}", e));
+        QUICK_INPUT_ACTIVE.store(false, Ordering::SeqCst);
+        CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+        let _ = win.hide();
+        return;
+    }
+    if let Err(e) = app.emit_to(
+        "quick-input-overlay",
+        "quick-input-start",
+        serde_json::json!({ "x": pos.x, "y": pos.y, "generation": generation }),
+    ) {
+        // 窗口已经显示，事件失败时由前端状态查询补偿，不回滚 active。
+        crate::utils::logger::log(
+            "quick_input",
+            &format!("begin_wheel start event failed: {}", e),
+        );
+    } else {
+        crate::utils::logger::log(
+            "quick_input",
+            &format!("begin_wheel: start event emitted generation={}", generation),
+        );
     }
 }
 
 /// 退出转盘模式：停止鼠标移动 emit，通知前端确认/取消。
 /// `selected_index` 为 None 表示未选中（鼠标在中心或无扇区），前端据此取消不输入。
 pub fn end_wheel(app: &tauri::AppHandle, selected_index: Option<usize>) {
+    let generation = QUICK_INPUT_GENERATION.load(Ordering::SeqCst);
     QUICK_INPUT_ACTIVE.store(false, Ordering::SeqCst);
+    // 结束也推进会话序号，使尚未完成的 start 查询无法复活已结束的转盘。
+    QUICK_INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+    if let Some(win) = app.get_webview_window("quick-input-overlay") {
+        let _ = win.hide();
+    }
     let _ = app.emit_to(
         "quick-input-overlay",
         "quick-input-confirm",
-        serde_json::json!({ "selectedIndex": selected_index }),
+        serde_json::json!({ "selectedIndex": selected_index, "generation": generation }),
     );
 }
 
@@ -216,8 +281,18 @@ pub fn end_wheel(app: &tauri::AppHandle, selected_index: Option<usize>) {
 /// 当前高亮扇区由前端持有（highlightedRef），因此这里只发点击信号，
 /// 前端读到高亮项后执行输入并隐藏窗口，后端不再回传 index。
 pub fn confirm_by_click(app: &tauri::AppHandle) {
+    let generation = QUICK_INPUT_GENERATION.load(Ordering::SeqCst);
     QUICK_INPUT_ACTIVE.store(false, Ordering::SeqCst);
-    let _ = app.emit_to("quick-input-overlay", "quick-input-click", serde_json::json!({}));
+    QUICK_INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+    if let Some(win) = app.get_webview_window("quick-input-overlay") {
+        let _ = win.hide();
+    }
+    let _ = app.emit_to(
+        "quick-input-overlay",
+        "quick-input-click",
+        serde_json::json!({ "generation": generation }),
+    );
 }
 
 /// 点击切换转盘：当前已激活则关闭（取消），否则打开。供触发键的按键事件与前端点击唤起共用。
@@ -227,8 +302,7 @@ pub fn confirm_by_click(app: &tauri::AppHandle) {
 /// 避免误伤「刚触发、窗口正在 show」窗口期内的快速二次触发（应正常走关闭分支）。
 pub fn toggle_wheel(app: &tauri::AppHandle) {
     if is_active() {
-        let stale = now_ms()
-            .saturating_sub(QUICK_INPUT_ACTIVE_AT.load(Ordering::SeqCst))
+        let stale = now_ms().saturating_sub(QUICK_INPUT_ACTIVE_AT.load(Ordering::SeqCst))
             >= WHEEL_HEAL_AFTER_MS;
         if !wheel_visible() && stale {
             crate::utils::logger::log(
@@ -248,8 +322,14 @@ pub fn toggle_wheel(app: &tauri::AppHandle) {
 
 // ─── 剪贴板历史（内存环形缓冲 + 本地文件持久化） ─────────────────
 
-/// 历史记录最大条数
-const HISTORY_MAX: usize = 20;
+/// 历史记录的绝对上限，避免配置异常导致无限增长。
+pub const HISTORY_MAX: usize = 20;
+/// 新安装或旧配置缺少该字段时的默认保留条数。
+pub const HISTORY_DEFAULT_LIMIT: usize = 5;
+
+/// 当前配置的历史保留条数，最新记录优先展示。0 表示停用历史记录。
+static HISTORY_LIMIT: AtomicUsize = AtomicUsize::new(HISTORY_DEFAULT_LIMIT);
+static HISTORY_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// 单条历史记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,12 +385,61 @@ fn history_path() -> PathBuf {
 /// 启动时从本地文件恢复剪贴板历史。文件不存在、解析失败或解密失败时
 /// 保持当前（默认空）历史，不影响正常启动。
 pub fn load_history() {
+    if !get_history_enabled() {
+        clear_history();
+        return;
+    }
     let items = load_history_from(&history_path());
     if items.is_empty() {
         return;
     }
     if let Ok(mut hist) = HISTORY.lock() {
         *hist = items;
+    }
+}
+
+/// 设置历史保留条数，并立即裁剪内存及磁盘中的旧记录。
+/// 值由命令层校验到 HISTORY_MAX 以内；这里再次保护，避免其他调用方传入异常值。
+pub fn set_history_limit(limit: usize) {
+    let limit = limit.min(HISTORY_MAX);
+    HISTORY_LIMIT.store(limit, Ordering::SeqCst);
+
+    let mut changed = false;
+    if let Ok(mut hist) = HISTORY.lock() {
+        if limit == 0 {
+            if !hist.is_empty() {
+                hist.clear();
+                changed = true;
+            }
+        } else if hist.len() > limit {
+            let overflow = hist.len() - limit;
+            hist.drain(0..overflow);
+            changed = true;
+        }
+    }
+
+    if limit == 0 {
+        clear_history();
+    } else if changed {
+        #[cfg(not(test))]
+        save_history();
+    }
+}
+
+/// 获取当前历史保留条数。
+pub fn get_history_limit() -> usize {
+    HISTORY_LIMIT.load(Ordering::SeqCst)
+}
+
+pub fn get_history_enabled() -> bool {
+    HISTORY_ENABLED.load(Ordering::SeqCst)
+}
+
+/// Enable or disable clipboard history. Disabling also removes existing data.
+pub fn set_history_enabled(enabled: bool) {
+    HISTORY_ENABLED.store(enabled, Ordering::SeqCst);
+    if !enabled {
+        clear_history();
     }
 }
 
@@ -338,8 +467,9 @@ fn load_history_from(path: &Path) -> Vec<ClipboardHistoryItem> {
     match serde_json::from_slice::<Vec<ClipboardHistoryItem>>(&plaintext) {
         Ok(mut items) => {
             items.retain(|i| !i.text.is_empty());
-            if items.len() > HISTORY_MAX {
-                let overflow = items.len() - HISTORY_MAX;
+            let limit = get_history_limit();
+            if items.len() > limit {
+                let overflow = items.len() - limit;
                 items.drain(0..overflow);
             }
             items
@@ -359,7 +489,9 @@ fn load_history_from(path: &Path) -> Vec<ClipboardHistoryItem> {
 /// 测试环境不落盘（push_history 在 cfg(not(test)) 下调用），故该函数仅编译进非测试构建。
 #[cfg(not(test))]
 fn save_history() {
-    let _guard = history_save_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = history_save_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let items = HISTORY.lock().map(|h| h.clone()).unwrap_or_default();
     if let Err(e) = save_history_to(&history_path(), &items) {
         crate::utils::logger::log("quick_input", &format!("保存剪贴板历史失败: {}", e));
@@ -386,7 +518,7 @@ fn save_history_to(path: &Path, items: &[ClipboardHistoryItem]) -> Result<(), St
 /// 去重：与最近一条相同则跳过。内存更新后持久化到本地文件。
 /// 测试环境跳过落盘，避免污染真实用户数据。
 pub fn push_history(text: &str) {
-    if text.is_empty() {
+    if !get_history_enabled() || text.is_empty() || get_history_limit() == 0 {
         return;
     }
     let preview = if text.chars().count() > PREVIEW_MAX {
@@ -401,12 +533,17 @@ pub fn push_history(text: &str) {
     };
     let mut changed = false;
     if let Ok(mut hist) = HISTORY.lock() {
+        // Re-check after acquiring the lock so a concurrent disable cannot append a record.
+        if !get_history_enabled() {
+            return;
+        }
         // 与最近一条相同则跳过
         if hist.last().map(|i| i.text == item.text).unwrap_or(false) {
             return;
         }
         hist.push(item);
-        if hist.len() > HISTORY_MAX {
+        let limit = get_history_limit();
+        if hist.len() > limit {
             hist.remove(0);
         }
         changed = true;
@@ -419,6 +556,9 @@ pub fn push_history(text: &str) {
 
 /// 获取历史记录快照（前端转盘展示用，最新在前）
 pub fn get_history() -> Vec<ClipboardHistoryItem> {
+    if !get_history_enabled() {
+        return Vec::new();
+    }
     HISTORY
         .lock()
         .map(|h| h.iter().rev().cloned().collect())
@@ -430,7 +570,9 @@ pub fn get_history() -> Vec<ClipboardHistoryItem> {
 pub fn clear_history() {
     #[cfg(not(test))]
     {
-        let _guard = history_save_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = history_save_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _ = std::fs::remove_file(history_path());
     }
     if let Ok(mut h) = HISTORY.lock() {
@@ -539,8 +681,20 @@ pub fn is_dangerous_trigger_vk(vk: u16) -> bool {
     // 编辑/导航区与空键、回车、制表、退格、Esc；方向键
     matches!(
         vk,
-        0x20 | 0x0D | 0x09 | 0x08 | 0x1B | 0x2D | 0x2E | 0x24 | 0x23 | 0x21 | 0x22 | 0x25
-            | 0x26 | 0x27 | 0x28
+        0x20 | 0x0D
+            | 0x09
+            | 0x08
+            | 0x1B
+            | 0x2D
+            | 0x2E
+            | 0x24
+            | 0x23
+            | 0x21
+            | 0x22
+            | 0x25
+            | 0x26
+            | 0x27
+            | 0x28
     )
 }
 
@@ -637,9 +791,10 @@ pub fn vk_to_name(vk: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_history, get_history, history_path, is_dangerous_trigger_vk, load_history,
-        load_history_from, parse_trigger_key, push_history, save_history_to, vk_to_name,
-        ClipboardHistoryItem, HISTORY_MAX,
+        clear_history, get_history, get_history_enabled, get_history_limit, history_path,
+        is_dangerous_trigger_vk, load_history, load_history_from, parse_trigger_key, push_history,
+        save_history_to, set_history_enabled, set_history_limit, vk_to_name, ClipboardHistoryItem,
+        HISTORY_DEFAULT_LIMIT, HISTORY_MAX,
     };
 
     /// 串行化操作全局 HISTORY 的测试，避免并行运行互相污染
@@ -777,9 +932,28 @@ mod tests {
     }
 
     #[test]
+    fn history_enabled_switch_blocks_and_resumes_recording() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_history();
+        set_history_limit(HISTORY_DEFAULT_LIMIT);
+
+        set_history_enabled(false);
+        assert!(!get_history_enabled());
+        push_history("disabled");
+        assert!(get_history().is_empty());
+
+        set_history_enabled(true);
+        assert!(get_history_enabled());
+        push_history("enabled");
+        assert_eq!(get_history()[0].text, "enabled");
+        clear_history();
+    }
+
+    #[test]
     fn get_history_respects_max_cap() {
         let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_history();
+        set_history_limit(HISTORY_MAX);
         for i in 0..25 {
             push_history(&format!("item-{}", i));
         }
@@ -788,15 +962,35 @@ mod tests {
         assert_eq!(hist[0].text, "item-24", "最新一条应保留");
         assert_eq!(hist[19].text, "item-5", "最旧一条应被裁剪");
         clear_history();
+        set_history_limit(HISTORY_DEFAULT_LIMIT);
+    }
+
+    #[test]
+    fn history_limit_zero_disables_and_trims_to_latest() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_history();
+        set_history_limit(3);
+        push_history("one");
+        push_history("two");
+        push_history("three");
+        push_history("four");
+        let hist = get_history();
+        assert_eq!(hist.len(), 3);
+        assert_eq!(hist[0].text, "four");
+        assert_eq!(hist[2].text, "two");
+
+        set_history_limit(0);
+        assert_eq!(get_history_limit(), 0);
+        assert!(get_history().is_empty());
+        push_history("ignored");
+        assert!(get_history().is_empty());
+        set_history_limit(HISTORY_DEFAULT_LIMIT);
     }
 
     /// 持久化往返：加密写入后能解密读回，内容一致
     #[test]
     fn history_persistence_roundtrip() {
-        let tmp = std::env::temp_dir().join(format!(
-            "levitaire_test_hist_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("levitaire_test_hist_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let path = tmp.join("clipboard_history.json");
 
@@ -822,10 +1016,8 @@ mod tests {
     /// 历史文件不落明文：磁盘内容应为 hex 编码的密文
     #[test]
     fn history_persistence_encrypts_plaintext() {
-        let tmp = std::env::temp_dir().join(format!(
-            "levitaire_test_hist_enc_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_hist_enc_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let path = tmp.join("clipboard_history.json");
 
@@ -853,10 +1045,10 @@ mod tests {
     /// 加载时过滤空文本并裁剪到上限，保留最新条目
     #[test]
     fn history_persistence_filters_and_caps() {
-        let tmp = std::env::temp_dir().join(format!(
-            "levitaire_test_hist_cap_{}",
-            std::process::id()
-        ));
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_history_limit(HISTORY_MAX);
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_hist_cap_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let path = tmp.join("clipboard_history.json");
 
@@ -878,6 +1070,7 @@ mod tests {
         assert_eq!(loaded.last().unwrap().text, "t24", "最新一条应保留");
 
         let _ = std::fs::remove_dir_all(&tmp);
+        set_history_limit(HISTORY_DEFAULT_LIMIT);
     }
 
     /// 损坏文件 / 非法内容 / 文件缺失均应被安全忽略（返回空），不 panic

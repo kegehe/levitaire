@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clampWheelCenter, fitText, textWidth } from "./QuickInputTool";
+import { clampWheelCenter, fitText, getWheelItemLayout, textWidth } from "./QuickInputTool";
 
 describe("clampWheelCenter", () => {
   // 参照场景：1080p 主屏，任务栏占底部 40px，窗口半宽高 160
@@ -82,5 +82,63 @@ describe("fitText", () => {
   it("上限过窄时至少保留省略号", () => {
     const out = fitText("文本", 3, 12);
     expect(out.endsWith("…")).toBe(true);
+  });
+});
+
+describe("getWheelItemLayout", () => {
+  it("keeps the label ring inside the icon ring for sparse wheels", () => {
+    const layout = getWheelItemLayout(2, 0);
+    const labelRadius = Math.hypot(layout.cx - 160, layout.cy - 160);
+    const iconRadius = Math.hypot(layout.ix - 160, layout.iy - 160);
+
+    expect(labelRadius).toBeCloseTo(80);
+    expect(iconRadius).toBeCloseTo(119);
+    expect(iconRadius - labelRadius).toBeGreaterThan(30);
+    expect(layout.labelMaxWidth).toBeLessThanOrEqual(125);
+    expect(layout.iconSize).toBe(12);
+    expect(layout.rotate).toBeUndefined();
+    expect(getWheelItemLayout(8, 0).rotate).toContain("rotate(");
+  });
+
+  it("shrinks available text width as sectors become denser", () => {
+    expect(getWheelItemLayout(12, 0).labelMaxWidth).toBeLessThan(
+      getWheelItemLayout(4, 0).labelMaxWidth,
+    );
+    expect(getWheelItemLayout(60, 0).iconSize).toBeLessThan(12);
+    expect(getWheelItemLayout(60, 0).iconSize).toBeGreaterThanOrEqual(5);
+  });
+
+  it("rejects invalid sector indexes", () => {
+    expect(() => getWheelItemLayout(0, 0)).toThrow(RangeError);
+    expect(() => getWheelItemLayout(4, 4)).toThrow(RangeError);
+    expect(() => getWheelItemLayout(4, 1.5)).toThrow(RangeError);
+  });
+
+  it.each([1, 2, 4, 5, 8, 12, 60])("keeps layout coordinates finite for %i sectors", (count) => {
+    const layout = getWheelItemLayout(count, count - 1);
+    expect(Number.isFinite(layout.cx)).toBe(true);
+    expect(Number.isFinite(layout.cy)).toBe(true);
+    expect(Number.isFinite(layout.ix)).toBe(true);
+    expect(Number.isFinite(layout.iy)).toBe(true);
+    expect(layout.labelMaxWidth).toBeGreaterThan(0);
+    expect(layout.iconSize).toBeGreaterThanOrEqual(5);
+  });
+
+  it("does not collapse labels when the icon is vertically separated", () => {
+    expect(getWheelItemLayout(1, 0).labelMaxWidth).toBeGreaterThan(0);
+  });
+
+  it("reserves horizontal clearance from the icon for two sectors", () => {
+    const layout = getWheelItemLayout(2, 0);
+    const labelRadius = Math.hypot(layout.cx - 160, layout.cy - 160);
+    const iconRadius = Math.hypot(layout.ix - 160, layout.iy - 160);
+    const labelHalfWidth = layout.labelMaxWidth / 2;
+    const iconHalfWidth = layout.iconSize / 2 + 2;
+
+    // The reserved width may be conservative, but the nominal text band must
+    // remain inside the icon's safe boundary in every sparse layout.
+    expect(labelRadius + labelHalfWidth + iconHalfWidth).toBeLessThanOrEqual(
+      labelRadius + (iconRadius - labelRadius) - 2,
+    );
   });
 });

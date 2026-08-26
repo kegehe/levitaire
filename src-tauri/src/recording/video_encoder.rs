@@ -147,7 +147,11 @@ impl FfmpegEncoder {
     }
 
     /// 完成编码，并允许调用方在等待期间取消 ffmpeg。
-    pub fn finish_with_cancel<F>(mut self, timeout: Duration, mut should_cancel: F) -> Result<(), String>
+    pub fn finish_with_cancel<F>(
+        mut self,
+        timeout: Duration,
+        mut should_cancel: F,
+    ) -> Result<(), String>
     where
         F: FnMut() -> bool,
     {
@@ -287,7 +291,9 @@ mod tests {
     fn finish_waits_for_child_exit() {
         // cmd /c echo 会立即退出
         let child = std::process::Command::new("cmd")
-            .arg("/c").arg("echo").arg("hello")
+            .arg("/c")
+            .arg("echo")
+            .arg("hello")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -362,7 +368,8 @@ mod tests {
     fn drop_handles_already_exited_process() {
         // cmd /c echo 会立即退出
         let child = std::process::Command::new("cmd")
-            .arg("/c").arg("echo")
+            .arg("/c")
+            .arg("echo")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

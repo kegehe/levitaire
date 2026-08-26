@@ -59,7 +59,9 @@ mod tests {
     #[test]
     fn test_encode_gif_single_frame() {
         // 2x2 红色 BGRA 帧
-        let bgra = vec![0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255];
+        let bgra = vec![
+            0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+        ];
         let result = encode_gif(&[bgra], 2, 2, 10);
         assert!(result.is_ok());
         let gif_bytes = result.unwrap();
@@ -70,8 +72,12 @@ mod tests {
 
     #[test]
     fn test_encode_gif_multi_frame() {
-        let bgra_red = vec![0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255];
-        let bgra_blue = vec![255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255];
+        let bgra_red = vec![
+            0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+        ];
+        let bgra_blue = vec![
+            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+        ];
         let result = encode_gif(&[bgra_red, bgra_blue], 2, 2, 10);
         assert!(result.is_ok());
         let gif_bytes = result.unwrap();

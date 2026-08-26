@@ -5,13 +5,16 @@
 //! 且不依赖 asset 协议/临时文件/CSP，行为更接近 Snipaste。
 //!
 //! 交互：左键拖动、双击关闭、滚轮缩放（以左上角为心）、Ctrl+滚轮调透明度、
-//! 右键菜单（复制/另存为/关闭）、Esc 关闭。
+//! 右键菜单（旋转、翻转、镜像副本、复制、保存、关闭）、Esc 关闭。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use tauri::Emitter;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{GlobalFree, COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    GlobalFree, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
     DeleteObject, EndPaint, FillRect, FrameRect, GetTextExtentPoint32W, SelectObject, SetBkMode,
@@ -24,15 +27,14 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_DIB;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetMessageW, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos,
-    ShowWindow, TrackPopupMenu, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HTCAPTION, IDC_ARROW,
-    LWA_ALPHA, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOZORDER,
-    SW_SHOWNOACTIVATE, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, WM_COMMAND,
-    WM_CONTEXTMENU, WM_ERASEBKGND, WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
-    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
+    GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, HTCAPTION, IDC_ARROW, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE,
+    SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_COMMAND, WM_CONTEXTMENU, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONUP,
+    WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 /// VK_ESCAPE 虚拟键码（避免跨模块导入 KeyboardAndMouse）
@@ -42,6 +44,13 @@ const PIN_CLASS_NAME: PCWSTR = w!("LevitairePinWindow");
 const CMD_CLOSE: u16 = 1;
 const CMD_COPY: u16 = 2;
 const CMD_SAVE: u16 = 3;
+const CMD_ROTATE_LEFT: u16 = 4;
+const CMD_ROTATE_RIGHT: u16 = 5;
+const CMD_FLIP_HORIZONTAL: u16 = 6;
+const CMD_FLIP_VERTICAL: u16 = 7;
+const CMD_DUPLICATE_HORIZONTAL_MIRROR: u16 = 8;
+const CMD_DUPLICATE_VERTICAL_MIRROR: u16 = 9;
+const CMD_DUPLICATE_MIRROR: u16 = 10;
 const SCALE_TIMER_ID: usize = 1;
 /// 比例文字显示时长（毫秒）
 const SCALE_LABEL_MS: u32 = 1200;
@@ -97,10 +106,22 @@ struct PinCreateParams {
     height: i32,
     x: i32,
     y: i32,
+    scale: f32,
+    opacity: u8,
+}
+
+#[derive(Clone, Copy)]
+enum PinTransform {
+    RotateLeft,
+    RotateRight,
+    FlipHorizontal,
+    FlipVertical,
 }
 
 /// 线程内窗口数据（通过 GWLP_USERDATA 挂在窗口上）
 struct PinState {
+    app: tauri::AppHandle,
+    id: u32,
     pixels: Vec<u8>,
     width: i32,
     height: i32,
@@ -110,6 +131,7 @@ struct PinState {
     opacity: u8,
     /// 比例角标显示截止时间；None 表示不显示
     show_scale_until: Option<std::time::Instant>,
+    last_context_menu_at: Option<std::time::Instant>,
 }
 
 /// 清理所有遗留贴图临时文件（保留兼容，原生方案不再写临时文件，但清理旧版残留）
@@ -156,20 +178,45 @@ pub fn create_pin(
         px.swap(0, 2);
     }
 
+    create_pin_from_bgra(app, pixels, iw, ih, x, y, 1.0, OPACITY_MAX)
+}
+
+/// Create a pin from already decoded BGRA pixels. Used by mirror-copy actions
+/// so the duplicate never goes through a lossy or redundant PNG round trip.
+fn create_pin_from_bgra(
+    app: &tauri::AppHandle,
+    pixels: Vec<u8>,
+    width: i32,
+    height: i32,
+    x: i32,
+    y: i32,
+    scale: f32,
+    opacity: u8,
+) -> Result<u32, String> {
+    validate_pixels(&pixels, width, height)?;
+
     let id = PIN_ID.fetch_add(1, Ordering::SeqCst);
 
     let params = PinCreateParams {
         id,
         pixels,
-        width: iw,
-        height: ih,
+        width,
+        height,
         x,
         y,
+        scale,
+        opacity,
     };
 
     // 登记占位（hwnd 稍后由窗口线程回填）
     pins_locked(|m| {
-        m.insert(id, PinWindow { hwnd: 0, close_requested: false });
+        m.insert(
+            id,
+            PinWindow {
+                hwnd: 0,
+                close_requested: false,
+            },
+        );
     });
 
     // 在独立线程创建窗口并跑消息循环，避免阻塞 Tauri 命令线程
@@ -191,12 +238,15 @@ pub fn create_pin(
 fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), String> {
     let id = params.id;
     let state = Box::new(PinState {
+        app,
+        id,
         pixels: params.pixels,
         width: params.width,
         height: params.height,
-        scale: 1.0,
-        opacity: OPACITY_MAX,
+        scale: params.scale,
+        opacity: params.opacity,
         show_scale_until: None,
+        last_context_menu_at: None,
     });
 
     unsafe {
@@ -226,8 +276,8 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
 
         // 窗口尺寸 = 图片 + 2*BORDER，位置左上角向左上偏移 BORDER，
         // 使图片内容仍精确覆盖原选区位置，边框与发光画在图片外侧。
-        let win_w = params.width + BORDER * 2;
-        let win_h = params.height + BORDER * 2;
+        let win_w = scaled_dimension(params.width, params.scale) + BORDER * 2;
+        let win_h = scaled_dimension(params.height, params.scale) + BORDER * 2;
         let win_x = params.x - BORDER;
         let win_y = params.y - BORDER;
 
@@ -248,7 +298,7 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         .map_err(|e| format!("CreateWindowExW failed: {}", e))?;
 
         // 初始化分层窗口 alpha，否则 layered 窗口默认不可见
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), OPACITY_MAX, LWA_ALPHA);
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), params.opacity, LWA_ALPHA);
         // 属性就绪后再显示，SW_SHOWNOACTIVATE 避免贴图弹出抢走当前焦点
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
@@ -276,7 +326,10 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         if close_requested {
             crate::utils::logger::log(
                 "screenshot",
-                &format!("pin id={} close requested during window creation, destroying", id),
+                &format!(
+                    "pin id={} close requested during window creation, destroying",
+                    id
+                ),
             );
             let _ = DestroyWindow(hwnd);
         };
@@ -292,10 +345,120 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         pins_locked(|m| {
             m.remove(&id);
         });
-        let _ = app; // 保留 app_handle 引用防止过早释放
     }
 
     Ok(())
+}
+
+fn validate_pixels(pixels: &[u8], width: i32, height: i32) -> Result<(), String> {
+    if width <= 0 || height <= 0 {
+        return Err("贴图尺寸无效".to_string());
+    }
+    let expected = usize::try_from((width as u64) * (height as u64) * 4)
+        .map_err(|_| "贴图尺寸溢出".to_string())?;
+    if pixels.len() != expected {
+        return Err("贴图像素尺寸与数据不匹配".to_string());
+    }
+    Ok(())
+}
+
+fn scaled_dimension(value: i32, scale: f32) -> i32 {
+    ((value as f32 * scale).round() as i32).max(1)
+}
+
+fn transform_bgra(
+    pixels: &[u8],
+    width: i32,
+    height: i32,
+    transform: PinTransform,
+) -> Result<(Vec<u8>, i32, i32), String> {
+    validate_pixels(pixels, width, height)?;
+    let (out_width, out_height) = match transform {
+        PinTransform::RotateLeft | PinTransform::RotateRight => (height, width),
+        PinTransform::FlipHorizontal | PinTransform::FlipVertical => (width, height),
+    };
+    let mut output = vec![0; pixels.len()];
+    let source_width = width as usize;
+    let source_height = height as usize;
+    let destination_width = out_width as usize;
+    for y in 0..source_height {
+        for x in 0..source_width {
+            let (dest_x, dest_y) = match transform {
+                PinTransform::RotateLeft => (y, source_width - 1 - x),
+                PinTransform::RotateRight => (source_height - 1 - y, x),
+                PinTransform::FlipHorizontal => (source_width - 1 - x, y),
+                PinTransform::FlipVertical => (x, source_height - 1 - y),
+            };
+            let source = (y * source_width + x) * 4;
+            let destination = (dest_y * destination_width + dest_x) * 4;
+            output[destination..destination + 4].copy_from_slice(&pixels[source..source + 4]);
+        }
+    }
+    Ok((output, out_width, out_height))
+}
+
+unsafe fn resize_pin_window_to_content(hwnd: HWND, state: &PinState) {
+    let _ = SetWindowPos(
+        hwnd,
+        None,
+        0,
+        0,
+        scaled_dimension(state.width, state.scale) + BORDER * 2,
+        scaled_dimension(state.height, state.scale) + BORDER * 2,
+        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOMOVE,
+    );
+}
+
+unsafe fn apply_transform(hwnd: HWND, transform: PinTransform) {
+    let state_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+        hwnd,
+        windows::Win32::UI::WindowsAndMessaging::GWL_USERDATA,
+    ) as *mut PinState;
+    if state_ptr.is_null() {
+        return;
+    }
+    let state = &mut *state_ptr;
+    let Ok((pixels, width, height)) =
+        transform_bgra(&state.pixels, state.width, state.height, transform)
+    else {
+        return;
+    };
+    state.pixels = pixels;
+    state.width = width;
+    state.height = height;
+    resize_pin_window_to_content(hwnd, state);
+    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+}
+
+unsafe fn duplicate_transformed_pin(hwnd: HWND, transform: PinTransform) {
+    let state_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+        hwnd,
+        windows::Win32::UI::WindowsAndMessaging::GWL_USERDATA,
+    ) as *mut PinState;
+    if state_ptr.is_null() {
+        return;
+    }
+    let state = &*state_ptr;
+    let Ok((pixels, width, height)) =
+        transform_bgra(&state.pixels, state.width, state.height, transform)
+    else {
+        return;
+    };
+    let mut rect = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut rect);
+    // Offset the new pin so the two images are both immediately visible.
+    let x = rect.left.saturating_add(BORDER + 24);
+    let y = rect.top.saturating_add(BORDER + 24);
+    let _ = create_pin_from_bgra(
+        &state.app,
+        pixels,
+        width,
+        height,
+        x,
+        y,
+        state.scale,
+        state.opacity,
+    );
 }
 
 /// 窗口过程
@@ -474,9 +637,16 @@ unsafe extern "system" fn pin_wndproc(
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
         }
+        // The whole pin is hit-tested as HTCAPTION to enable native dragging.
+        // That routes a right click through WM_NCRBUTTONUP, and Windows does
+        // not reliably follow it with WM_CONTEXTMENU for a popup window.
+        // Handle both message paths explicitly so the menu always opens.
+        WM_NCRBUTTONUP | WM_RBUTTONUP => {
+            show_context_menu(hwnd);
+            LRESULT(0)
+        }
         WM_CONTEXTMENU => {
-            // 右键菜单（HTCAPTION 下右键产生 WM_CONTEXTMENU，客户区右键同）
-            show_context_menu(hwnd, lparam);
+            show_context_menu(hwnd);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -490,6 +660,19 @@ unsafe extern "system" fn pin_wndproc(
                 }
                 CMD_SAVE => {
                     let _ = save_pin_as(hwnd);
+                }
+                CMD_ROTATE_LEFT => apply_transform(hwnd, PinTransform::RotateLeft),
+                CMD_ROTATE_RIGHT => apply_transform(hwnd, PinTransform::RotateRight),
+                CMD_FLIP_HORIZONTAL => apply_transform(hwnd, PinTransform::FlipHorizontal),
+                CMD_FLIP_VERTICAL => apply_transform(hwnd, PinTransform::FlipVertical),
+                CMD_DUPLICATE_MIRROR => {
+                    duplicate_transformed_pin(hwnd, PinTransform::FlipHorizontal)
+                }
+                CMD_DUPLICATE_HORIZONTAL_MIRROR => {
+                    duplicate_transformed_pin(hwnd, PinTransform::FlipHorizontal)
+                }
+                CMD_DUPLICATE_VERTICAL_MIRROR => {
+                    duplicate_transformed_pin(hwnd, PinTransform::FlipVertical)
                 }
                 _ => {}
             }
@@ -569,23 +752,11 @@ unsafe fn handle_wheel(hwnd: HWND, msg: u32, wparam: WPARAM, _lparam: LPARAM) ->
         return LRESULT(0);
     }
 
-    // 新尺寸（基于原始像素尺寸，避免累积误差），加 2*BORDER 为发光边框留位
-    let new_w = ((state.width as f32 * new_scale).round() as i32).max(1) + BORDER * 2;
-    let new_h = ((state.height as f32 * new_scale).round() as i32).max(1) + BORDER * 2;
-
     state.scale = new_scale;
 
     // 以窗口左上角为缩放中心（同 Snipaste）：位置不变，只改尺寸。
     // SWP_NOMOVE 忽略 x/y；SWP_NOCOPYBITS 禁止系统复制旧客户区（昂贵且无意义，因全量重绘）。
-    let _ = SetWindowPos(
-        hwnd,
-        None,
-        0,
-        0,
-        new_w,
-        new_h,
-        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOMOVE,
-    );
+    resize_pin_window_to_content(hwnd, state);
 
     show_scale_label(hwnd, state);
     LRESULT(0)
@@ -660,55 +831,34 @@ unsafe fn draw_scale_label(hdc: windows::Win32::Graphics::Gdi::HDC, scale: f32) 
     let _ = TextOutW(hdc, left + TEXT_PAD, top + 1, &wide);
 }
 
-/// 弹出右键菜单：复制 / 另存为 / 关闭。
-unsafe fn show_context_menu(hwnd: HWND, lparam: LPARAM) {
-    let menu = match CreatePopupMenu() {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-    let copy_str: Vec<u16> = "复制到剪贴板"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let save_str: Vec<u16> = "另存为…".encode_utf16().chain(std::iter::once(0)).collect();
-    let close_str: Vec<u16> = "关闭贴图"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        CMD_COPY as usize,
-        PCWSTR(copy_str.as_ptr()),
-    );
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        CMD_SAVE as usize,
-        PCWSTR(save_str.as_ptr()),
-    );
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        CMD_CLOSE as usize,
-        PCWSTR(close_str.as_ptr()),
-    );
-
-    // 屏幕坐标
-    let x = (lparam.0 & 0xffff) as i16 as i32;
-    let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-
-    // TrackPopupMenu 需要窗口在前台，否则菜单不接收点击（Win32 限制）
-    let _ = SetForegroundWindow(hwnd);
-    let flags = TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD;
-    let cmd = TrackPopupMenu(menu, flags, x, y, Some(0), hwnd, None);
-    let _ = DestroyMenu(menu);
-    // TPM_RETURNCMD 模式下返回选中项 ID（0 表示取消），显式 PostMessage 派发命令。
-    let cmd_id = cmd.0 as u32;
-    if cmd_id != 0 {
-        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(cmd_id as usize), LPARAM(0));
+/// 弹出贴图右键菜单。原地变换、镜像副本和导出分组排列，避免
+/// "翻转当前图" 与 "复制镜像" 两类操作混淆。
+unsafe fn show_context_menu(hwnd: HWND) {
+    let state_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+        hwnd,
+        windows::Win32::UI::WindowsAndMessaging::GWL_USERDATA,
+    ) as *mut PinState;
+    if state_ptr.is_null() {
+        return;
     }
+    let state = &mut *state_ptr;
+    let now = std::time::Instant::now();
+    if state
+        .last_context_menu_at
+        .map(|last| now.duration_since(last).as_millis() < 120)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    state.last_context_menu_at = Some(now);
+
+    let mut cursor = POINT::default();
+    let _ = GetCursorPos(&mut cursor);
+    let _ = state.app.emit_to(
+        "orb",
+        "pin-context-menu-request",
+        serde_json::json!({ "source": "pin", "x": cursor.x, "y": cursor.y, "pinId": state.id }),
+    );
 }
 
 /// 生成应用当前缩放与透明度后的 RGBA 像素（供「另存为/复制」导出）。
@@ -769,8 +919,13 @@ unsafe fn copy_pin_to_clipboard(hwnd: HWND) -> Result<(), String> {
     let state = &*state_ptr;
 
     // 应用当前缩放与透明度（所见即所得），再转回 BGRA 供 DIB 使用
-    let (rgba, width, height) =
-        render_pin_rgba(&state.pixels, state.width, state.height, state.scale, state.opacity)?;
+    let (rgba, width, height) = render_pin_rgba(
+        &state.pixels,
+        state.width,
+        state.height,
+        state.scale,
+        state.opacity,
+    )?;
     let mut pixels = Vec::with_capacity(rgba.len());
     for chunk in rgba.chunks_exact(4) {
         pixels.push(chunk[2]);
@@ -951,9 +1106,42 @@ pub fn close_pin(_app: &tauri::AppHandle, id: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Dispatch a styled WebView context-menu action back to the pin's owning
+/// window thread. Keeping this dispatch as WM_COMMAND preserves all existing
+/// transform, clipboard, and save behavior.
+pub fn context_menu_action(id: u32, action: &str) -> Result<(), String> {
+    let command = match action {
+        "close" => CMD_CLOSE,
+        "copy" => CMD_COPY,
+        "save" => CMD_SAVE,
+        "rotate-left" => CMD_ROTATE_LEFT,
+        "rotate-right" => CMD_ROTATE_RIGHT,
+        "flip-horizontal" => CMD_FLIP_HORIZONTAL,
+        "flip-vertical" => CMD_FLIP_VERTICAL,
+        "duplicate-mirror" => CMD_DUPLICATE_MIRROR,
+        "duplicate-horizontal-mirror" => CMD_DUPLICATE_HORIZONTAL_MIRROR,
+        "duplicate-vertical-mirror" => CMD_DUPLICATE_VERTICAL_MIRROR,
+        _ => return Err("未知的贴图菜单操作".into()),
+    };
+    let hwnd_isize = pins_locked(|m| m.get(&id).map(|p| p.hwnd).unwrap_or(0));
+    if hwnd_isize == 0 {
+        return Err("贴图窗口尚未就绪或已关闭".into());
+    }
+    unsafe {
+        PostMessageW(
+            Some(HWND(hwnd_isize as *mut std::ffi::c_void)),
+            WM_COMMAND,
+            WPARAM(command as usize),
+            LPARAM(0),
+        )
+        .map_err(|error| format!("发送贴图菜单操作失败: {error}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::render_pin_rgba;
+    use super::{render_pin_rgba, transform_bgra, PinTransform};
 
     /// 2x2 BGRA 像素：红 / 绿 / 蓝 / 白（各 alpha=255）。
     fn sample_bgra() -> Vec<u8> {
@@ -1005,5 +1193,39 @@ mod tests {
     fn mismatched_size_returns_err() {
         let px = sample_bgra(); // 16 字节
         assert!(render_pin_rgba(&px, 3, 2, 1.0, 255).is_err());
+    }
+
+    #[test]
+    fn rotate_right_swaps_dimensions_and_pixel_order() {
+        let (pixels, width, height) =
+            transform_bgra(&sample_bgra(), 2, 2, PinTransform::RotateRight).unwrap();
+        assert_eq!((width, height), (2, 2));
+        // [blue, red, white, green] in BGRA after clockwise rotation.
+        assert_eq!(
+            &pixels,
+            &[255, 0, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255, 0, 255, 0, 255,]
+        );
+    }
+
+    #[test]
+    fn rotate_left_swaps_non_square_dimensions() {
+        let pixels = vec![
+            1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255, 4, 4, 4, 255, 5, 5, 5, 255, 6, 6, 6, 255,
+        ];
+        let (rotated, width, height) =
+            transform_bgra(&pixels, 3, 2, PinTransform::RotateLeft).unwrap();
+        assert_eq!((width, height), (2, 3));
+        assert_eq!(rotated[0], 3);
+        assert_eq!(rotated[4], 6);
+    }
+
+    #[test]
+    fn horizontal_and_vertical_flip_keep_dimensions() {
+        let px = sample_bgra();
+        let (horizontal, _, _) = transform_bgra(&px, 2, 2, PinTransform::FlipHorizontal).unwrap();
+        let (vertical, _, _) = transform_bgra(&px, 2, 2, PinTransform::FlipVertical).unwrap();
+        assert_eq!(&horizontal[..4], &[0, 255, 0, 255]);
+        assert_eq!(&vertical[..4], &[255, 0, 0, 255]);
+        assert_eq!(&vertical[8..12], &[0, 0, 255, 255]);
     }
 }

@@ -64,7 +64,9 @@ pub fn start_periodic_check(app: AppHandle) {
 
 /// 检查一次远程是否有新版本；有且未忽略则记录、发事件、拉起提示窗口。
 async fn detect_and_notify(app: &AppHandle) -> Result<(), String> {
-    let updater = app.updater().map_err(|e| format!("updater 初始化失败: {e}"))?;
+    let updater = app
+        .updater()
+        .map_err(|e| format!("updater 初始化失败: {e}"))?;
     let update = match updater.check().await {
         Ok(opt) => opt,
         Err(e) => {
@@ -100,7 +102,13 @@ async fn detect_and_notify(app: &AppHandle) -> Result<(), String> {
 
     crate::utils::logger::log(
         "updater",
-        &format!("检测到新版本 v{}（emit:{} {:?}, win: {:?}）", info.version, emit_res.is_ok(), emit_res, win_res),
+        &format!(
+            "检测到新版本 v{}（emit:{} {:?}, win: {:?}）",
+            info.version,
+            emit_res.is_ok(),
+            emit_res,
+            win_res
+        ),
     );
     Ok(())
 }
@@ -108,7 +116,8 @@ async fn detect_and_notify(app: &AppHandle) -> Result<(), String> {
 /// 创建 / 显示右上角更新提示窗口（常驻，关闭=隐藏）
 pub fn show_update_prompt(app: &AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("update-prompt") {
-        win.show().map_err(|e| format!("显示 update-prompt 失败: {e}"))?;
+        win.show()
+            .map_err(|e| format!("显示 update-prompt 失败: {e}"))?;
         win.set_focus().ok();
         return Ok(());
     }
@@ -136,9 +145,12 @@ pub fn show_update_prompt(app: &AppHandle) -> Result<(), String> {
         let w: f64 = 360.0 * scale;
         let x: i32 = (pos.x as f64 + mw - w - 24.0 * scale) as i32;
         let y: i32 = (pos.y as f64 + 24.0 * scale) as i32;
-        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)));
+        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )));
     }
-    win.show().map_err(|e| format!("显示 update-prompt 失败: {e}"))?;
+    win.show()
+        .map_err(|e| format!("显示 update-prompt 失败: {e}"))?;
     win.set_focus().ok();
     Ok(())
 }
@@ -147,9 +159,7 @@ pub fn show_update_prompt(app: &AppHandle) -> Result<(), String> {
 
 /// 查询当前是否已有待更新版本（前端启动时兜底同步用）
 #[tauri::command]
-pub fn get_update_status(
-    state: tauri::State<'_, UpdaterState>,
-) -> Option<UpdateInfo> {
+pub fn get_update_status(state: tauri::State<'_, UpdaterState>) -> Option<UpdateInfo> {
     state.current_info()
 }
 
@@ -166,7 +176,9 @@ pub fn dismiss_update(state: tauri::State<'_, UpdaterState>) {
 #[tauri::command]
 #[allow(unreachable_code)]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
-    let updater = app.updater().map_err(|e| format!("updater 初始化失败: {e}"))?;
+    let updater = app
+        .updater()
+        .map_err(|e| format!("updater 初始化失败: {e}"))?;
     let update = updater
         .check()
         .await

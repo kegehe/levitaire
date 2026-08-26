@@ -77,6 +77,11 @@ pub struct AppConfig {
     /// 截图全局快捷键，如 "Ctrl+Shift+A"；空串表示不启用
     #[serde(default)]
     pub screenshot_hotkey: String,
+    /// 屏幕草稿全局快捷键，空字符串表示关闭
+    #[serde(default = "default_sketch_hotkey")]
+    pub sketch_hotkey: String,
+    #[serde(default = "default_sketch_enabled")]
+    pub sketch_enabled: bool,
     /// 截图工具是否启用（仅启用时热键才触发）。默认 true（与 registry defaultEnabled 一致）
     #[serde(default = "default_screenshot_enabled")]
     pub screenshot_enabled: bool,
@@ -158,6 +163,12 @@ pub struct AppConfig {
     /// "hold" = 按住唤起（松开触发键即按当前高亮扇区选中）。默认 click
     #[serde(default = "default_quick_input_mode")]
     pub quick_input_mode: String,
+    /// 快速输入剪贴板历史保留条数，0 表示不记录历史，默认 5 条。
+    #[serde(default = "default_quick_input_history_limit")]
+    pub quick_input_history_limit: usize,
+    /// Whether quick-input clipboard history is recorded and available. Defaults to true.
+    #[serde(default = "default_quick_input_history_enabled")]
+    pub quick_input_history_enabled: bool,
     /// 快速输入转盘预设提示词（JSON 字符串，前端解析）：[{"label":"","text":""}]。空串表示无预设
     #[serde(default)]
     pub quick_input_snippets: String,
@@ -175,7 +186,23 @@ fn default_quick_input_mode() -> String {
     "click".to_string()
 }
 
+fn default_quick_input_history_limit() -> usize {
+    5
+}
+
+fn default_quick_input_history_enabled() -> bool {
+    true
+}
+
 fn default_screenshot_enabled() -> bool {
+    true
+}
+
+fn default_sketch_hotkey() -> String {
+    "Ctrl+Shift+D".to_string()
+}
+
+fn default_sketch_enabled() -> bool {
     true
 }
 
@@ -204,6 +231,8 @@ impl Default for AppConfig {
             theme_scheme: default_theme_scheme(),
             api_key_encrypted: None,
             screenshot_hotkey: String::new(),
+            sketch_hotkey: default_sketch_hotkey(),
+            sketch_enabled: default_sketch_enabled(),
             screenshot_enabled: default_screenshot_enabled(),
             text_toolbar_enabled: default_text_toolbar_enabled(),
             toolbar_features: Vec::new(),
@@ -229,6 +258,8 @@ impl Default for AppConfig {
             quick_input_enabled: default_quick_input_enabled(),
             quick_input_trigger_key: default_quick_input_trigger_key(),
             quick_input_mode: default_quick_input_mode(),
+            quick_input_history_limit: default_quick_input_history_limit(),
+            quick_input_history_enabled: default_quick_input_history_enabled(),
             quick_input_snippets: String::new(),
         }
     }
@@ -238,6 +269,8 @@ impl Default for AppConfig {
 pub struct StartupConfig {
     pub ai_config: AiConfig,
     pub screenshot_hotkey: String,
+    pub sketch_hotkey: String,
+    pub sketch_enabled: bool,
     pub screenshot_enabled: bool,
     pub text_toolbar_enabled: bool,
     pub recording_hotkey: String,
@@ -288,6 +321,8 @@ impl ConfigManager {
         Ok(StartupConfig {
             ai_config: c.ai.clone(),
             screenshot_hotkey: c.screenshot_hotkey.clone(),
+            sketch_hotkey: c.sketch_hotkey.clone(),
+            sketch_enabled: c.sketch_enabled,
             screenshot_enabled: c.screenshot_enabled,
             text_toolbar_enabled: c.text_toolbar_enabled,
             recording_hotkey: c.recording_hotkey.clone(),
@@ -504,6 +539,36 @@ impl ConfigManager {
                 .lock()
                 .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.screenshot_hotkey = hotkey;
+        }
+        self.save_config()
+    }
+
+    pub fn get_sketch_hotkey(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.sketch_hotkey.clone())
+    }
+
+    pub fn update_sketch_hotkey(&self, hotkey: String) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.sketch_hotkey = hotkey;
+        }
+        self.save_config()
+    }
+
+    pub fn get_sketch_enabled(&self) -> Result<bool, String> {
+        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.sketch_enabled)
+    }
+
+    pub fn update_sketch_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.sketch_enabled = enabled;
         }
         self.save_config()
     }
@@ -1012,6 +1077,44 @@ impl ConfigManager {
         self.save_config()
     }
 
+    /// 获取快速输入剪贴板历史保留条数。
+    pub fn get_quick_input_history_limit(&self) -> Result<usize, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_history_limit)
+    }
+
+    /// 更新快速输入剪贴板历史保留条数并持久化。
+    pub fn update_quick_input_history_limit(&self, limit: usize) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_history_limit = limit;
+        }
+        self.save_config()
+    }
+
+    pub fn get_quick_input_history_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_history_enabled)
+    }
+
+    pub fn update_quick_input_history_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_history_enabled = enabled;
+        }
+        self.save_config()
+    }
+
     /// 获取快速输入转盘预设提示词（JSON 字符串，空串表示无预设）
     pub fn get_quick_input_snippets(&self) -> Result<String, String> {
         self.config
@@ -1166,7 +1269,10 @@ mod tests {
             .collect();
         let quoted = quote_exe_path_wide(&path);
         let quoted_str = String::from_utf16(&quoted).unwrap();
-        assert_eq!(quoted_str, "\"C:\\Program Files\\Levitaire\\levitaire.exe\"");
+        assert_eq!(
+            quoted_str,
+            "\"C:\\Program Files\\Levitaire\\levitaire.exe\""
+        );
         assert_eq!(quoted.first(), Some(&(b'"' as u16)));
         assert_eq!(quoted.last(), Some(&(b'"' as u16)));
         assert_eq!(quoted.len(), path.len() + 2);
@@ -1486,7 +1592,8 @@ mod tests {
 
     /// 测试 tts_config 字段默认值与 serde 往返
     #[test]
-    fn test_tts_config_default_and_roundtrip() {        // 默认值为空串（前端取默认配置）
+    fn test_tts_config_default_and_roundtrip() {
+        // 默认值为空串（前端取默认配置）
         let config = AppConfig::default();
         assert_eq!(config.tts_config, "");
 
@@ -1564,8 +1671,10 @@ mod tests {
     /// 测试 ConfigManager 持久化 search_engine 的保存与加载
     #[test]
     fn test_config_manager_search_engine_save_load() {
-        let tmp =
-            std::env::temp_dir().join(format!("levitaire_test_search_engine_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "levitaire_test_search_engine_{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1618,7 +1727,8 @@ mod tests {
     /// 测试 ConfigManager 持久化窗口位置的保存与加载
     #[test]
     fn test_config_manager_window_position_save_load() {
-        let tmp = std::env::temp_dir().join(format!("levitaire_test_winpos_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_winpos_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -1667,7 +1777,10 @@ mod tests {
     /// 测试 ConfigManager 清除窗口位置记忆
     #[test]
     fn test_config_manager_reset_window_position() {
-        let tmp = std::env::temp_dir().join(format!("levitaire_test_reset_winpos_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "levitaire_test_reset_winpos_{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 

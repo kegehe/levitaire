@@ -2,7 +2,10 @@ import { lazy, Suspense, useState, useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { ensureSketchWindow } from "./utils/toolWindows";
 import RecordingControls from "./tools/recording/RecordingControls";
+import LongCaptureControls from "./tools/screenshot/LongCaptureControls";
+import LongCaptureFrame from "./tools/screenshot/LongCaptureFrame";
 
 // 按窗口 label 懒加载，每个窗口只加载对应 chunk，减少资源占用
 const TextToolbar = lazy(() => import("./tools/text-toolbar/TextToolbar"));
@@ -15,6 +18,8 @@ const PomodoroTool = lazy(() => import("./tools/pomodoro/PomodoroTool"));
 const QuickInputTool = lazy(() => import("./tools/quick-input/QuickInputTool"));
 const Settings = lazy(() => import("./components/Settings"));
 const UpdatePrompt = lazy(() => import("./components/UpdatePrompt"));
+const ContextMenu = lazy(() => import("./components/ContextMenu"));
+const SketchTool = lazy(() => import("./tools/sketch/SketchTool"));
 
 /** screenshot-overlay 窗口的模式切换器 */
 function OverlaySwitcher() {
@@ -49,12 +54,16 @@ function OverlaySwitcher() {
     const un3 = listen("recording-select-cancel", () => {
       setMode("screenshot");
     });
-    void Promise.all([un, un2, un3, un4]).then(() => emit("screenshot-overlay-ready"));
+    const unReadyRequest = listen("screenshot-overlay-ready-request", () => {
+      void emit("screenshot-overlay-ready");
+    });
+    void Promise.all([un, un2, un3, un4, unReadyRequest]).then(() => emit("screenshot-overlay-ready"));
     return () => {
       un.then((fn) => fn());
       un2.then((fn) => fn());
       un3.then((fn) => fn());
       un4.then((fn) => fn());
+      unReadyRequest.then((fn) => fn());
     };
   }, []);
 
@@ -63,6 +72,19 @@ function OverlaySwitcher() {
 
 function App() {
   const windowLabel = getCurrentWebviewWindow().label;
+
+  useEffect(() => {
+    if (windowLabel !== "orb") return;
+    const un = listen("ensure-sketch-window", async () => {
+      try {
+        await ensureSketchWindow();
+        await invoke("show_sketch_window");
+      } catch (error) {
+        console.error("Failed to open sketch window", error);
+      }
+    });
+    return () => { un.then((fn) => fn()); };
+  }, [windowLabel]);
 
   // 非 main 窗口（overlay、controls 等）始终透明背景，
   // 防止 lazy 组件加载期间 Suspense fallback={null} 导致白色闪烁
@@ -91,6 +113,10 @@ function App() {
     content = <OverlaySwitcher />;
   } else if (windowLabel === "recording-controls") {
     content = <RecordingControls />;
+  } else if (windowLabel === "long-capture-controls") {
+    content = <LongCaptureControls />;
+  } else if (windowLabel === "long-capture-frame") {
+    content = <LongCaptureFrame />;
   } else if (windowLabel === "monitor-overlay") {
     content = <SystemMonitor />;
   } else if (windowLabel === "pomodoro-overlay") {
@@ -99,6 +125,10 @@ function App() {
     content = <QuickInputTool />;
   } else if (windowLabel === "update-prompt") {
     content = <UpdatePrompt />;
+  } else if (windowLabel === "context-menu") {
+    content = <ContextMenu />;
+  } else if (windowLabel === "sketch-overlay") {
+    content = <SketchTool />;
   } else {
     content = <Settings />;
   }

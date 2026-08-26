@@ -35,6 +35,16 @@ export interface FloatingTool {
  */
 export const FLOATING_TOOLS: FloatingTool[] = [
   {
+    id: "sketch",
+    name: "屏幕草稿",
+    icon: "Pencil",
+    description: "在当前屏幕上绘制临时草图，支持保存为透明 PNG",
+    category: "screen",
+    defaultEnabled: true,
+    loader: () => import("./sketch/SketchTool"),
+    activation: "immediate",
+  },
+  {
     id: "text-toolbar",
     name: "文字工具栏",
     icon: "Sparkles",
@@ -115,6 +125,7 @@ const LEGACY_FEATURE_KEYS = ["floatory-toolbar-features", "floast-toolbar-featur
  * 用于前端与后端 config.json 真值同步（ToolPalette 启用开关、FloatingOrb 自启动）。
  * 新增工具时在此登记一项即可，调用方自动生效。 */
 export const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string }> = [
+  { id: "sketch", getter: "get_sketch_enabled" },
   { id: "text-toolbar", getter: "get_text_toolbar_enabled" },
   { id: "screenshot", getter: "get_screenshot_enabled" },
   { id: "system-monitor", getter: "get_system_monitor_enabled" },

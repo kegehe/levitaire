@@ -10,9 +10,13 @@
     "screenshot-overlay",
     "monitor-overlay",
     "recording-controls",
+    "long-capture-controls",
+    "long-capture-frame",
     "quick-input-overlay",
     "pomodoro-overlay",
-    "update-prompt"
+    "update-prompt",
+    "context-menu",
+    "sketch-overlay"
   ],
   "permissions": [
     "core:default",

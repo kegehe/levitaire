@@ -43,6 +43,33 @@ describe("Settings 悬浮窗位置恢复", () => {
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "orb" });
   });
 
+  it("切换剪贴板历史开关时保存独立的启用状态", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_history_limit") return Promise.resolve(5);
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      return Promise.resolve("");
+    });
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "快速输入" }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "使用剪贴板历史" }));
+      await Promise.resolve();
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("set_quick_input_history_enabled", {
+      enabled: false,
+    });
+    expect(screen.getByText(/已关闭.*保留条数设置将在重新开启后生效/)).toBeInTheDocument();
+  });
+
   it("点击全部恢复按钮时逐个恢复所有悬浮窗", async () => {
     render(<Settings />);
     await act(async () => {

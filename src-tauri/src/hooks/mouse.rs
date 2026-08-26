@@ -8,7 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, GetWindowRect, PostThreadMessageW, SetWindowsHookExW,
     UnhookWindowsHookEx, HHOOK, MSG, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_QUIT,
+    WM_MOUSEWHEEL, WM_QUIT,
 };
 
 // ─── 钩子全局状态 ──────────────────────────────────────────────
@@ -71,10 +71,25 @@ static STATE: HookState = HookState {
 
 enum HookEvent {
     MouseUp,
-    MouseDown { x: i32, y: i32 },
+    LongCapturePointerUp {
+        x: i32,
+        y: i32,
+    },
+    MouseDown {
+        x: i32,
+        y: i32,
+    },
     /// 转盘模式下鼠标坐标：由钩子线程转发到后台线程再 emit，
     /// 避免 WH_MOUSE_LL 回调内执行 emit_to 阻塞导致钩子被系统静默卸载。
-    QuickInputMove { x: i32, y: i32 },
+    QuickInputMove {
+        x: i32,
+        y: i32,
+    },
+    LongCaptureWheel {
+        x: i32,
+        y: i32,
+        delta: i16,
+    },
 }
 
 // ─── 工具函数 ──────────────────────────────────────────────────
@@ -141,8 +156,13 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     // 截图/录制模式：跳过所有选区检测与工具栏交互，选区由遮罩前端处理
                     // 转盘守卫与钩子线程一致：仅当转盘激活且实际可见时才跳过选区检测，
                     // active 卡死而转盘未显示时恢复正常的拖选/工具栏行为。
+                    let long_capture_active = app
+                        .try_state::<crate::scroll_capture::LongCaptureState>()
+                        .map(|state| state.is_active())
+                        .unwrap_or(false);
                     if STATE.screenshot_mode.load(Ordering::SeqCst)
                         || STATE.recording_mode.load(Ordering::SeqCst)
+                        || long_capture_active
                         || (crate::quick_input::is_active() && crate::quick_input::wheel_visible())
                     {
                         continue;
@@ -200,7 +220,8 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     let down_in_settings = down_valid
                         && app.get_webview_window("settings").is_some_and(|win| {
                             win.is_visible().unwrap_or(false)
-                                && win.hwnd()
+                                && win
+                                    .hwnd()
                                     .map(|hwnd| is_point_in_window_rect(hwnd.0, down_x, down_y))
                                     .unwrap_or(false)
                         });
@@ -274,8 +295,13 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                 }
                 HookEvent::MouseDown { x, y } => {
                     // 截图/录制模式：跳过所有状态写入与选区检测，避免退出后残留状态误触发
+                    let long_capture_active = app
+                        .try_state::<crate::scroll_capture::LongCaptureState>()
+                        .map(|state| state.is_active())
+                        .unwrap_or(false);
                     if STATE.screenshot_mode.load(Ordering::SeqCst)
                         || STATE.recording_mode.load(Ordering::SeqCst)
+                        || long_capture_active
                     {
                         continue;
                     }
@@ -331,6 +357,18 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                             "quick-input-mouse-move",
                             serde_json::json!({ "x": x, "y": y }),
                         );
+                    }
+                }
+                HookEvent::LongCaptureWheel { x, y, delta } => {
+                    if let Some(state) = app.try_state::<crate::scroll_capture::LongCaptureState>()
+                    {
+                        state.notify_wheel(x, y, delta);
+                    }
+                }
+                HookEvent::LongCapturePointerUp { x, y } => {
+                    if let Some(state) = app.try_state::<crate::scroll_capture::LongCaptureState>()
+                    {
+                        state.notify_activity(x, y);
                     }
                 }
             }
@@ -465,6 +503,15 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     if crate::quick_input::is_active() && crate::quick_input::wheel_visible() {
                         return LRESULT(1);
                     }
+                    let hook =
+                        lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                    if !hook.is_null() {
+                        let event = &*hook;
+                        let _ = sender.send(HookEvent::LongCapturePointerUp {
+                            x: event.pt.x,
+                            y: event.pt.y,
+                        });
+                    }
                     let _ = sender.send(HookEvent::MouseUp);
                 }
                 _ if msg == WM_MOUSEMOVE
@@ -512,6 +559,19 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     let x = (*pt).x;
                     let y = (*pt).y;
                     let _ = sender.send(HookEvent::MouseDown { x, y });
+                }
+                _ if msg == WM_MOUSEWHEEL => {
+                    let hook =
+                        lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                    if !hook.is_null() {
+                        let event = &*hook;
+                        let delta = ((event.mouseData >> 16) & 0xffff) as u16 as i16;
+                        let _ = sender.send(HookEvent::LongCaptureWheel {
+                            x: event.pt.x,
+                            y: event.pt.y,
+                            delta,
+                        });
+                    }
                 }
                 _ => {}
             }

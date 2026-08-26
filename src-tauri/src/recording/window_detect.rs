@@ -5,7 +5,7 @@ use serde::Serialize;
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextW, GetWindowRect, IsWindowVisible,
+    EnumWindows, GetWindowRect, GetWindowTextW, IsWindowVisible,
 };
 
 /// 窗口信息

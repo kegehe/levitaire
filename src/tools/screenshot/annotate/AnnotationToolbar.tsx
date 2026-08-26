@@ -1,7 +1,7 @@
 import Icon from "../../../components/Icon";
-import { COLOR_AUTO, PRESET_COLORS, STROKE_WIDTHS, type ToolKind } from "./types";
+import { COLOR_AUTO, DEFAULT_COLOR, PRESET_COLORS, STROKE_WIDTHS, type ToolKind } from "./types";
 import type { UseAnnotations } from "./useAnnotations";
-import type { CSSProperties } from "react";
+import type { CSSProperties, Ref } from "react";
 
 interface Props {
   tool: ToolKind;
@@ -19,6 +19,7 @@ interface Props {
   onOcr: () => void;
   onPin: () => void;
   onCancel: () => void;
+  toolbarRef?: Ref<HTMLDivElement>;
   style?: CSSProperties;
 }
 
@@ -48,12 +49,13 @@ function AnnotationToolbar(props: Props) {
     onOcr,
     onPin,
     onCancel,
+    toolbarRef,
     style,
   } = props;
   const { undo, redo, canUndo, canRedo } = annotations;
 
   return (
-    <div className="ss-toolbar-wrap" style={style}>
+    <div className="ss-toolbar-wrap" ref={toolbarRef} style={style}>
       {error && <div className="ss-error">{error}</div>}
       <div className="ss-toolbar ss-annotate-toolbar">
         {/* 工具组 */}
@@ -88,15 +90,35 @@ function AnnotationToolbar(props: Props) {
                 style={{ background: c }}
                 onClick={() => setColor(c)}
                 title={c}
+                aria-label={`颜色 ${c}`}
+                disabled={!!busy}
               />
             ))}
             <button
               className={`ss-color-swatch ss-color-auto ${color === COLOR_AUTO ? "active" : ""}`}
               onClick={() => setColor(COLOR_AUTO)}
+              disabled={!!busy}
               title="自动"
             >
               A
             </button>
+            <label className="ss-color-custom" title="自定义颜色" aria-label="自定义颜色">
+              <input
+                className="ss-color-custom-input"
+                type="color"
+                value={color === COLOR_AUTO ? DEFAULT_COLOR : color}
+                onChange={(event) => setColor(event.target.value)}
+                disabled={!!busy}
+                aria-label="自定义颜色"
+              />
+              <span
+                className={`ss-color-swatch ss-color-custom-swatch ${
+                  color !== COLOR_AUTO && !PRESET_COLORS.includes(color) ? "active" : ""
+                }`}
+                style={{ background: color === COLOR_AUTO ? DEFAULT_COLOR : color }}
+                aria-hidden="true"
+              />
+            </label>
           </div>
         </div>
 
@@ -142,12 +164,12 @@ function AnnotationToolbar(props: Props) {
         {/* 导出 */}
         <button
           className="ss-btn"
-          onClick={onCopy}
+          onClick={onPin}
           disabled={!!busy || !ready}
-          data-tooltip="复制"
-          aria-label="复制"
+          data-tooltip="钉到桌面"
+          aria-label="钉到桌面"
         >
-          <Icon name="Copy" size={16} />
+          <Icon name="Pin" size={16} />
         </button>
         <button
           className="ss-btn"
@@ -169,12 +191,12 @@ function AnnotationToolbar(props: Props) {
         </button>
         <button
           className="ss-btn"
-          onClick={onPin}
+          onClick={onCopy}
           disabled={!!busy || !ready}
-          data-tooltip="钉到桌面"
-          aria-label="钉到桌面"
+          data-tooltip="复制"
+          aria-label="复制"
         >
-          <Icon name="Pin" size={16} />
+          <Icon name="Copy" size={16} />
         </button>
         <button
           className="ss-btn ss-btn-danger"
