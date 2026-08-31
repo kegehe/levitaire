@@ -55,6 +55,13 @@
   color: var(--color-fg);
 }
 
+.titlebar-btn svg {
+  transition: transform var(--transition-fast);
+}
+.titlebar-btn:hover svg {
+  transform: scale(1.08);
+}
+
 .titlebar-btn:active {
   background: var(--button-active-bg);
 }
@@ -72,4 +79,10 @@
 
 .titlebar-close:active {
   background: var(--color-danger-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .titlebar-btn:hover svg {
+    transform: none;
+  }
 }

@@ -27,6 +27,7 @@ interface PomodoroStatePayload {
   total_secs: number;
   running: boolean;
   rounds_done: number;
+  active_todo_id?: string | null;
 }
 
 const RING_RADIUS = 52;
@@ -207,9 +208,10 @@ function PomodoroTool() {
 
   return (
     <div className="pomo-container">
-      <div className="pomo-body">
+      <div className={`pomo-body${running ? " is-running" : ""} pomo-stage-${stage}`}>
         <div className="pomo-titlebar" onMouseDown={onTitleBarMouseDown}>
           <span className="pomo-title">番茄钟</span>
+          {state?.active_todo_id && <span className="pomo-title-focus">Focus task</span>}
           <button
             className="pomo-icon-btn"
             aria-label="关闭番茄钟"

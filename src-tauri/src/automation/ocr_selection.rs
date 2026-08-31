@@ -1,9 +1,15 @@
+#[cfg(test)]
 use windows::core::Interface;
+#[cfg(test)]
 use windows::Foundation::{IMemoryBuffer, MemoryBuffer};
+#[cfg(test)]
 use windows::Graphics::Imaging::*;
+#[cfg(test)]
 use windows::Media::Ocr::OcrEngine;
+#[cfg(test)]
 use windows::Storage::Streams::Buffer;
 use windows::Win32::Graphics::Gdi::*;
+#[cfg(test)]
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
 use super::{Rect, SelectionInfo};
@@ -43,21 +49,19 @@ pub fn get_selection_via_ocr() -> Result<Option<SelectionInfo>, Box<dyn std::err
     // 无法分发，operation 持有的 SoftwareBitmap 读锁不释放，触发 READER_LOCK_BUSY (0x88982F0D)，
     // 且首次失败后永久卡死。MTA 上 .get() 不依赖消息循环，回调能正常完成。
     let ocr_result = std::thread::spawn(move || {
-        // 子线程内初始化为 MTA
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
-        // 子线程返回 String（Send），避免 Box<dyn Error> 跨线程不满足 Send
         let res: Result<String, String> = (|| {
             let pixels = unsafe { capture_screen_region(left, top, pixels_width, pixels_height) }
                 .map_err(|e| format!("{:?}", e))?;
-            let text = unsafe { ocr_from_bgra_pixels(&pixels, pixels_width, pixels_height) }
-                .map_err(|e| format!("{:?}", e))?;
-            Ok(text)
+            let service =
+                crate::ocr::ensure_ocr_service().ok_or_else(|| "OCR 服务初始化失败".to_string())?;
+            let guard = service
+                .lock()
+                .map_err(|e| format!("OCR 服务锁失败: {}", e))?;
+            guard
+                .recognize_bgra(&pixels, pixels_width, pixels_height)
+                .map(|result| result.text)
+                .map_err(|e| e.to_string())
         })();
-        unsafe {
-            CoUninitialize();
-        }
         res
     })
     .join();
@@ -197,9 +201,10 @@ unsafe fn capture_screen_region(
     Ok(pixels)
 }
 
-// ─── OCR 识别 ────────────────────────────────────────────────────
-
-unsafe fn ocr_from_bgra_pixels(
+/* Legacy Windows OCR implementation retained below only for historical tests.
+Runtime OCR always goes through OcrService/PaddleOCR. */
+#[cfg(test)]
+unsafe fn legacy_ocr_from_bgra_pixels(
     pixels: &[u8],
     width: u32,
     height: u32,
@@ -269,11 +274,13 @@ unsafe fn ocr_from_bgra_pixels(
 // windows crate 未直接暴露此接口，需手动定义
 // 来自 Windows.Foundation，GUID: {5b0d3235-4dba-4d44-865e-8f1d0e4fd04d}
 
+#[cfg(test)]
 #[derive(Clone)]
 #[repr(transparent)]
 #[allow(non_camel_case_types)]
 struct IMemoryBufferByteAccess(windows::core::IUnknown);
 
+#[cfg(test)]
 #[allow(non_snake_case)]
 impl IMemoryBufferByteAccess {
     unsafe fn GetBuffer(&self) -> windows::core::Result<(*mut u8, usize)> {
@@ -289,6 +296,7 @@ impl IMemoryBufferByteAccess {
     }
 }
 
+#[cfg(test)]
 unsafe impl Interface for IMemoryBufferByteAccess {
     type Vtable = IMemoryBufferByteAccess_Vtbl;
 
@@ -296,6 +304,7 @@ unsafe impl Interface for IMemoryBufferByteAccess {
         windows::core::GUID::from_u128(0x5b0d3235_4dba_4d44_865e_8f1d0e4fd04d);
 }
 
+#[cfg(test)]
 #[repr(C)]
 #[allow(non_snake_case)]
 struct IMemoryBufferByteAccess_Vtbl {
@@ -315,14 +324,14 @@ pub fn recognize_bgra(
     width: u32,
     height: u32,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    match crate::ocr::get_ocr_service() {
+    match crate::ocr::ensure_ocr_service() {
         Some(svc) => {
             let guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
             Ok(guard.recognize_bgra(bgra, width, height)?.text)
         }
         None => {
             // 回退到旧路径：仅在测试环境中（OcrService 未初始化）
-            unsafe { ocr_from_bgra_pixels(bgra, width, height) }
+            Err("OCR 服务未初始化".into())
         }
     }
 }
@@ -469,7 +478,7 @@ mod tests {
             let bgra = crate::screenshot::capture_screen_region(0, 0, 100, 100)
                 .expect("capture_screen_region 失败");
             for i in 0..2u32 {
-                match ocr_from_bgra_pixels(&bgra, 100, 100) {
+                match legacy_ocr_from_bgra_pixels(&bgra, 100, 100) {
                     Ok(t) => println!("第 {} 次 raw OCR OK: [{}]", i + 1, t),
                     Err(e) => {
                         println!("第 {} 次 raw OCR ERR: {:?}", i + 1, e);

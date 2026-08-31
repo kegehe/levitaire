@@ -27,6 +27,7 @@
   box-shadow: 0 0 0 1px oklch(1 0 0 / 0.4);
   pointer-events: none;
   z-index: 6;
+  animation: ss-selection-glow 1.8s ease-in-out infinite;
 }
 
 /* 选区尺寸标签：参考 Snipaste，显示在选区左上角外侧（上方）。
@@ -74,6 +75,7 @@
   font-size: 13px;
   text-align: center;
   z-index: 40;
+  animation: ss-notice-enter 180ms ease-out both;
 }
 
 .ss-toolbar-wrap {
@@ -83,6 +85,7 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
+  animation: ss-toolbar-enter 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 .ss-error {
@@ -176,6 +179,19 @@
   color: var(--color-fg-muted);
 }
 
+.ss-busy::after {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-left: 6px;
+  vertical-align: -1px;
+  border: 1px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: ss-spin 0.8s linear infinite;
+}
+
 /* ===== 标注模式 ===== */
 
 .ss-annotate-canvas {
@@ -202,6 +218,7 @@
   box-shadow: var(--shadow-lg);
   cursor: default;
   overflow: hidden;
+  animation: ss-panel-enter 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 .ss-ocr-result-header,
@@ -523,6 +540,7 @@
   padding: 8px;
   box-shadow: var(--shadow-lg);
   z-index: 20;
+  animation: ss-window-list-enter 180ms ease-out both;
 }
 
 .ss-window-item {
@@ -581,4 +599,73 @@
 .ss-window-item:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+@keyframes ss-toolbar-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ss-panel-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ss-notice-enter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@keyframes ss-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ss-selection-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px oklch(1 0 0 / 0.4);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px oklch(1 0 0 / 0.28),
+      0 0 8px var(--color-accent-subtle);
+  }
+}
+
+@keyframes ss-window-list-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ss-toolbar-wrap,
+  .ss-ocr-result,
+  .ss-capture-error,
+  .ss-busy::after,
+  .ss-selection-box,
+  .ss-window-list {
+    animation: none;
+  }
 }

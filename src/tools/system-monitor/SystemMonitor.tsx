@@ -118,7 +118,11 @@ function MetricCardBase({ label, value, data, max, color, extra, showTrend }: Me
     <div className="metric-card">
       <div className="metric-head">
         <span className="metric-label">{label}</span>
-        <span className="metric-value">{value}</span>
+        <span className="metric-value">
+          <span className="metric-value-content">
+            {value}
+          </span>
+        </span>
       </div>
       {showTrend && <Sparkline data={data} max={max} color={color} />}
       {extra && <div className="metric-extra">{extra}</div>}
@@ -136,16 +140,14 @@ function SystemMonitor() {
     intervalMs: 1000,
     displayMode: "full",
   });
-  const [, setTick] = useState(0);
   const configRef = useRef<SystemMonitorConfig>({ intervalMs: 1000, displayMode: "full" });
   const configVersionRef = useRef(0);
 
-  // 各指标历史环形缓冲（用 ref 避免每秒全量 re-render，配合 rAF 批量触发）
+  // 各指标历史环形缓冲（用 ref 避免为历史数据单独触发额外渲染）
   const cpuHistRef = useRef<number[]>([]);
   const memHistRef = useRef<number[]>([]);
   const netHistRef = useRef<number[]>([]);
   const diskIoHistRef = useRef<number[]>([]);
-  const rafRef = useRef<number | null>(null);
   const monitorBodyRef = useRef<HTMLDivElement>(null);
 
   const pushSample = (s: MonitorStats) => {
@@ -164,14 +166,6 @@ function SystemMonitor() {
     netHistRef.current = push(netHistRef.current, totalNet);
     const totalDiskIo = s.disk_io ? s.disk_io.read_rate + s.disk_io.write_rate : 0;
     diskIoHistRef.current = push(diskIoHistRef.current, totalDiskIo);
-  };
-
-  const scheduleFrame = () => {
-    if (rafRef.current != null) return;
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = null;
-      setTick((t) => (t + 1) & 0xffff);
-    });
   };
 
   // 独立 WebView 需要自行初始化主题和透明背景，避免首帧闪烁。
@@ -278,14 +272,13 @@ function SystemMonitor() {
     };
   }, []);
 
-  // 订阅 monitor-stats + rAF 节流
+  // 订阅 monitor-stats。每个采样只触发一次渲染，避免重复刷新造成闪烁。
   useEffect(() => {
     let un: UnlistenFn | undefined;
     let cancelled = false;
     listen<MonitorStats>("monitor-stats", (e) => {
       setStats(e.payload);
       pushSample(e.payload);
-      scheduleFrame();
     }).then((fn) => {
       // 若组件在 listen resolve 前已卸载，立即取消刚拿到的监听器，避免泄漏
       if (cancelled) {
@@ -297,7 +290,6 @@ function SystemMonitor() {
     return () => {
       cancelled = true;
       if (un) un();
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
   }, []);
 
@@ -394,108 +386,113 @@ function SystemMonitor() {
 
         <div className="monitor-content">
           <div className="metrics">
-          <MetricCard
-            label="CPU"
-            value={stats ? `${stats.cpu_usage_total.toFixed(0)}%` : "--"}
-            data={cpuHistRef.current}
-            max={100}
-            color="var(--color-chart-cpu)"
-            showTrend={!isMini}
-            extra={
-              stats
-                ? `${stats.cpu_usage_per_core.length} 核${
-                    stats.cpu_freq_mhz.length
-                      ? ` · ${Math.round(
-                          stats.cpu_freq_mhz.reduce((a, b) => a + b, 0) / stats.cpu_freq_mhz.length,
-                        )} MHz`
-                      : ""
-                  }`
-                : ""
-            }
-          />
-          <MetricCard
-            label="内存"
-            value={stats ? `${memPct.toFixed(0)}%` : "--"}
-            data={memHistRef.current}
-            max={100}
-            color="var(--color-chart-mem)"
-            showTrend={!isMini}
-            extra={
-              isMini && stats
-                ? `${formatBytes(stats.mem_used)} / ${formatBytes(stats.mem_total)}`
-                : memExtra
-            }
-          />
-          <MetricCard
-            label="网络"
-            value={
-              stats ? formatRate(netHistRef.current[netHistRef.current.length - 1] ?? 0) : "--"
-            }
-            data={netHistRef.current}
-            max={netMax}
-            color="var(--color-chart-net)"
-            showTrend={!isMini}
-            extra={
-              stats
-                ? `下载 ${formatRate(stats.net.reduce((total, item) => total + item.rx_rate, 0))} · 上传 ${formatRate(
-                    stats.net.reduce((total, item) => total + item.tx_rate, 0),
-                  )}`
-                : undefined
-            }
-          />
-          <MetricCard
-            label="磁盘 I/O"
-            value={
-              stats?.disk_io ? formatRate(stats.disk_io.read_rate + stats.disk_io.write_rate) : "--"
-            }
-            data={diskIoHistRef.current}
-            max={diskIoMax}
-            color="var(--color-chart-disk)"
-            showTrend={!isMini}
-            extra={
-              stats?.disk_io
-                ? `读取 ${formatRate(stats.disk_io.read_rate)} · 写入 ${formatRate(stats.disk_io.write_rate)}`
-                : undefined
-            }
-          />
-        </div>
+            <MetricCard
+              label="CPU"
+              value={stats ? `${stats.cpu_usage_total.toFixed(0)}%` : "--"}
+              data={cpuHistRef.current}
+              max={100}
+              color="var(--color-chart-cpu)"
+              showTrend={!isMini}
+              extra={
+                stats
+                  ? `${stats.cpu_usage_per_core.length} 核${
+                      stats.cpu_freq_mhz.length
+                        ? ` · ${Math.round(
+                            stats.cpu_freq_mhz.reduce((a, b) => a + b, 0) /
+                              stats.cpu_freq_mhz.length,
+                          )} MHz`
+                        : ""
+                    }`
+                  : ""
+              }
+            />
+            <MetricCard
+              label="内存"
+              value={stats ? `${memPct.toFixed(0)}%` : "--"}
+              data={memHistRef.current}
+              max={100}
+              color="var(--color-chart-mem)"
+              showTrend={!isMini}
+              extra={
+                isMini && stats
+                  ? `${formatBytes(stats.mem_used)} / ${formatBytes(stats.mem_total)}`
+                  : memExtra
+              }
+            />
+            <MetricCard
+              label="网络"
+              value={
+                stats ? formatRate(netHistRef.current[netHistRef.current.length - 1] ?? 0) : "--"
+              }
+              data={netHistRef.current}
+              max={netMax}
+              color="var(--color-chart-net)"
+              showTrend={!isMini}
+              extra={
+                stats
+                  ? `下载 ${formatRate(stats.net.reduce((total, item) => total + item.rx_rate, 0))} · 上传 ${formatRate(
+                      stats.net.reduce((total, item) => total + item.tx_rate, 0),
+                    )}`
+                  : undefined
+              }
+            />
+            <MetricCard
+              label="磁盘 I/O"
+              value={
+                stats?.disk_io
+                  ? formatRate(stats.disk_io.read_rate + stats.disk_io.write_rate)
+                  : "--"
+              }
+              data={diskIoHistRef.current}
+              max={diskIoMax}
+              color="var(--color-chart-disk)"
+              showTrend={!isMini}
+              extra={
+                stats?.disk_io
+                  ? `读取 ${formatRate(stats.disk_io.read_rate)} · 写入 ${formatRate(stats.disk_io.write_rate)}`
+                  : undefined
+              }
+            />
+          </div>
 
-        {/* 磁盘 */}
-        {!isMini && stats && stats.disks.length > 0 && (
-          <div className="section">
-            <div className="section-label">磁盘</div>
-            {stats.disks.map((d) => {
-              const usedPct = d.total > 0 ? ((d.total - d.available) / d.total) * 100 : 0;
-              return (
-                <div className="disk-row" key={d.mount_point}>
-                  <span className="disk-mount">{d.mount_point}</span>
-                  <div className="disk-bar">
-                    <div className="disk-bar-fill" style={{ width: `${usedPct}%` }} />
+          {/* 磁盘 */}
+          {!isMini && stats && stats.disks.length > 0 && (
+            <div className="section">
+              <div className="section-label">磁盘</div>
+              {stats.disks.map((d) => {
+                const usedPct = d.total > 0 ? ((d.total - d.available) / d.total) * 100 : 0;
+                return (
+                  <div className="disk-row" key={d.mount_point}>
+                    <span className="disk-mount">{d.mount_point}</span>
+                    <div className="disk-bar">
+                      <div className="disk-bar-fill" style={{ width: `${usedPct}%` }} />
+                    </div>
+                    <span className="disk-text">
+                      {formatBytes(d.total - d.available)} / {formatBytes(d.total)} · {d.kind}
+                    </span>
                   </div>
-                  <span className="disk-text">
-                    {formatBytes(d.total - d.available)} / {formatBytes(d.total)} · {d.kind}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* 电池 */}
-        {!isMini && stats && stats.battery.has_battery && (
-          <div className="section">
-            <div className="section-label">电池</div>
-            <div className="battery-row">
-              <div className="battery-bar">
-                <div className="battery-bar-fill" style={{ width: `${stats.battery.percent}%` }} />
-              </div>
-              <span className="battery-text">
-                {stats.battery.percent}%{stats.battery.charging ? " · 充电中" : " · 使用中"}
-              </span>
+                );
+              })}
             </div>
-          </div>
-        )}
+          )}
 
+          {/* 电池 */}
+          {!isMini && stats && stats.battery.has_battery && (
+            <div className="section">
+              <div className="section-label">电池</div>
+              <div className="battery-row">
+                <div className="battery-bar">
+                  <div
+                    className="battery-bar-fill"
+                    style={{ width: `${stats.battery.percent}%` }}
+                  />
+                </div>
+                <span className="battery-text">
+                  {stats.battery.percent}%{stats.battery.charging ? " · 充电中" : " · 使用中"}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 运行时间 */}

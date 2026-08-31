@@ -32,6 +32,7 @@ static KB_STATE: KeyboardState = KeyboardState {
 
 /// 剪贴板文本最大字符数（1: 防止损坏数据越界）
 const MAX_CLIPBOARD_U16: usize = 1024 * 1024;
+const MAX_CLIPBOARD_DIB_BYTES: usize = 48 * 1024 * 1024;
 /// CF_UNICODETEXT 甯搁噺
 const CF_UNICODETEXT: u32 = 13;
 
@@ -442,6 +443,7 @@ struct ClipSnapshot {
 ///   old=None/new=Some 而显示工具栏），绝不 sleep 等待；
 /// - 读取本身（read_clipboard_text_inner / clipboard_has_image_inner）是纯内存操作，
 ///   即便剪贴板里有近 1MB 文本也只需毫秒级，不会接近钩子超时阈值。
+///
 /// 若确有剪贴板被长期独占的极端情况，宁愿这次选区检测失败回退，也不冒钩子被卸载的风险。
 unsafe fn read_clipboard_snapshot() -> ClipSnapshot {
     if OpenClipboard(None).is_ok() {
@@ -610,7 +612,7 @@ unsafe fn read_clipboard_image_data() -> (Option<Vec<u8>>, bool) {
                 let ptr = GlobalLock(hmem);
                 if !ptr.is_null() {
                     let size = GlobalSize(hmem);
-                    if size > 0 {
+                    if size > 0 && size <= MAX_CLIPBOARD_DIB_BYTES {
                         let data = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
                         let _ = GlobalUnlock(hmem);
                         Some(data)
@@ -646,7 +648,7 @@ unsafe fn read_clipboard_text_inner() -> Option<String> {
     }
     let mem_size = GlobalSize(hmem);
     let max_u16 = if mem_size > 0 {
-        mem_size / 2
+        (mem_size / 2).min(MAX_CLIPBOARD_U16)
     } else {
         MAX_CLIPBOARD_U16
     };

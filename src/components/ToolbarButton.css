@@ -40,6 +40,10 @@
   background: var(--button-hover-bg);
 }
 
+.toolbar-button:hover:not(:disabled) .toolbar-button-icon {
+  transform: translateY(-1px) scale(1.04);
+}
+
 .toolbar-button:active {
   background: var(--button-active-bg);
   transform: scale(0.95);
@@ -142,4 +146,10 @@
 .toolbar-button[data-tooltip]:disabled:hover::after {
   opacity: 0;
   display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolbar-button:hover:not(:disabled) .toolbar-button-icon {
+    transform: none;
+  }
 }

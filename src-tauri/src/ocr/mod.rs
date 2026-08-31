@@ -1,25 +1,19 @@
-//! OCR 模块：统一离线 + 在线 OCR 引擎接口。
+//! OCR 模块：基于 PaddleOCR ONNX 的本地离线识别接口。
 //!
 //! ## 设计原则
-//! - `OcrEngine` trait 定义统一接口，各引擎独立实现
-//! - `OcrService` 管理引擎选择、模型生命周期、线程调度
-//! - `recognize_bgra()` 公开入口，内部自动处理分块、COM 线程、锁隔离
-//!
-//! ## 引擎选择策略
-//! 1. 用户手动选择 → 使用指定引擎
-//! 2. Windows 平台 → 默认 Windows.Media.Ocr（零依赖，系统内置）
-//! 3. 非 Windows 或 Windows OCR 不可用 → PaddleOCR-ONNX
+//! - `OcrEngine` trait 定义统一接口
+//! - `OcrService` 管理 PaddleOCR 模型生命周期
+//! - `recognize_bgra()` 公开入口，内部校验像素缓冲区并串行化模型会话
 //!
 //! ## 线程模型
-//! - `WindowsOcrEngine`: WTA COM，在 MTA 子线程中执行 (`CoInitializeEx(MTA)`)
 //! - `PaddleOcrEngine`: ONNX Runtime 自身线程安全，可在任意线程调用
-//! - 大图自动分块（>4096px 高度），每块独立线程 + COM 隔离
 
 #[cfg(test)]
 mod accuracy_test;
 pub mod engine;
 pub mod paddle_ocr;
-pub mod windows_ocr;
+#[cfg(test)]
+mod windows_ocr;
 
 use std::sync::{Arc, Mutex};
 
@@ -29,21 +23,9 @@ use engine::{OcrEngine, OcrResult};
 /// 避免应用启动时加载 OCR 模型（占用内存与启动开销），用户从不截图识图时零成本。
 static GLOBAL_OCR_SERVICE: Mutex<Option<Arc<Mutex<OcrService>>>> = Mutex::new(None);
 
-/// 用户在设置中选择的引擎偏好（配置持久化，启动时由 main.rs 注入）。
-/// 在 `ensure_ocr_service()` 首次懒加载初始化时作为 `prefer` 传入 `OcrService::new`。
-/// 仅在服务初始化前有意义；服务初始化后引擎切换直接操作 OcrService 实例。
-static PREFERRED_ENGINE: Mutex<Option<EngineId>> = Mutex::new(None);
-
-/// 设置用户偏好的 OCR 引擎（None 表示未设置，按默认策略自动选择）。
-/// 由 main.rs 启动时从持久化配置读取并调用。
-pub fn set_preferred_engine(id: Option<EngineId>) {
-    if let Ok(mut guard) = PREFERRED_ENGINE.lock() {
-        *guard = id;
-    }
-}
-
 /// 获取全局 OCR 服务的克隆引用（纯读取，不触发加载）。
 /// 返回 None 表示尚未初始化（尚未实际使用过 OCR）。
+#[allow(dead_code)]
 pub fn get_ocr_service() -> Option<Arc<Mutex<OcrService>>> {
     GLOBAL_OCR_SERVICE
         .lock()
@@ -69,11 +51,7 @@ pub fn ensure_ocr_service() -> Option<Arc<Mutex<OcrService>>> {
     };
     if guard.is_none() {
         crate::utils::logger::log("ocr", "OCR 服务未初始化，首次使用触发懒加载...");
-        let prefer = PREFERRED_ENGINE.lock().ok().and_then(|g| *g);
-        if let Some(id) = prefer {
-            crate::utils::logger::log("ocr", &format!("应用配置的引擎偏好: {}", id.as_str()));
-        }
-        let service = OcrService::new(prefer, None);
+        let service = OcrService::new(Some(EngineId::Paddle), None);
         *guard = Some(Arc::new(Mutex::new(service)));
     }
     guard.clone()
@@ -82,7 +60,7 @@ pub fn ensure_ocr_service() -> Option<Arc<Mutex<OcrService>>> {
 /// 引擎标识
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EngineId {
-    /// Windows 系统内置 OCR（Windows.Media.Ocr）
+    /// 已弃用：Windows 系统内置 OCR（Windows.Media.Ocr）
     Windows,
     /// PaddleOCR ONNX 本地推理引擎
     Paddle,
@@ -107,37 +85,18 @@ impl EngineId {
 
 /// OCR 全局服务。
 ///
-/// 负责：
-/// - 持有所有可用引擎实例
-/// - 根据配置选择激活引擎
-/// - 提供 `recognize_bgra()` 统一入口
-/// - 处理大图自动分块 + COM 线程隔离
+/// 负责持有 PaddleOCR 实例，并提供统一的 BGRA 识别入口。
 ///
 /// 通过 `GLOBAL_OCR_SERVICE` (Mutex<Option<Arc<Mutex<OcrService>>>>) 全局单例访问，
 /// 首次实际使用 OCR 时由 `ensure_ocr_service()` 懒加载初始化。
 pub struct OcrService {
     pub active_engine: EngineId,
-    windows: Option<Arc<dyn OcrEngine>>,
     paddle: Option<Arc<dyn OcrEngine>>,
 }
 
 impl OcrService {
-    /// 创建服务并初始化所有可用引擎。
-    /// `prefer` 为用户偏好引擎；实际激活按策略：用户选择 → 平台可用 → fallback。
-    pub fn new(prefer: Option<EngineId>, model_dir: Option<std::path::PathBuf>) -> Self {
-        let windows: Option<Arc<dyn OcrEngine>> = match windows_ocr::WindowsOcrEngine::new() {
-            Ok(engine) => {
-                if engine.is_available() {
-                    crate::utils::logger::log("ocr", "Windows OCR 引擎就绪");
-                }
-                Some(Arc::new(engine) as Arc<dyn OcrEngine>)
-            }
-            Err(e) => {
-                crate::utils::logger::log("ocr", &format!("Windows OCR 引擎不可用: {}", e));
-                None
-            }
-        };
-
+    /// 创建服务并初始化固定的 PaddleOCR 引擎。
+    pub fn new(_prefer: Option<EngineId>, model_dir: Option<std::path::PathBuf>) -> Self {
         let paddle: Option<Arc<dyn OcrEngine>> =
             match paddle_ocr::PaddleOcrEngine::new(model_dir.as_deref()) {
                 Ok(engine) => {
@@ -158,67 +117,38 @@ impl OcrService {
                 }
             };
 
-        // 确定激活引擎（windows 需实际可用，而非仅成功创建——WindowsOcrEngine 创建总是 Ok，
-        // 内部通过 is_available 记录运行时就绪状态，与 paddle 用 None 表示不可用的语义对齐）
-        let windows_available = windows.as_ref().is_some_and(|e| e.is_available());
-        let active_engine = Self::select_active(prefer, windows_available, paddle.is_some());
+        let active_engine = EngineId::Paddle;
 
         crate::utils::logger::log(
             "ocr",
             &format!(
-                "OCR 服务初始化完成，激活引擎: {} (windows={}, paddle={})",
+                "OCR 服务初始化完成，激活引擎: {} (paddle={})",
                 active_engine.as_str(),
-                windows_available,
                 paddle.is_some(),
             ),
         );
 
         OcrService {
             active_engine,
-            windows,
             paddle,
-        }
-    }
-
-    fn select_active(prefer: Option<EngineId>, has_windows: bool, has_paddle: bool) -> EngineId {
-        match prefer {
-            Some(EngineId::Paddle) if has_paddle => EngineId::Paddle,
-            Some(EngineId::Windows) if has_windows => EngineId::Windows,
-            Some(_) => {
-                // 指定引擎不可用，回退到可用引擎；全部不可用时回退 Windows（识别时再报错）
-                if has_windows {
-                    EngineId::Windows
-                } else if has_paddle {
-                    EngineId::Paddle
-                } else {
-                    EngineId::Windows
-                }
-            }
-            None => {
-                // 自动选择
-                if has_windows {
-                    EngineId::Windows
-                } else if has_paddle {
-                    EngineId::Paddle
-                } else {
-                    EngineId::Windows
-                }
-            }
         }
     }
 
     /// 获取当前激活的引擎引用。
     fn active(&self) -> Option<&Arc<dyn OcrEngine>> {
         match self.active_engine {
-            EngineId::Windows => self.windows.as_ref(),
+            EngineId::Windows => None,
             EngineId::Paddle => self.paddle.as_ref(),
         }
     }
 
     /// 切换激活引擎。返回是否切换成功。
     pub fn switch_engine(&mut self, id: EngineId) -> bool {
+        if id != EngineId::Paddle {
+            return false;
+        }
         let available = match id {
-            EngineId::Windows => self.windows.as_ref().is_some_and(|e| e.is_available()),
+            EngineId::Windows => false,
             EngineId::Paddle => self.paddle.is_some(),
         };
         if available {
@@ -228,17 +158,12 @@ impl OcrService {
         available
     }
 
-    /// 获取所有可用引擎 ID 列表（供前端设置页展示）。
-    /// 仅返回实际可用的引擎：windows 需 is_available，paddle 以 Option 是否为 None 表示不可用。
+    /// 返回固定 OCR 引擎的可用状态，保留给旧版命令兼容。
     pub fn available_engines(&self) -> Vec<EngineId> {
-        let mut ids = Vec::new();
-        if self.windows.as_ref().is_some_and(|e| e.is_available()) {
-            ids.push(EngineId::Windows);
-        }
-        if self.paddle.is_some() {
-            ids.push(EngineId::Paddle);
-        }
-        ids
+        self.paddle
+            .as_ref()
+            .map(|_| vec![EngineId::Paddle])
+            .unwrap_or_default()
     }
 
     /// 获取激活引擎的名称
@@ -248,10 +173,7 @@ impl OcrService {
 
     /// 对 BGRA 像素执行 OCR 识别。
     ///
-    /// 内部自动处理：
-    /// - 大图分块（高度 > 4096px）
-    /// - COM 线程隔离（MTA 子线程）
-    /// - 像素格式转换
+    /// 内部负责输入尺寸校验和模型可用性检查。
     ///
     /// 调用方无需关心引擎类型和线程细节。
     pub fn recognize_bgra(
@@ -288,129 +210,7 @@ impl OcrService {
             )));
         }
 
-        // Windows OCR 需要 COM 隔离（MTA 线程 + 分块）；
-        // PaddleOCR ONNX Runtime 自身线程安全，直接调用即可。
-        match engine.name() {
-            "WindowsOCR" => self.recognize_with_tiling(engine.clone(), bgra, width, height),
-            _ => engine.recognize(bgra, width, height),
-        }
-    }
-
-    /// 分块 + MTA 线程隔离的 OCR（用于需要 COM 隔离的引擎，如 Windows OCR）。
-    /// 当高度 > 4096 时分块，每块独立 MTA 线程识别后拼接。
-    fn recognize_with_tiling(
-        &self,
-        engine: Arc<dyn OcrEngine>,
-        bgra: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<OcrResult, engine::OcrError> {
-        const MAX_TILE: u32 = 4096;
-
-        if height <= MAX_TILE {
-            return self.recognize_in_mta(engine, bgra.to_vec(), width, height);
-        }
-
-        // 高度方向分块
-        let row_bytes = (width as usize) * 4;
-        let mut tiles: Vec<(u32, u32, Vec<u8>)> = Vec::new();
-        let mut y: u32 = 0;
-        while y < height {
-            let tile_h = std::cmp::min(MAX_TILE, height - y);
-            let start = (y as usize) * row_bytes;
-            let end = start + (tile_h as usize) * row_bytes;
-            tiles.push((y, tile_h, bgra[start..end].to_vec()));
-            y += tile_h;
-        }
-
-        // 每个分块独立 MTA 线程
-        let mut handles: Vec<std::thread::JoinHandle<Result<OcrResult, engine::OcrError>>> =
-            Vec::with_capacity(tiles.len());
-        for (_tile_y, tile_h, tile_pixels) in tiles {
-            let e = engine.clone();
-            let w = width;
-            handles.push(std::thread::spawn(move || {
-                // MTA COM 初始化
-                #[cfg(target_os = "windows")]
-                unsafe {
-                    let _ = windows::Win32::System::Com::CoInitializeEx(
-                        None,
-                        windows::Win32::System::Com::COINIT_MULTITHREADED,
-                    );
-                }
-                let res = e.recognize(&tile_pixels, w, tile_h);
-                #[cfg(target_os = "windows")]
-                unsafe {
-                    windows::Win32::System::Com::CoUninitialize();
-                }
-                res
-            }));
-        }
-
-        // 收集结果
-        let mut full_text = String::new();
-        let mut all_blocks = Vec::new();
-        let mut total_elapsed = 0u64;
-
-        for h in handles {
-            match h.join() {
-                Ok(Ok(result)) => {
-                    if !full_text.is_empty() {
-                        full_text.push('\n');
-                    }
-                    full_text.push_str(&result.text);
-                    all_blocks.extend(result.blocks);
-                    total_elapsed = std::cmp::max(total_elapsed, result.elapsed_ms);
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(e) => {
-                    return Err(engine::OcrError::RecognitionFailed(format!(
-                        "OCR 线程 panic: {:?}",
-                        e
-                    )))
-                }
-            }
-        }
-
-        Ok(OcrResult {
-            text: full_text,
-            blocks: all_blocks,
-            engine: engine.name().to_string(),
-            elapsed_ms: total_elapsed,
-        })
-    }
-
-    /// 在 MTA 子线程中执行单次 OCR 识别。
-    fn recognize_in_mta(
-        &self,
-        engine: Arc<dyn OcrEngine>,
-        pixels: Vec<u8>,
-        width: u32,
-        height: u32,
-    ) -> Result<OcrResult, engine::OcrError> {
-        let handle = std::thread::spawn(move || {
-            #[cfg(target_os = "windows")]
-            unsafe {
-                let _ = windows::Win32::System::Com::CoInitializeEx(
-                    None,
-                    windows::Win32::System::Com::COINIT_MULTITHREADED,
-                );
-            }
-            let res = engine.recognize(&pixels, width, height);
-            #[cfg(target_os = "windows")]
-            unsafe {
-                windows::Win32::System::Com::CoUninitialize();
-            }
-            res
-        });
-
-        match handle.join() {
-            Ok(result) => result,
-            Err(e) => Err(engine::OcrError::RecognitionFailed(format!(
-                "OCR 线程 panic: {:?}",
-                e
-            ))),
-        }
+        engine.recognize(bgra, width, height)
     }
 }
 
@@ -428,29 +228,16 @@ mod tests {
     }
 
     #[test]
-    fn test_ocr_service_creation_windows() {
-        // 无模型目录，仅 Windows OCR 可用（Windows 平台）
+    fn test_ocr_service_is_fixed_to_paddle() {
         let service = OcrService::new(None, None);
-        let engines = service.available_engines();
-        // 至少有一个引擎（在 Windows 上）
-        if cfg!(target_os = "windows") {
-            assert!(!engines.is_empty(), "Windows 上至少应有 Windows OCR");
-        }
+        assert_eq!(service.active_engine_name(), "paddle");
     }
 
     #[test]
     fn test_ocr_service_switch_engine() {
         let mut service = OcrService::new(None, None);
-        let current = service.active_engine_name();
-
-        // 切换到 Paddle（可能不可用）
-        service.switch_engine(EngineId::Paddle);
-        // 如果没有 Paddle 引擎，保持原引擎
-        if service.paddle.is_some() {
-            assert_eq!(service.active_engine_name(), "paddle");
-        } else {
-            assert_eq!(service.active_engine_name(), current);
-        }
+        assert!(!service.switch_engine(EngineId::Windows));
+        assert_eq!(service.active_engine_name(), "paddle");
     }
 
     #[test]

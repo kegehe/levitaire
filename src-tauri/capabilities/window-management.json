@@ -8,6 +8,7 @@
     "long-capture-controls",
     "long-capture-frame",
     "context-menu",
+    "pin-ocr",
     "sketch-overlay"
   ],
   "permissions": [

@@ -41,6 +41,10 @@ fn default_theme_scheme() -> String {
     "cloud".to_string()
 }
 
+fn default_orb_icon() -> String {
+    "jellyfish".to_string()
+}
+
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
@@ -70,6 +74,8 @@ pub struct AppConfig {
     pub theme_accent: String,
     #[serde(default = "default_theme_scheme")]
     pub theme_scheme: String,
+    #[serde(default = "default_orb_icon")]
+    pub orb_icon: String,
     /// DPAPI 加密后的 API Key（十六进制编码），与 ai.api_key 互斥存储
     /// 加载时自动解密填入 ai.api_key；保存时自动加密填入此字段，清空 ai.api_key
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +132,27 @@ pub struct AppConfig {
     /// 空串表示使用默认值
     #[serde(default)]
     pub pomodoro_config: String,
+    /// 通用时钟与计时工具是否启用
+    #[serde(default)]
+    pub timer_enabled: bool,
+    #[serde(default = "default_timer_reminders_enabled")]
+    pub timer_reminders_enabled: bool,
+    #[serde(default = "default_timer_reminder_sound")]
+    pub timer_reminder_sound: String,
+    #[serde(default = "default_timer_lunar_enabled")]
+    pub timer_lunar_enabled: bool,
+    /// 待办清单工具是否启用。默认关闭，避免新增常驻窗口打扰现有用户。
+    #[serde(default)]
+    pub todo_enabled: bool,
+    /// 待办提醒是否启用。默认开启。
+    #[serde(default = "default_todo_reminders_enabled")]
+    pub todo_reminders_enabled: bool,
+    /// 待办提醒声音：tone / none。
+    #[serde(default = "default_todo_reminder_sound")]
+    pub todo_reminder_sound: String,
+    /// Global shortcut that opens the todo window and focuses the new-task field.
+    #[serde(default = "default_todo_quick_add_hotkey")]
+    pub todo_quick_add_hotkey: String,
     /// 录屏工具是否启用（仅启用时热键才触发）。默认 false
     #[serde(default)]
     pub recording_enabled: bool,
@@ -142,8 +169,13 @@ pub struct AppConfig {
     /// 截图文件保存路径（目录）。空串表示未设置，每次保存时弹出对话框选择位置
     #[serde(default)]
     pub screenshot_save_path: String,
-    /// OCR 识别引擎偏好："windows"（Windows.Media.Ocr）或 "paddle"（PaddleOCR-ONNX）。
-    /// 空串表示未设置，启动时按默认策略自动选择（Windows 平台优先 Windows OCR）
+    /// 贴图窗口边框颜色（#RRGGBB）
+    #[serde(default = "default_pin_border_color")]
+    pub pin_border_color: String,
+    /// 贴图窗口边框粗细（像素），范围 1-8
+    #[serde(default = "default_pin_border_width")]
+    pub pin_border_width: u32,
+    /// 旧版 OCR 引擎偏好字段。当前版本统一使用内置 PaddleOCR 模型。
     #[serde(default)]
     pub ocr_engine: String,
     /// 自启动工具 ID 列表（应用启动时自动打开窗口的工具，如 ["system-monitor"]）
@@ -176,6 +208,20 @@ pub struct AppConfig {
 
 fn default_quick_input_enabled() -> bool {
     false
+}
+
+fn default_todo_reminders_enabled() -> bool {
+    true
+}
+
+fn default_timer_reminders_enabled() -> bool { true }
+fn default_timer_reminder_sound() -> String { "tone".to_string() }
+fn default_timer_lunar_enabled() -> bool { true }
+fn default_todo_reminder_sound() -> String {
+    "tone".to_string()
+}
+fn default_todo_quick_add_hotkey() -> String {
+    "Ctrl+Alt+T".to_string()
 }
 
 fn default_quick_input_trigger_key() -> String {
@@ -222,6 +268,32 @@ fn default_pomodoro_enabled() -> bool {
     false
 }
 
+pub const DEFAULT_PIN_BORDER_COLOR: &str = "#00C8FF";
+
+fn default_pin_border_color() -> String {
+    DEFAULT_PIN_BORDER_COLOR.to_string()
+}
+
+fn default_pin_border_width() -> u32 {
+    1
+}
+
+pub const PIN_BORDER_MIN_WIDTH: u32 = 1;
+pub const PIN_BORDER_MAX_WIDTH: u32 = 8;
+
+fn normalize_pin_border_color(value: &str) -> Option<String> {
+    let value = value.trim();
+    let hex = value.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("#{}", hex.to_ascii_uppercase()))
+}
+
+fn normalize_pin_border_width(value: u32) -> u32 {
+    value.clamp(PIN_BORDER_MIN_WIDTH, PIN_BORDER_MAX_WIDTH)
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -229,6 +301,7 @@ impl Default for AppConfig {
             theme: default_theme(),
             theme_accent: default_theme_accent(),
             theme_scheme: default_theme_scheme(),
+            orb_icon: default_orb_icon(),
             api_key_encrypted: None,
             screenshot_hotkey: String::new(),
             sketch_hotkey: default_sketch_hotkey(),
@@ -247,11 +320,21 @@ impl Default for AppConfig {
             system_monitor_config: String::new(),
             pomodoro_enabled: default_pomodoro_enabled(),
             pomodoro_config: String::new(),
+            timer_enabled: false,
+            timer_reminders_enabled: default_timer_reminders_enabled(),
+            timer_reminder_sound: default_timer_reminder_sound(),
+            timer_lunar_enabled: default_timer_lunar_enabled(),
+            todo_enabled: false,
+            todo_reminders_enabled: default_todo_reminders_enabled(),
+            todo_reminder_sound: default_todo_reminder_sound(),
+            todo_quick_add_hotkey: default_todo_quick_add_hotkey(),
             recording_enabled: false,
             recording_hotkey: String::new(),
             recording_config: String::new(),
             recording_save_path: String::new(),
             screenshot_save_path: String::new(),
+            pin_border_color: default_pin_border_color(),
+            pin_border_width: default_pin_border_width(),
             ocr_engine: String::new(),
             tools_autostart: Vec::new(),
             window_positions: HashMap::new(),
@@ -272,10 +355,13 @@ pub struct StartupConfig {
     pub sketch_hotkey: String,
     pub sketch_enabled: bool,
     pub screenshot_enabled: bool,
+    pub todo_enabled: bool,
+    pub todo_quick_add_hotkey: String,
     pub text_toolbar_enabled: bool,
     pub recording_hotkey: String,
     pub recording_enabled: bool,
-    pub ocr_engine: String,
+    pub quick_input_enabled: bool,
+    pub quick_input_trigger_key: String,
 }
 
 /// 配置管理器（线程安全）
@@ -324,10 +410,13 @@ impl ConfigManager {
             sketch_hotkey: c.sketch_hotkey.clone(),
             sketch_enabled: c.sketch_enabled,
             screenshot_enabled: c.screenshot_enabled,
+            todo_enabled: c.todo_enabled,
+            todo_quick_add_hotkey: c.todo_quick_add_hotkey.clone(),
             text_toolbar_enabled: c.text_toolbar_enabled,
             recording_hotkey: c.recording_hotkey.clone(),
             recording_enabled: c.recording_enabled,
-            ocr_engine: c.ocr_engine.clone(),
+            quick_input_enabled: c.quick_input_enabled,
+            quick_input_trigger_key: c.quick_input_trigger_key.clone(),
         })
     }
 
@@ -463,6 +552,38 @@ impl ConfigManager {
             })
     }
 
+    pub fn get_orb_icon(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.orb_icon.clone())
+    }
+
+    pub fn update_orb_icon(&self, icon: String) -> Result<(), String> {
+        const VALID: &[&str] = &[
+            "jellyfish",
+            "ufo",
+            "butterfly",
+            "balloon",
+            "rocket",
+            "cloud",
+            "plane",
+            "dandelion",
+            "kite",
+            "bubble",
+        ];
+        if !VALID.contains(&icon.as_str()) {
+            return Err("不支持的悬浮球形象".to_string());
+        }
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|mut c| {
+                c.orb_icon = icon;
+            })?;
+        self.save_config()
+    }
+
     pub fn update_theme_preferences(&self, preferences: ThemePreferences) -> Result<(), String> {
         if preferences.theme != "light" && preferences.theme != "dark" {
             return Err("主题必须是 light 或 dark".to_string());
@@ -562,12 +683,18 @@ impl ConfigManager {
     }
 
     pub fn get_sketch_enabled(&self) -> Result<bool, String> {
-        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.sketch_enabled)
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.sketch_enabled)
     }
 
     pub fn update_sketch_enabled(&self, enabled: bool) -> Result<(), String> {
         {
-            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.sketch_enabled = enabled;
         }
         self.save_config()
@@ -833,6 +960,55 @@ impl ConfigManager {
         self.save_config()
     }
 
+    pub fn get_timer_enabled(&self) -> Result<bool, String> {
+        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_enabled)
+    }
+
+    pub fn update_timer_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.timer_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    pub fn get_timer_reminders_enabled(&self) -> Result<bool, String> {
+        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_reminders_enabled)
+    }
+
+    pub fn update_timer_reminders_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.timer_reminders_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    pub fn get_timer_reminder_sound(&self) -> Result<String, String> {
+        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_reminder_sound.clone())
+    }
+
+    pub fn update_timer_reminder_sound(&self, sound: String) -> Result<(), String> {
+        let sound = if sound == "none" { "none".to_string() } else { "tone".to_string() };
+        {
+            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.timer_reminder_sound = sound;
+        }
+        self.save_config()
+    }
+
+    pub fn get_timer_lunar_enabled(&self) -> Result<bool, String> {
+        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_lunar_enabled)
+    }
+
+    pub fn update_timer_lunar_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.timer_lunar_enabled = enabled;
+        }
+        self.save_config()
+    }
+
     /// 获取番茄钟配置（JSON 字符串，空串表示未设置，前端取默认值）
     pub fn get_pomodoro_config(&self) -> Result<String, String> {
         self.config
@@ -849,6 +1025,83 @@ impl ConfigManager {
                 .lock()
                 .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config_lock.pomodoro_config = config;
+        }
+        self.save_config()
+    }
+
+    /// 获取待办清单工具启用状态
+    pub fn get_todo_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.todo_enabled)
+    }
+
+    /// 更新待办清单工具启用状态并持久化
+    pub fn update_todo_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.todo_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    pub fn get_todo_quick_add_hotkey(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("Failed to lock config: {e}"))
+            .map(|config| config.todo_quick_add_hotkey.clone())
+    }
+
+    pub fn update_todo_quick_add_hotkey(&self, hotkey: String) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("Failed to lock config: {e}"))?;
+            config.todo_quick_add_hotkey = hotkey;
+        }
+        self.save_config()
+    }
+
+    pub fn get_todo_reminders_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.todo_reminders_enabled)
+    }
+
+    pub fn update_todo_reminders_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            self.config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?
+                .todo_reminders_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    pub fn get_todo_reminder_sound(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.todo_reminder_sound.clone())
+    }
+
+    pub fn update_todo_reminder_sound(&self, sound: String) -> Result<(), String> {
+        let sound = if sound == "none" {
+            "none".to_string()
+        } else {
+            "tone".to_string()
+        };
+        {
+            self.config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?
+                .todo_reminder_sound = sound;
         }
         self.save_config()
     }
@@ -951,6 +1204,79 @@ impl ConfigManager {
             config.screenshot_save_path = path;
         }
         self.save_config()
+    }
+
+    /// 获取贴图窗口边框颜色。
+    pub fn get_pin_border_color(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| {
+                normalize_pin_border_color(&c.pin_border_color)
+                    .unwrap_or_else(default_pin_border_color)
+            })
+    }
+
+    /// 更新贴图窗口边框颜色并持久化。
+    pub fn update_pin_border_color(&self, color: String) -> Result<(), String> {
+        let normalized = normalize_pin_border_color(&color)
+            .ok_or_else(|| "贴图边框颜色无效，应为 #RRGGBB".to_string())?;
+        let previous;
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            previous = config.pin_border_color.clone();
+            config.pin_border_color = normalized.clone();
+        }
+        if let Err(error) = self.save_config() {
+            if let Ok(mut config) = self.config.lock() {
+                // Do not undo a newer update that arrived while this save was running.
+                if config.pin_border_color == normalized {
+                    config.pin_border_color = previous;
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// 获取贴图窗口边框粗细（像素）。
+    pub fn get_pin_border_width(&self) -> Result<u32, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| normalize_pin_border_width(c.pin_border_width))
+    }
+
+    /// 更新贴图窗口边框粗细并持久化。
+    pub fn update_pin_border_width(&self, width: u32) -> Result<(), String> {
+        if !(PIN_BORDER_MIN_WIDTH..=PIN_BORDER_MAX_WIDTH).contains(&width) {
+            return Err(format!(
+                "贴图边框粗细应为 {}-{} 像素",
+                PIN_BORDER_MIN_WIDTH, PIN_BORDER_MAX_WIDTH
+            ));
+        }
+        let previous;
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            previous = config.pin_border_width;
+            config.pin_border_width = width;
+        }
+        if let Err(error) = self.save_config() {
+            if let Ok(mut config) = self.config.lock() {
+                // Do not undo a newer update that arrived while this save was running.
+                if config.pin_border_width == width {
+                    config.pin_border_width = previous;
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// 更新 OCR 识别引擎偏好并持久化
@@ -1310,6 +1636,8 @@ mod tests {
         assert_eq!(config.system_monitor_interval_ms, 1000);
         assert!(!config.system_monitor_enabled);
         assert!(!config.pomodoro_enabled);
+        assert_eq!(config.pin_border_color, "#00C8FF");
+        assert_eq!(config.pin_border_width, 1);
         assert!(config.tools_autostart.is_empty());
     }
 
@@ -1356,6 +1684,41 @@ mod tests {
         let config = AppConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         assert!(!json.contains("api_key_encrypted"));
+    }
+
+    #[test]
+    fn test_orb_icon_missing_defaults_to_jellyfish() {
+        let json = r#"{"ai":{"api_key":"","base_url":"","model":"","api_type":"anthropic"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.orb_icon, "jellyfish");
+    }
+
+    #[test]
+    fn test_config_manager_update_orb_icon_validates_value() {
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_orb_icon_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let config_path = tmp.join("config.json");
+        let manager = ConfigManager {
+            config: Mutex::new(AppConfig::default()),
+            config_path,
+        };
+
+        assert!(manager.update_orb_icon("invalid".to_string()).is_err());
+        assert_eq!(manager.get_orb_icon().unwrap(), "jellyfish");
+
+        manager.update_orb_icon("rocket".to_string()).unwrap();
+        assert_eq!(manager.get_orb_icon().unwrap(), "rocket");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_pin_border_missing_fields_use_defaults() {
+        let json = r#"{"ai":{"api_key":"","base_url":"","model":"","api_type":"anthropic"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.pin_border_color, "#00C8FF");
+        assert_eq!(config.pin_border_width, 1);
     }
 
     /// 集成测试：ConfigManager 的保存-加载-加密流程

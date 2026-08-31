@@ -36,6 +36,9 @@ pub struct UpdaterState {
 
 /// 后台周期检测间隔（24h）
 const UPDATE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// 启动时网络尚未就绪、代理初始化等导致检查失败时，不能直接等待下一个 24h 周期。
+/// 保持应用运行即可在一分钟后自动重试；成功后恢复常规检查间隔。
+const FAILED_CHECK_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// 应用启动后首次延迟（秒），给应用/网络就绪留余量
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(5);
 
@@ -56,8 +59,12 @@ pub fn start_periodic_check(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
         loop {
-            let _ = detect_and_notify(&app).await; // 失败静默，不阻塞循环
-            tokio::time::sleep(UPDATE_INTERVAL).await;
+            let next_check = if detect_and_notify(&app).await.is_ok() {
+                UPDATE_INTERVAL
+            } else {
+                FAILED_CHECK_RETRY_INTERVAL
+            };
+            tokio::time::sleep(next_check).await;
         }
     });
 }
@@ -110,7 +117,7 @@ async fn detect_and_notify(app: &AppHandle) -> Result<(), String> {
             win_res
         ),
     );
-    Ok(())
+    win_res.map_err(|error| format!("更新提示窗口显示失败: {error}"))
 }
 
 /// 创建 / 显示右上角更新提示窗口（常驻，关闭=隐藏）

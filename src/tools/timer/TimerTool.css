@@ -1,0 +1,37 @@
+body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
+.timer-shell { width: 100%; height: auto; min-height: 0; padding: 10px; color: var(--color-fg); background: var(--color-bg-elevated); border: 1px solid var(--color-border); border-radius: 8px; box-sizing: border-box; font-size: 12px; overflow: hidden; }
+.timer-header, .timer-controls, .timer-presets { display: flex; align-items: center; }
+.timer-header { justify-content: space-between; height: 24px; }
+.timer-tabs, .timer-actions, .timer-controls, .timer-presets { gap: 4px; }
+.timer-tabs button, .timer-actions button, .timer-controls button, .timer-presets button { border: 0; color: var(--color-fg-muted); background: transparent; cursor: pointer; }
+.timer-tabs button { padding: 3px 8px; border-radius: 4px; }
+.timer-tabs button.is-active { color: var(--color-fg); background: var(--color-bg-sunken); }
+.timer-actions button, .timer-controls button { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 5px; }
+.timer-actions button:hover, .timer-controls button:hover { color: var(--color-fg); background: var(--button-hover-bg); }
+.timer-actions button[data-tooltip]::after, .timer-controls button[data-tooltip]::after { content: attr(data-tooltip); position: absolute; z-index: 5; top: calc(100% + 4px); right: 0; padding: 3px 7px; white-space: nowrap; color: var(--tooltip-text); background: var(--tooltip-bg); border: 1px solid var(--tooltip-border); border-radius: 4px; opacity: 0; pointer-events: none; }
+.timer-actions button:hover::after, .timer-controls button:hover::after { opacity: 1; }
+.timer-clock-view, .timer-countdown-view { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.timer-clock-view { gap: 6px; padding-top: 28px; }
+.timer-countdown-view { gap: 8px; padding-top: 12px; }
+.timer-eyebrow, .timer-date { color: var(--color-fg-muted); font-size: 11px; }
+.timer-local-clock-value { font-size: 39px; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.timer-date { font-size: 12px; }
+.timer-secondary-action { display: inline-flex; align-items: center; gap: 5px; margin-top: 13px; padding: 6px 10px; border: 1px solid var(--color-border); border-radius: 5px; color: var(--color-fg-muted); background: var(--color-bg-sunken); cursor: pointer; }
+.timer-secondary-action:hover { color: var(--color-fg); }
+.timer-primary-value { margin: 12px 0 4px; font-size: 46px; line-height: 1; font-variant-numeric: tabular-nums; }
+.timer-countdown-view.is-complete .timer-primary-value, .timer-countdown-view.is-complete .timer-ring-view strong { color: var(--color-danger-fg); }
+.timer-presets { justify-content: center; flex-wrap: wrap; margin: 2px 0 4px; }
+.timer-presets button, .timer-presets input { height: 23px; padding: 0 6px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg-muted); background: var(--color-bg-sunken); font-size: 10px; }
+.timer-presets input { width: 38px; color: var(--color-fg); text-align: center; }
+.timer-presets button:hover { color: var(--color-fg); }
+.timer-presets button:disabled, .timer-controls button:disabled { cursor: not-allowed; opacity: .4; }
+.timer-controls { justify-content: center; margin-top: 2px; }
+.timer-controls .timer-play { width: auto; padding: 0 12px; gap: 5px; color: var(--color-fg-on-accent); background: var(--color-accent); }
+.timer-controls .timer-play:hover { color: var(--color-fg-on-accent); background: var(--color-accent); filter: brightness(1.05); }
+.timer-ring-view { position: relative; width: 148px; height: 148px; }
+.timer-ring-view svg { width: 148px; height: 148px; transform: rotate(-90deg); }
+.timer-ring-bg, .timer-ring-fg { fill: none; stroke-width: 8; }
+.timer-ring-bg { stroke: var(--color-bg-sunken); }
+.timer-ring-fg { stroke: var(--color-accent); stroke-linecap: round; stroke-dasharray: 314; transition: stroke-dashoffset .35s linear; }
+.timer-ring-view strong { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 27px; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .timer-ring-fg { transition: none; } }

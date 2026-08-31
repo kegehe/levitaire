@@ -16,16 +16,31 @@ const ICONS_DIR = join(__dirname, "..", "src-tauri", "icons");
 // 2. 与悬浮球的毛玻璃圆形背景视觉统一
 // 背景色使用深色半透明圆（模拟悬浮球在桌面上的毛玻璃效果）
 // viewBox 0 0 18 18，中心圆点 + 3 条椭圆轨道
-const svgContent = `<svg width="256" height="256" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- 圆形背景：模拟悬浮球毛玻璃效果 -->
-  <circle cx="9" cy="9" r="8.5" fill="rgba(30, 30, 50, 0.85)" />
-  <circle cx="9" cy="9" r="8.5" stroke="rgba(255,255,255,0.15)" stroke-width="0.3" fill="none" />
-  <!-- 中心实心圆点 -->
-  <circle cx="9" cy="9" r="1.5" fill="white" stroke="none" />
-  <!-- 3 条椭圆轨道，分别旋转 0° / 60° / 120° -->
-  <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(0 9 9)" stroke="white" stroke-width="1.2" fill="none" />
-  <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(60 9 9)" stroke="white" stroke-width="1.2" fill="none" />
-  <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(120 9 9)" stroke="white" stroke-width="1.2" fill="none" />
+const svgContent = `<svg width="512" height="512" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="0" cy="0" r="1" gradientTransform="translate(88 72) rotate(48) scale(190)">
+      <stop offset="0" stop-color="#35456f" />
+      <stop offset="1" stop-color="#11162c" />
+    </radialGradient>
+    <linearGradient id="orbit" x1="50" y1="40" x2="211" y2="216" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6CE8FF" />
+      <stop offset="0.52" stop-color="#5D9DFF" />
+      <stop offset="1" stop-color="#B18CFF" />
+    </linearGradient>
+    <linearGradient id="core" x1="105" y1="94" x2="153" y2="156" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" />
+      <stop offset="1" stop-color="#B8F3FF" />
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="119" fill="url(#bg)" />
+  <circle cx="128" cy="128" r="119" stroke="#7182B5" stroke-opacity="0.6" stroke-width="5" />
+  <g stroke="url(#orbit)" stroke-width="17" stroke-linecap="round">
+    <ellipse cx="128" cy="128" rx="93" ry="39" />
+    <ellipse cx="128" cy="128" rx="93" ry="39" transform="rotate(60 128 128)" />
+    <ellipse cx="128" cy="128" rx="93" ry="39" transform="rotate(120 128 128)" />
+  </g>
+  <circle cx="128" cy="128" r="25" fill="url(#core)" />
+  <circle cx="128" cy="128" r="25" stroke="#D7FAFF" stroke-width="5" />
 </svg>`;
 
 // 需要生成的 PNG 尺寸

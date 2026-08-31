@@ -51,6 +51,7 @@ const CMD_FLIP_VERTICAL: u16 = 7;
 const CMD_DUPLICATE_HORIZONTAL_MIRROR: u16 = 8;
 const CMD_DUPLICATE_VERTICAL_MIRROR: u16 = 9;
 const CMD_DUPLICATE_MIRROR: u16 = 10;
+const CMD_OCR: u16 = 11;
 const SCALE_TIMER_ID: usize = 1;
 /// 比例文字显示时长（毫秒）
 const SCALE_LABEL_MS: u32 = 1200;
@@ -64,17 +65,6 @@ const OPACITY_MIN: u8 = 30;
 const OPACITY_MAX: u8 = 255;
 /// 每档滚轮的透明度步进
 const OPACITY_STEP: u8 = 20;
-/// 贴图边框（含发光晕）总宽度，画在图片外侧。窗口尺寸 = 图片 + 2*BORDER。
-/// 用多层递进亮度实色线模拟外发光（layered LWA_ALPHA 仅支持整体透明度，无 per-pixel alpha）。
-/// 3 层 1px：最外最浅 → 中 → 内层主色，紧贴图片边缘，视觉呈发光晕染至亮边框。
-const BORDER: i32 = 3;
-/// 边框主体色（内层）：亮青蓝 RGB(0,200,255)。COLORREF 布局为 0x00BBGGRR。
-const BORDER_COLOR: COLORREF = COLORREF(0x00FF_C800);
-/// 中间晕色 RGB(60,212,255) → 0x00FF_D43C
-const GLOW_MID: COLORREF = COLORREF(0x00FF_D43C);
-/// 外层晕色（最浅）RGB(140,228,255) → 0x00FF_E48C
-const GLOW_OUTER: COLORREF = COLORREF(0x00FF_E48C);
-
 /// 贴图窗口运行时数据
 struct PinWindow {
     hwnd: isize,
@@ -108,6 +98,8 @@ struct PinCreateParams {
     y: i32,
     scale: f32,
     opacity: u8,
+    border_width: i32,
+    border_color: COLORREF,
 }
 
 #[derive(Clone, Copy)]
@@ -129,6 +121,8 @@ struct PinState {
     scale: f32,
     /// 当前不透明度（0-255）
     opacity: u8,
+    border_width: i32,
+    border_color: COLORREF,
     /// 比例角标显示截止时间；None 表示不显示
     show_scale_until: Option<std::time::Instant>,
     last_context_menu_at: Option<std::time::Instant>,
@@ -150,6 +144,7 @@ pub fn cleanup_stale_temp_files() {
 
 /// 创建一张贴图：解码 base64 PNG 为 BGRA 像素，创建原生 Win32 窗口绘制。
 /// 返回 pin id。
+#[allow(clippy::too_many_arguments)]
 pub fn create_pin(
     app: &tauri::AppHandle,
     base64_data: &str,
@@ -157,19 +152,33 @@ pub fn create_pin(
     y: i32,
     _width: u32,
     _height: u32,
+    border_color: &str,
+    border_width: u32,
 ) -> Result<u32, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    const MAX_PNG_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_IMAGE_PIXELS: u64 = 25_000_000;
     let raw = if let Some(idx) = base64_data.find(',') {
         &base64_data[idx + 1..]
     } else {
         base64_data
     };
+    if raw.len() > (MAX_PNG_BYTES / 3 + 1) * 4 {
+        return Err("贴图图片数据过大".into());
+    }
     let bytes = STANDARD
         .decode(raw)
         .map_err(|e| format!("base64 解码失败: {}", e))?;
+    if bytes.len() > MAX_PNG_BYTES {
+        return Err("贴图图片数据过大".into());
+    }
 
     // 解码 PNG 为 BGRA 像素
     let img = image::load_from_memory(&bytes).map_err(|e| format!("PNG 解码失败: {}", e))?;
+    let (raw_width, raw_height) = image::GenericImageView::dimensions(&img);
+    if u64::from(raw_width) * u64::from(raw_height) > MAX_IMAGE_PIXELS {
+        return Err("贴图图片像素数量过大".into());
+    }
     let rgba = img.to_rgba8();
     let (iw, ih) = (rgba.width() as i32, rgba.height() as i32);
     // RGBA → BGRA（GDI 使用 BGRA 字节序）
@@ -178,11 +187,28 @@ pub fn create_pin(
         px.swap(0, 2);
     }
 
-    create_pin_from_bgra(app, pixels, iw, ih, x, y, 1.0, OPACITY_MAX)
+    let border_width = border_width.clamp(
+        crate::config::PIN_BORDER_MIN_WIDTH,
+        crate::config::PIN_BORDER_MAX_WIDTH,
+    ) as i32;
+    let border_color = parse_colorref(border_color);
+    create_pin_from_bgra(
+        app,
+        pixels,
+        iw,
+        ih,
+        x,
+        y,
+        1.0,
+        OPACITY_MAX,
+        border_width,
+        border_color,
+    )
 }
 
 /// Create a pin from already decoded BGRA pixels. Used by mirror-copy actions
 /// so the duplicate never goes through a lossy or redundant PNG round trip.
+#[allow(clippy::too_many_arguments)]
 fn create_pin_from_bgra(
     app: &tauri::AppHandle,
     pixels: Vec<u8>,
@@ -192,6 +218,8 @@ fn create_pin_from_bgra(
     y: i32,
     scale: f32,
     opacity: u8,
+    border_width: i32,
+    border_color: COLORREF,
 ) -> Result<u32, String> {
     validate_pixels(&pixels, width, height)?;
 
@@ -206,6 +234,8 @@ fn create_pin_from_bgra(
         y,
         scale,
         opacity,
+        border_width,
+        border_color,
     };
 
     // 登记占位（hwnd 稍后由窗口线程回填）
@@ -245,6 +275,8 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         height: params.height,
         scale: params.scale,
         opacity: params.opacity,
+        border_width: params.border_width,
+        border_color: params.border_color,
         show_scale_until: None,
         last_context_menu_at: None,
     });
@@ -274,12 +306,12 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         let style = WS_POPUP;
         let ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
 
-        // 窗口尺寸 = 图片 + 2*BORDER，位置左上角向左上偏移 BORDER，
+        // 窗口尺寸 = 图片 + 2*边框宽度，位置左上角向左上偏移边框宽度，
         // 使图片内容仍精确覆盖原选区位置，边框与发光画在图片外侧。
-        let win_w = scaled_dimension(params.width, params.scale) + BORDER * 2;
-        let win_h = scaled_dimension(params.height, params.scale) + BORDER * 2;
-        let win_x = params.x - BORDER;
-        let win_y = params.y - BORDER;
+        let win_w = scaled_dimension(params.width, params.scale) + params.border_width * 2;
+        let win_h = scaled_dimension(params.height, params.scale) + params.border_width * 2;
+        let win_x = params.x - params.border_width;
+        let win_y = params.y - params.border_width;
 
         let hwnd = CreateWindowExW(
             ex_style,
@@ -366,6 +398,22 @@ fn scaled_dimension(value: i32, scale: f32) -> i32 {
     ((value as f32 * scale).round() as i32).max(1)
 }
 
+/// Convert a validated #RRGGBB value to the COLORREF byte order (0x00BBGGRR).
+/// Invalid values fall back to the default cyan used by older pin windows.
+fn parse_colorref(value: &str) -> COLORREF {
+    let hex = value.trim().strip_prefix('#').unwrap_or_default();
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return parse_colorref(crate::config::DEFAULT_PIN_BORDER_COLOR);
+    }
+    let Ok(rgb) = u32::from_str_radix(hex, 16) else {
+        return parse_colorref(crate::config::DEFAULT_PIN_BORDER_COLOR);
+    };
+    let red = rgb >> 16;
+    let green = (rgb >> 8) & 0xff;
+    let blue = rgb & 0xff;
+    COLORREF(red | (green << 8) | (blue << 16))
+}
+
 fn transform_bgra(
     pixels: &[u8],
     width: i32,
@@ -403,8 +451,8 @@ unsafe fn resize_pin_window_to_content(hwnd: HWND, state: &PinState) {
         None,
         0,
         0,
-        scaled_dimension(state.width, state.scale) + BORDER * 2,
-        scaled_dimension(state.height, state.scale) + BORDER * 2,
+        scaled_dimension(state.width, state.scale) + state.border_width * 2,
+        scaled_dimension(state.height, state.scale) + state.border_width * 2,
         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOMOVE,
     );
 }
@@ -447,8 +495,8 @@ unsafe fn duplicate_transformed_pin(hwnd: HWND, transform: PinTransform) {
     let mut rect = RECT::default();
     let _ = GetWindowRect(hwnd, &mut rect);
     // Offset the new pin so the two images are both immediately visible.
-    let x = rect.left.saturating_add(BORDER + 24);
-    let y = rect.top.saturating_add(BORDER + 24);
+    let x = rect.left.saturating_add(state.border_width + 24);
+    let y = rect.top.saturating_add(state.border_width + 24);
     let _ = create_pin_from_bgra(
         &state.app,
         pixels,
@@ -458,10 +506,41 @@ unsafe fn duplicate_transformed_pin(hwnd: HWND, transform: PinTransform) {
         y,
         state.scale,
         state.opacity,
+        state.border_width,
+        state.border_color,
     );
 }
 
 /// 窗口过程
+/// Duplicate the current pin without changing its pixels.
+unsafe fn duplicate_pin(hwnd: HWND) {
+    let state_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+        hwnd,
+        windows::Win32::UI::WindowsAndMessaging::GWL_USERDATA,
+    ) as *mut PinState;
+    if state_ptr.is_null() {
+        return;
+    }
+    let state = &*state_ptr;
+    let mut rect = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut rect);
+    // Offset the new pin so both identical images remain visible.
+    let x = rect.left.saturating_add(state.border_width + 24);
+    let y = rect.top.saturating_add(state.border_width + 24);
+    let _ = create_pin_from_bgra(
+        &state.app,
+        state.pixels.clone(),
+        state.width,
+        state.height,
+        x,
+        y,
+        state.scale,
+        state.opacity,
+        state.border_width,
+        state.border_color,
+    );
+}
+
 unsafe extern "system" fn pin_wndproc(
     hwnd: HWND,
     msg: u32,
@@ -543,11 +622,11 @@ unsafe extern "system" fn pin_wndproc(
                 bmiColors: [Default::default(); 1],
             };
 
-            // 图片绘制到 (BORDER, BORDER)，四周留 BORDER 像素画发光边框
-            let img_x = BORDER;
-            let img_y = BORDER;
-            let img_w = cw - BORDER * 2;
-            let img_h = ch - BORDER * 2;
+            // 图片绘制到边框内侧，边框完全位于图片外侧。
+            let img_x = state.border_width;
+            let img_y = state.border_width;
+            let img_w = cw - state.border_width * 2;
+            let img_h = ch - state.border_width * 2;
             if img_w > 0 && img_h > 0 {
                 StretchDIBits(
                     mem_dc,
@@ -566,9 +645,8 @@ unsafe extern "system" fn pin_wndproc(
                 );
             }
 
-            // 发光边框：3 层 1px 递进亮色，从外到内逐层加深，紧贴图片边缘。
             // layered LWA_ALPHA 下整体透明度调节会一并作用到边框，符合预期。
-            draw_glow_border(mem_dc, cw, ch);
+            draw_border(mem_dc, cw, ch, state.border_width, state.border_color);
 
             // 比例角标（仅当处于显示窗口期内）
             let show = state
@@ -665,15 +743,14 @@ unsafe extern "system" fn pin_wndproc(
                 CMD_ROTATE_RIGHT => apply_transform(hwnd, PinTransform::RotateRight),
                 CMD_FLIP_HORIZONTAL => apply_transform(hwnd, PinTransform::FlipHorizontal),
                 CMD_FLIP_VERTICAL => apply_transform(hwnd, PinTransform::FlipVertical),
-                CMD_DUPLICATE_MIRROR => {
-                    duplicate_transformed_pin(hwnd, PinTransform::FlipHorizontal)
-                }
+                CMD_DUPLICATE_MIRROR => duplicate_pin(hwnd),
                 CMD_DUPLICATE_HORIZONTAL_MIRROR => {
                     duplicate_transformed_pin(hwnd, PinTransform::FlipHorizontal)
                 }
                 CMD_DUPLICATE_VERTICAL_MIRROR => {
                     duplicate_transformed_pin(hwnd, PinTransform::FlipVertical)
                 }
+                CMD_OCR => start_pin_ocr(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -694,6 +771,42 @@ unsafe extern "system" fn pin_wndproc(
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+/// Run OCR on the pin's original pixels and publish the result to the frontend.
+/// The model can take a while to initialize, so keep the Win32 message thread responsive.
+unsafe fn start_pin_ocr(hwnd: HWND) {
+    let state_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+        hwnd,
+        windows::Win32::UI::WindowsAndMessaging::GWL_USERDATA,
+    ) as *mut PinState;
+    if state_ptr.is_null() {
+        return;
+    }
+    let state = &*state_ptr;
+    let app = state.app.clone();
+    let pin_id = state.id;
+    let pixels = state.pixels.clone();
+    let width = state.width;
+    let height = state.height;
+    std::thread::spawn(move || {
+        let result = (|| -> Result<String, String> {
+            let service =
+                crate::ocr::ensure_ocr_service().ok_or_else(|| "OCR 服务初始化失败".to_string())?;
+            let guard = service
+                .lock()
+                .map_err(|e| format!("OCR 服务锁失败: {}", e))?;
+            let result = guard
+                .recognize_bgra(&pixels, width as u32, height as u32)
+                .map_err(|e| e.to_string())?;
+            Ok(result.text)
+        })();
+        let payload = match result {
+            Ok(text) => serde_json::json!({ "pinId": pin_id, "text": text }),
+            Err(error) => serde_json::json!({ "pinId": pin_id, "error": error }),
+        };
+        let _ = app.emit("pin-ocr-result", payload);
+    });
 }
 
 /// 处理滚轮：普通滚轮缩放，Ctrl+滚轮调透明度（参考 Snipaste）。
@@ -770,14 +883,15 @@ unsafe fn show_scale_label(hwnd: HWND, state: &mut PinState) {
     let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
 }
 
-/// 绘制发光边框：在客户区四周画 3 层 1px 递进亮色矩形。
-/// 最外层 GLOW_OUTER（最浅）→ GLOW_MID → BORDER_COLOR（内层，最饱和），
-/// 内层紧贴图片边缘。视觉上从图片边向外晕染渐亮，模拟外发光效果。
-unsafe fn draw_glow_border(hdc: windows::Win32::Graphics::Gdi::HDC, cw: i32, ch: i32) {
-    // 三层从外到内：外层矩形 (0,0,cw,ch)，中层 (1,1,cw-2,ch-2)，内层 (2,2,cw-4,ch-4)
-    // FrameRect 画 1px 逻辑边框（实际为设备单位 1px）
-    let layers = [(GLOW_OUTER, 0), (GLOW_MID, 1), (BORDER_COLOR, 2)];
-    for (color, inset) in layers {
+/// 绘制可配置的实色边框，宽度为 1-8 个逻辑像素。
+unsafe fn draw_border(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    cw: i32,
+    ch: i32,
+    border_width: i32,
+    color: COLORREF,
+) {
+    for inset in 0..border_width {
         let rc = RECT {
             left: inset,
             top: inset,
@@ -1121,6 +1235,7 @@ pub fn context_menu_action(id: u32, action: &str) -> Result<(), String> {
         "duplicate-mirror" => CMD_DUPLICATE_MIRROR,
         "duplicate-horizontal-mirror" => CMD_DUPLICATE_HORIZONTAL_MIRROR,
         "duplicate-vertical-mirror" => CMD_DUPLICATE_VERTICAL_MIRROR,
+        "ocr" => CMD_OCR,
         _ => return Err("未知的贴图菜单操作".into()),
     };
     let hwnd_isize = pins_locked(|m| m.get(&id).map(|p| p.hwnd).unwrap_or(0));
@@ -1141,7 +1256,7 @@ pub fn context_menu_action(id: u32, action: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_pin_rgba, transform_bgra, PinTransform};
+    use super::{parse_colorref, render_pin_rgba, transform_bgra, PinTransform};
 
     /// 2x2 BGRA 像素：红 / 绿 / 蓝 / 白（各 alpha=255）。
     fn sample_bgra() -> Vec<u8> {
@@ -1193,6 +1308,12 @@ mod tests {
     fn mismatched_size_returns_err() {
         let px = sample_bgra(); // 16 字节
         assert!(render_pin_rgba(&px, 3, 2, 1.0, 255).is_err());
+    }
+
+    #[test]
+    fn parse_colorref_converts_rgb_order() {
+        assert_eq!(parse_colorref("#00C8FF").0, 0x00FF_C800);
+        assert_eq!(parse_colorref("invalid").0, 0x00FF_C800);
     }
 
     #[test]

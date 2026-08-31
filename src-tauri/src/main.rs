@@ -57,7 +57,9 @@ mod recording;
 mod screenshot;
 mod scroll_capture;
 mod sound;
+mod todo;
 mod tts;
+mod timer;
 mod updater;
 mod utils;
 
@@ -66,12 +68,132 @@ use tauri::{
     Emitter, Manager,
 };
 
+// Retained for compatibility with older callers; native surfaces now use the
+// bundled app icon below instead of drawing a preference-dependent tray glyph.
+#[allow(dead_code)]
+const TRAY_ICON_CENTER: f32 = 16.0;
+#[allow(dead_code)]
+const TRAY_ICON_SCALE: f32 = 1.25;
+
+#[allow(dead_code)]
+fn tray_coord(value: i32) -> i32 {
+    ((value as f32 - TRAY_ICON_CENTER) * TRAY_ICON_SCALE + TRAY_ICON_CENTER).round() as i32
+}
+
+#[allow(dead_code)]
+fn tray_pixel(raw: &mut [u8], x: i32, y: i32, color: [u8; 4]) {
+    if !(0..32).contains(&x) || !(0..32).contains(&y) {
+        return;
+    }
+    let i = ((y * 32 + x) * 4) as usize;
+    raw[i..i + 4].copy_from_slice(&color);
+}
+
+#[allow(dead_code)]
+fn tray_line(raw: &mut [u8], mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: [u8; 4]) {
+    x0 = tray_coord(x0);
+    y0 = tray_coord(y0);
+    let x1 = tray_coord(x1);
+    let y1 = tray_coord(y1);
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        tray_pixel(raw, x0, y0, color);
+        tray_pixel(raw, x0 + 1, y0, color);
+        tray_pixel(raw, x0, y0 + 1, color);
+        if x0 == x1 && y0 == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x0 += sx; }
+        if e2 <= dx { err += dx; y0 += sy; }
+    }
+}
+
+#[allow(dead_code)]
+fn tray_circle(raw: &mut [u8], cx: i32, cy: i32, r: i32, color: [u8; 4], fill: bool) {
+    let cx = tray_coord(cx);
+    let cy = tray_coord(cy);
+    let r = (r as f32 * TRAY_ICON_SCALE).round() as i32;
+    for y in (cy - r)..=(cy + r) {
+        for x in (cx - r)..=(cx + r) {
+            let d = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            if (fill && d <= r * r) || (!fill && d <= r * r && d >= (r - 2) * (r - 2)) {
+                tray_pixel(raw, x, y, color);
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn tray_accent_color(accent: &str, hover: bool) -> [u8; 4] {
+    let (normal, highlighted) = match accent {
+        "cyan" => ([8, 145, 178], [14, 184, 214]),
+        "teal" => ([10, 127, 117], [16, 164, 150]),
+        "green" => ([22, 145, 88], [34, 181, 115]),
+        "indigo" => ([79, 70, 190], [103, 92, 232]),
+        "violet" => ([123, 88, 189], [151, 114, 220]),
+        _ => ([37, 99, 210], [59, 130, 246]),
+    };
+    let rgb = if hover { highlighted } else { normal };
+    [rgb[0], rgb[1], rgb[2], 255]
+}
+
+#[allow(dead_code)]
+pub(crate) fn tray_orb_image(
+    id: &str,
+    hover: bool,
+    accent: &str,
+) -> tauri::image::Image<'static> {
+    let mut raw = vec![0u8; 32 * 32 * 4];
+    let fg = tray_accent_color(accent, hover);
+    match id {
+        "ufo" => {
+            tray_line(&mut raw, 7, 16, 25, 16, fg);
+            tray_line(&mut raw, 11, 13, 21, 13, fg);
+            tray_line(&mut raw, 13, 13, 14, 10, fg);
+            tray_line(&mut raw, 14, 10, 18, 10, fg);
+            tray_line(&mut raw, 18, 10, 19, 13, fg);
+        }
+        "butterfly" => { tray_line(&mut raw, 16, 13, 16, 24, fg); tray_circle(&mut raw, 11, 12, 4, fg, false); tray_circle(&mut raw, 21, 12, 4, fg, false); tray_circle(&mut raw, 12, 19, 3, fg, false); tray_circle(&mut raw, 20, 19, 3, fg, false); }
+        "balloon" => { tray_circle(&mut raw, 16, 12, 7, fg, false); tray_line(&mut raw, 16, 19, 16, 23, fg); tray_line(&mut raw, 12, 24, 20, 24, fg); }
+        "rocket" => { tray_line(&mut raw, 16, 7, 22, 19, fg); tray_line(&mut raw, 22, 19, 10, 19, fg); tray_line(&mut raw, 10, 19, 16, 7, fg); tray_circle(&mut raw, 16, 13, 2, fg, false); tray_line(&mut raw, 12, 19, 9, 23, fg); tray_line(&mut raw, 20, 19, 23, 23, fg); }
+        "cloud" => { tray_circle(&mut raw, 11, 17, 5, fg, false); tray_circle(&mut raw, 17, 14, 7, fg, false); tray_circle(&mut raw, 22, 18, 4, fg, false); tray_line(&mut raw, 8, 21, 24, 21, fg); }
+        "plane" => { tray_line(&mut raw, 25, 8, 7, 16, fg); tray_line(&mut raw, 7, 16, 14, 18, fg); tray_line(&mut raw, 14, 18, 17, 24, fg); tray_line(&mut raw, 17, 24, 25, 8, fg); tray_line(&mut raw, 14, 18, 20, 13, fg); }
+        "dandelion" => { tray_line(&mut raw, 16, 13, 16, 25, fg); for (x, y) in [(16, 7), (10, 10), (22, 10), (8, 15), (24, 15), (12, 6), (20, 6)] { tray_line(&mut raw, 16, 14, x, y, fg); tray_circle(&mut raw, x, y, 1, fg, true); } }
+        "kite" => { tray_line(&mut raw, 16, 6, 23, 14, fg); tray_line(&mut raw, 23, 14, 16, 22, fg); tray_line(&mut raw, 16, 22, 9, 14, fg); tray_line(&mut raw, 9, 14, 16, 6, fg); tray_line(&mut raw, 16, 6, 16, 22, fg); tray_line(&mut raw, 9, 14, 23, 14, fg); tray_line(&mut raw, 16, 22, 19, 26, fg); }
+        "bubble" => { tray_circle(&mut raw, 16, 15, 8, fg, false); tray_circle(&mut raw, 11, 11, 2, fg, false); tray_circle(&mut raw, 12, 12, 1, fg, true); }
+        "jellyfish" => { tray_circle(&mut raw, 16, 13, 8, fg, false); tray_line(&mut raw, 9, 15, 23, 15, fg); for x in [10, 14, 18, 22] { tray_line(&mut raw, x, 16, x - 1, 24, fg); } }
+        _ => { tray_circle(&mut raw, 16, 16, 8, fg, false); tray_circle(&mut raw, 16, 16, 2, fg, true); }
+    }
+    tauri::image::Image::new_owned(raw, 32, 32)
+}
+
+const APP_ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
+
+/// The native application icon is bundled with the installer. Keep tray and
+/// title-bar surfaces branded consistently, regardless of orb preferences.
+pub(crate) fn app_icon_image() -> tauri::image::Image<'static> {
+    let source = image::load_from_memory(APP_ICON_PNG)
+        .expect("bundled application icon is invalid")
+        .to_rgba8();
+    let resized = image::imageops::resize(
+        &source,
+        32,
+        32,
+        image::imageops::FilterType::Lanczos3,
+    );
+    tauri::image::Image::new_owned(resized.into_raw(), 32, 32)
+}
+
 fn main() {
     // 初始化 ONNX Runtime DLL 搜索路径（ort load-dynamic 模式，在 OCR 线程前调用）
     init_ort_dylib();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         // 单实例限制：第二个实例启动时直接退出，并激活已有实例
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("orb") {
@@ -117,17 +239,31 @@ fn main() {
 
             // 初始化截图启用标志（热键触发时检查）
             hooks::hotkey::set_screenshot_enabled(startup_config.screenshot_enabled);
-            hooks::hotkey::set_slot_enabled(hooks::hotkey::HotkeySlotId::Sketch, startup_config.sketch_enabled);
+            hooks::hotkey::set_slot_enabled(
+                hooks::hotkey::HotkeySlotId::Sketch,
+                startup_config.sketch_enabled,
+            );
             let startup_sketch_hotkey = startup_config.sketch_hotkey.clone();
             std::thread::spawn(move || {
                 for _ in 0..40 {
                     if startup_sketch_hotkey.is_empty() {
                         break;
                     }
-                    match hooks::hotkey::register_hotkey(hooks::hotkey::HotkeySlotId::Sketch, &startup_sketch_hotkey) {
+                    match hooks::hotkey::register_hotkey(
+                        hooks::hotkey::HotkeySlotId::Sketch,
+                        &startup_sketch_hotkey,
+                    ) {
                         Ok(_) => break,
-                        Err(error) if error == "热键线程未就绪" => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(error) => { crate::utils::logger::log("hotkey", &format!("草稿快捷键注册失败: {}", error)); break; }
+                        Err(error) if error == "热键线程未就绪" => {
+                            std::thread::sleep(std::time::Duration::from_millis(50))
+                        }
+                        Err(error) => {
+                            crate::utils::logger::log(
+                                "hotkey",
+                                &format!("草稿快捷键注册失败: {}", error),
+                            );
+                            break;
+                        }
                     }
                 }
             });
@@ -139,6 +275,33 @@ fn main() {
                 hooks::hotkey::HotkeySlotId::Recording,
                 startup_config.recording_enabled,
             );
+            hooks::hotkey::set_slot_enabled(
+                hooks::hotkey::HotkeySlotId::TodoQuickAdd,
+                startup_config.todo_enabled,
+            );
+            let startup_todo_quick_add_hotkey = startup_config.todo_quick_add_hotkey.clone();
+            if startup_config.todo_enabled && !startup_todo_quick_add_hotkey.is_empty() {
+                std::thread::spawn(move || {
+                    for _ in 0..40 {
+                        match hooks::hotkey::register_hotkey(
+                            hooks::hotkey::HotkeySlotId::TodoQuickAdd,
+                            &startup_todo_quick_add_hotkey,
+                        ) {
+                            Ok(_) => return,
+                            Err(error) if error == "热键线程未就绪" => {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                            Err(error) => {
+                                crate::utils::logger::log(
+                                    "hotkey",
+                                    &format!("待办快速添加快捷键注册失败: {}", error),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
 
             // 初始化快速输入转盘触发键（启用且键有效时设置 vk_code）
             {
@@ -201,13 +364,6 @@ fn main() {
                 }
             }
 
-            // 应用 OCR 引擎偏好：写入 ocr 模块全局变量，OCR 服务懒加载初始化时
-            // 会读取该偏好（见 ocr::ensure_ocr_service）。未设置时 EngineId::from_str 返回 None，
-            // 服务按默认策略自动选择（Windows 平台优先 Windows OCR）。
-            crate::ocr::set_preferred_engine(crate::ocr::EngineId::from_str(
-                &startup_config.ocr_engine,
-            ));
-
             // 初始化钩子管理器
             let hook_manager = hooks::HookManager::new();
             app.manage(hook_manager);
@@ -218,6 +374,10 @@ fn main() {
 
             // 初始化 TTS 朗读状态（持有当前播放的 MediaPlayer）
             app.manage(tts::TtsState::default());
+
+            // Todo data is independent from config.json and survives all overlay windows.
+            app.manage(todo::TodoStore::new());
+            todo::start_scheduler(app.handle().clone());
 
             // 初始化系统监控状态（采集线程随监控窗口开关启停，此处仅注册 state）
             app.manage(monitor::MonitorState::default());
@@ -239,6 +399,9 @@ fn main() {
             };
             app.manage(pomodoro_state);
 
+            app.manage(timer::TimerState::new());
+            timer::start_scheduler(app.handle().clone());
+
             // 初始化录屏状态（录制线程随录制开关启停，此处仅注册 state）
             app.manage(recording::RecordingState::default());
 
@@ -253,37 +416,9 @@ fn main() {
             // settings 和 palette 窗口的关闭拦截已移至 show_settings/show_palette 命令中
             // （延迟创建窗口时，在首次 show 时注册关闭拦截）
 
-            // 创建系统托盘图标
-            // 运行时从 icons/icon.png 读取，避免依赖编译时嵌入的旧图标
-            let tray_icon = {
-                let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("icons")
-                    .join("icon.png");
-                match image::open(&icon_path) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        let w = rgba.width();
-                        let h = rgba.height();
-                        tauri::image::Image::new_owned(rgba.into_raw(), w, h)
-                    }
-                    Err(e) => {
-                        crate::utils::logger::log(
-                            "tray",
-                            &format!(
-                                "无法加载图标文件 {}: {e}，回退到默认图标",
-                                icon_path.display()
-                            ),
-                        );
-                        app.default_window_icon()
-                            .expect(
-                                "未找到默认图标，请检查 src-tauri/icons/ 目录下是否存在图标文件",
-                            )
-                            .to_owned()
-                    }
-                }
-            };
-            let _tray = TrayIconBuilder::new()
-                .icon(tray_icon)
+            let tray_icon = app_icon_image();
+            let _tray = TrayIconBuilder::with_id("main-tray")
+                .icon(tray_icon.clone())
                 .tooltip("Levitaire")
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
@@ -314,7 +449,11 @@ fn main() {
                         _ => {}
                     }
                 })
-                .on_tray_icon_event(|tray, event| {
+                .on_tray_icon_event(move |tray, event| {
+                    match &event {
+                        TrayIconEvent::Enter { .. } | TrayIconEvent::Leave { .. } => return,
+                        _ => {}
+                    }
                     if let TrayIconEvent::Click {
                         button: MouseButton::Right,
                         button_state: tauri::tray::MouseButtonState::Up,
@@ -434,6 +573,11 @@ fn main() {
                 let inner = orb.inner_size().unwrap_or_default();
                 let win_w = inner.width as i32;
                 let win_h = inner.height as i32;
+                let scale = orb.scale_factor().unwrap_or(1.0);
+                let visual_size = 56.0 * scale;
+                // Legacy orb: 42px in a 64px window (11px margin); new orb: 56px in 96px (20px margin).
+                // The 9px difference keeps the old visual anchor stable during migration.
+                let position_offset = (9.0 * scale).round() as i32;
                 let saved = app
                     .state::<config::ConfigManager>()
                     .get_window_position("orb")
@@ -441,10 +585,22 @@ fn main() {
                     .flatten();
                 if let Some(pos) = saved {
                     // 裁剪到显示器工作区，防止分辨率/显示器布局变化后 orb 跑到屏幕外
-                    let (x, y) = commands::clamp_position_to_workarea(pos.x, pos.y, win_w, win_h);
+                    let (x, y) = commands::clamp_position_to_workarea(
+                        pos.x - position_offset,
+                        pos.y - position_offset,
+                        win_w,
+                        win_h,
+                    );
                     let _ = orb.set_position(tauri::Position::Physical(
                         tauri::PhysicalPosition::new(x, y),
                     ));
+                    // Normalize legacy/window coordinates to the visual-anchor format used by the frontend.
+                    let _ = app
+                        .state::<config::ConfigManager>()
+                        .set_window_position("orb", config::WindowPosition {
+                            x: x + position_offset,
+                            y: y + position_offset,
+                        });
                 } else {
                     let margin = 20.0f64;
                     // 取主屏工作区（已排除任务栏），避免浮球被任务栏遮挡
@@ -467,8 +623,8 @@ fn main() {
                             .is_ok()
                         };
                         if ok {
-                            let x = rc.right as f64 - win_w as f64 - margin;
-                            let y = rc.bottom as f64 - win_h as f64 - margin;
+                            let x = rc.right as f64 - (win_w as f64 + visual_size) / 2.0 - margin;
+                            let y = rc.bottom as f64 - (win_h as f64 + visual_size) / 2.0 - margin;
                             let _ = orb.set_position(tauri::Position::Physical(
                                 tauri::PhysicalPosition::new(x as i32, y as i32),
                             ));
@@ -506,6 +662,7 @@ fn main() {
             commands::consume_screenshot_start_pending,
             commands::cancel_screenshot,
             commands::get_virtual_desktop_bounds,
+            commands::get_screenshot_monitor_bounds,
             commands::get_screen_cache_png,
             commands::capture_region,
             commands::start_long_capture,
@@ -522,6 +679,7 @@ fn main() {
             commands::close_pin,
             commands::pin_context_menu_action,
             commands::show_settings,
+            commands::show_tool_config,
             commands::exit_app,
             commands::call_ai,
             commands::call_ai_stream,
@@ -533,6 +691,7 @@ fn main() {
             commands::update_ai_config,
             commands::get_theme_preferences,
             commands::set_theme_preferences,
+            commands::set_orb_icon,
             commands::replace_selection,
             commands::get_auto_start,
             commands::set_auto_start,
@@ -541,6 +700,7 @@ fn main() {
             commands::set_qrcode_preview,
             commands::get_screenshot_hotkey,
             commands::set_screenshot_hotkey,
+            commands::check_hotkey_conflicts,
             commands::get_sketch_hotkey,
             commands::set_sketch_hotkey,
             commands::set_screenshot_enabled,
@@ -580,6 +740,7 @@ fn main() {
             commands::hide_pomodoro_window,
             commands::get_pomodoro_state,
             commands::start_pomodoro,
+            commands::start_pomodoro_for_todo,
             commands::pause_pomodoro,
             commands::reset_pomodoro,
             commands::skip_pomodoro,
@@ -587,6 +748,52 @@ fn main() {
             commands::set_pomodoro_enabled,
             commands::get_pomodoro_config,
             commands::set_pomodoro_config,
+            commands::show_timer_window,
+            commands::hide_timer_window,
+            commands::get_timer_enabled,
+            commands::set_timer_enabled,
+            commands::get_timer_reminders_enabled,
+            commands::set_timer_reminders_enabled,
+            commands::get_timer_reminder_sound,
+            commands::set_timer_reminder_sound,
+            commands::get_timer_lunar_enabled,
+            commands::set_timer_lunar_enabled,
+            commands::get_timers,
+            commands::create_timer,
+            commands::delete_timer,
+            commands::set_timer_duration,
+            commands::rename_timer,
+            commands::add_timer_lap,
+            commands::start_timer,
+            commands::pause_timer,
+            commands::reset_timer,
+            commands::add_timer_seconds,
+            commands::get_todos,
+            commands::get_deleted_todos,
+            commands::purge_deleted_todos,
+            commands::export_todos,
+            commands::import_todos,
+            commands::reorder_todos,
+            commands::get_todo_lists,
+            commands::create_todo_list,
+            commands::update_todo_list,
+            commands::delete_todo_list,
+            commands::create_todo,
+            commands::update_todo,
+            commands::set_todo_completed,
+            commands::snooze_todo,
+            commands::delete_todo,
+            commands::restore_todo,
+            commands::get_todo_enabled,
+            commands::get_todo_quick_add_hotkey,
+            commands::set_todo_quick_add_hotkey,
+            commands::get_todo_reminders_enabled,
+            commands::set_todo_reminders_enabled,
+            commands::get_todo_reminder_sound,
+            commands::set_todo_reminder_sound,
+            commands::set_todo_enabled,
+            commands::show_todo_window,
+            commands::hide_todo_window,
             commands::get_ocr_engines,
             commands::set_ocr_engine,
             commands::start_recording_select,
@@ -615,6 +822,10 @@ fn main() {
             commands::set_recording_save_path,
             commands::get_screenshot_save_path,
             commands::set_screenshot_save_path,
+            commands::get_pin_border_color,
+            commands::set_pin_border_color,
+            commands::get_pin_border_width,
+            commands::set_pin_border_width,
             commands::pick_folder,
             commands::get_tools_autostart,
             commands::set_tools_autostart,

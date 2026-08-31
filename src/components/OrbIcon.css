@@ -1,0 +1,537 @@
+.orb-character {
+  overflow: visible;
+}
+.orb-character * {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.orb-character .an-t1,
+.orb-character .an-t2,
+.orb-character .an-t3,
+.orb-character .an-t4,
+.orb-character .an-fire,
+.orb-character .an-puff,
+.orb-character .an-kite {
+  transform-origin: bottom center;
+}
+.orb-character .an-bl1,
+.orb-character .an-bl2 {
+  transform-origin: right center;
+}
+.orb-character .an-br1,
+.orb-character .an-br2 {
+  transform-origin: left center;
+}
+.orb-character .an-jelly {
+  animation: orb-float 3.6s ease-in-out infinite;
+}
+.orb-character .an-dome {
+  animation: orb-dome 3.2s ease-in-out infinite;
+}
+.orb-character .an-t1 {
+  animation: orb-sway 3.2s ease-in-out infinite;
+}
+.orb-character .an-t2 {
+  animation: orb-sway 3.2s 0.2s ease-in-out infinite;
+}
+.orb-character .an-t3 {
+  animation: orb-sway 3.2s 0.4s ease-in-out infinite;
+}
+.orb-character .an-t4 {
+  animation: orb-sway 3.2s 0.6s ease-in-out infinite;
+}
+.orb-character .an-ufo {
+  animation: orb-float 3.4s ease-in-out infinite;
+}
+.orb-character .an-balloon {
+  animation: orb-float 3.8s ease-in-out infinite;
+}
+.orb-character .an-rocket {
+  animation: orb-float 3.6s ease-in-out infinite;
+}
+.orb-character .an-cloud {
+  animation: orb-float 4s ease-in-out infinite;
+}
+.orb-character .an-plane {
+  animation: orb-float 3.4s ease-in-out infinite;
+}
+.orb-character .an-bubf {
+  animation: orb-float 3.8s ease-in-out infinite;
+}
+.orb-character .an-puff {
+  animation: orb-sway 3.4s ease-in-out infinite;
+}
+.orb-character .an-bl1,
+.orb-character .an-br1,
+.orb-character .an-bl2,
+.orb-character .an-br2 {
+  animation: orb-wing 2.6s ease-in-out infinite;
+}
+.orb-character .an-fire {
+  animation: orb-fire 0.85s ease-in-out infinite;
+}
+.orb-character .an-beam {
+  animation: orb-beam 3.4s ease-in-out infinite;
+}
+.orb-character .an-hide {
+  opacity: 0;
+}
+.orb-character .an-lt1 {
+  animation: orb-blink 2.6s infinite;
+}
+.orb-character .an-lt2 {
+  animation: orb-blink 2.6s 0.85s infinite;
+}
+.orb-character .an-lt3 {
+  animation: orb-blink 2.6s 1.7s infinite;
+}
+.orb-character .an-kite {
+  animation: orb-kite 4s ease-in-out infinite;
+}
+.orb-character .an-tl1,
+.orb-character .an-tl2 {
+  animation: orb-tail 3.8s ease-in-out infinite;
+}
+.orb-character .an-bub {
+  animation: orb-bubble 3.4s ease-in-out infinite;
+}
+.orb-character .an-s1,
+.orb-character .an-s2,
+.orb-character .an-s3,
+.orb-character .an-s4,
+.orb-character .an-s5,
+.orb-character .an-sb1,
+.orb-character .an-sb2,
+.orb-character .an-sb3 {
+  opacity: 0;
+}
+
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-jelly {
+  animation: orb-float-hover 2.2s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-dome {
+  animation: orb-dome-hover 1.7s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-t1,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-t2,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-t3,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-t4 {
+  animation: orb-sway-hover 1.7s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-bl1,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-br1,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-bl2,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-br2 {
+  animation: orb-wing-hover 0.62s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-fire {
+  animation: orb-fire-hover 0.42s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-beam {
+  animation: orb-beam-hover 1.9s ease-in-out infinite;
+}
+.orb-character .an-r1,
+.orb-character .an-r2,
+.orb-character .an-r3,
+.orb-character .an-tr1,
+.orb-character .an-tr2,
+.orb-character .an-s1,
+.orb-character .an-s2,
+.orb-character .an-s3,
+.orb-character .an-s4,
+.orb-character .an-s5,
+.orb-character .an-sb1,
+.orb-character .an-sb2,
+.orb-character .an-sb3 {
+  animation: none;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-r1 {
+  animation: orb-drop 1.1s infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-r2 {
+  animation: orb-drop 1.1s 0.3s infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-r3 {
+  animation: orb-drop 1.1s 0.6s infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-tr1 {
+  animation: orb-trail 1.6s infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-tr2 {
+  animation: orb-trail 1.6s 0.5s infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-s1 {
+  animation: orb-seed 2.8s 0.3s ease-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-s2 {
+  animation: orb-seed-left 2.8s 0.9s ease-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-s3 {
+  animation: orb-seed-right 2.8s 1.5s ease-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-s4 {
+  animation: orb-seed-left-up 2.8s 2s ease-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-s5 {
+  animation: orb-seed-right-up 2.8s 2.4s ease-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-sb1 {
+  animation: orb-rise 1.8s 0.2s ease-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-sb2 {
+  animation: orb-rise 1.8s 0.8s ease-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-sb3 {
+  animation: orb-rise 1.8s 1.3s ease-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-kite {
+  animation: orb-kite-hover 2.6s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-puff {
+  animation: orb-sway-hover 2.8s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-tl1 {
+  animation: orb-tail-hover 1.5s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-tl2 {
+  animation: orb-tail-hover 1.5s 0.25s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-bub {
+  animation: orb-bubble-hover 1.5s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-bubf {
+  animation: orb-float-hover 2.4s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-ufo {
+  animation: orb-float-hover 1.9s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-balloon {
+  animation: orb-float-hover 2.6s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-rocket {
+  animation: orb-float-hover 1.2s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-cloud {
+  animation: orb-float-hover 3s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-plane {
+  animation: orb-float-hover 2.4s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-lt1 {
+  animation: orb-blink-hover 1.1s infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-lt2 {
+  animation: orb-blink-hover 1.1s 0.35s infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-lt3 {
+  animation: orb-blink-hover 1.1s 0.7s infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-beam {
+  animation: orb-beam-hover 1.9s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-fire {
+  animation: orb-fire-hover 0.42s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-jelly {
+  animation: orb-float-hover 2.2s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-dome {
+  animation: orb-dome-hover 1.7s ease-in-out infinite;
+}
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-t1,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-t2,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-t3,
+:is(.orb-container, .settings-orb-option):hover .orb-character .an-t4 {
+  animation: orb-sway-hover 1.7s ease-in-out infinite;
+}
+
+@keyframes orb-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2.7px);
+  }
+}
+@keyframes orb-float-hover {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3.6px);
+  }
+}
+@keyframes orb-dome {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.06, 0.92);
+  }
+}
+@keyframes orb-dome-hover {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.12, 0.82);
+  }
+}
+@keyframes orb-sway {
+  0%,
+  100% {
+    transform: rotate(-6.5deg);
+  }
+  50% {
+    transform: rotate(6.5deg);
+  }
+}
+@keyframes orb-sway-hover {
+  0%,
+  100% {
+    transform: rotate(-12deg);
+  }
+  50% {
+    transform: rotate(12deg);
+  }
+}
+@keyframes orb-wing {
+  0%,
+  100% {
+    transform: scaleX(1);
+  }
+  50% {
+    transform: scaleX(0.58);
+  }
+}
+@keyframes orb-wing-hover {
+  0%,
+  100% {
+    transform: scaleX(1);
+  }
+  50% {
+    transform: scaleX(0.18);
+  }
+}
+@keyframes orb-fire {
+  0%,
+  100% {
+    transform: scaleY(1);
+    opacity: 0.6;
+  }
+  50% {
+    transform: scaleY(0.6);
+    opacity: 0.26;
+  }
+}
+@keyframes orb-fire-hover {
+  0%,
+  100% {
+    transform: scaleY(1);
+    opacity: 0.95;
+  }
+  50% {
+    transform: scaleY(0.38);
+    opacity: 0.4;
+  }
+}
+@keyframes orb-blink {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+@keyframes orb-blink-hover {
+  0%,
+  100% {
+    opacity: 0.12;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes orb-beam {
+  0%,
+  100% {
+    opacity: 0.06;
+  }
+  50% {
+    opacity: 0.22;
+  }
+}
+@keyframes orb-beam-hover {
+  0%,
+  100% {
+    opacity: 0.08;
+  }
+  50% {
+    opacity: 0.48;
+  }
+}
+@keyframes orb-tail {
+  0%,
+  100% {
+    opacity: 0.16;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+@keyframes orb-tail-hover {
+  0%,
+  100% {
+    transform: translateX(-2.6px);
+  }
+  50% {
+    transform: translateX(2.6px);
+  }
+}
+@keyframes orb-bubble {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.035, 0.972);
+  }
+}
+@keyframes orb-bubble-hover {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.09, 0.925);
+  }
+}
+@keyframes orb-kite {
+  0%,
+  100% {
+    transform: rotate(-3deg);
+  }
+  50% {
+    transform: rotate(3deg);
+  }
+}
+@keyframes orb-kite-hover {
+  0%,
+  100% {
+    transform: rotate(-9.5deg);
+  }
+  50% {
+    transform: rotate(9.5deg);
+  }
+}
+@keyframes orb-seed {
+  0%,
+  52% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(1px, -6.5px);
+    opacity: 0;
+  }
+}
+@keyframes orb-seed-left {
+  0%,
+  52% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-6px, -3px);
+    opacity: 0;
+  }
+}
+@keyframes orb-seed-right {
+  0%,
+  52% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(6px, -3px);
+    opacity: 0;
+  }
+}
+@keyframes orb-seed-left-up {
+  0%,
+  52% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-2.6px, -6px);
+    opacity: 0;
+  }
+}
+@keyframes orb-seed-right-up {
+  0%,
+  52% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(2.6px, -6px);
+    opacity: 0;
+  }
+}
+@keyframes orb-drop {
+  0% {
+    transform: translateY(-1.5px);
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translateY(3.8px);
+    opacity: 0;
+  }
+}
+@keyframes orb-trail {
+  0% {
+    opacity: 0;
+    transform: translateX(3.5px);
+  }
+  45% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-3.5px);
+  }
+}
+@keyframes orb-rise {
+  0% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  100% {
+    transform: translateY(-6.5px);
+    opacity: 0;
+  }
+}
+@keyframes orb-twinkle {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  45%,
+  55% {
+    opacity: 0.8;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .orb-character * {
+    animation: none !important;
+  }
+}

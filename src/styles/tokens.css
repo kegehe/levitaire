@@ -218,35 +218,26 @@
   --button-danger-hover-bg: var(--color-danger-subtle);
   --button-danger-active-bg: var(--red-100);
 
-  /* Orb — 玻璃拟态：背景半透明以让 backdrop-filter 生效；发光用 brand 主色而非 subtle */
-  /* 渐变首段用 color-mix 跟随 accent（不支持 color-mix 时回退到 --orb-bg-fallback 的固定值） */
-  --orb-bg: linear-gradient(
-    135deg,
-    color-mix(in oklab, var(--color-brand) 14%, transparent) 0%,
-    var(--color-bg-elevated) 100%
-  );
-  --orb-bg-fallback: linear-gradient(
-    135deg,
-    var(--color-brand-subtle) 0%,
-    var(--color-bg-elevated) 100%
-  );
-  --orb-border: 1px solid var(--color-brand);
-  --orb-backdrop: blur(10px) saturate(180%);
-  --orb-size: 42px;
-  --orb-icon-color: var(--color-brand);
+  /* Orb: neutral glass body; the selected accent only tints a restrained outer glow. */
+  --orb-bg: rgb(244 248 250 / 0.74);
+  --orb-bg-fallback: rgb(244 248 250);
+  --orb-border: 1px solid rgb(105 122 141 / 0.28);
+  --orb-backdrop: blur(22px) saturate(160%);
+  --orb-size: 56px;
+  --orb-icon-color: var(--color-fg);
+  --orb-glow-neutral: rgb(92 111 129 / 0.2);
+  --orb-glow-neutral-hover: rgb(76 98 119 / 0.27);
+  --orb-glow-accent: color-mix(in srgb, var(--color-brand) 13%, transparent);
+  --orb-glow-accent-hover: color-mix(in srgb, var(--color-brand) 24%, transparent);
   --orb-shadow:
-    inset 0 1px 1px oklch(1 0 0 / 0.25), 0 1px 3px oklch(0.2 0 0 / 0.1),
-    0 2px 8px oklch(0.2 0 0 / 0.08), 0 0 9px var(--color-brand);
+    0 0 12px var(--orb-glow-neutral),
+    0 0 14px var(--orb-glow-accent),
+    0 5px 14px oklch(0.2 0 0 / 0.14);
   --orb-shadow-hover:
-    inset 0 1px 1px oklch(1 0 0 / 0.3), 0 2px 6px oklch(0.2 0 0 / 0.12),
-    0 2px 7px oklch(0.2 0 0 / 0.1), 0 0 9px var(--color-brand);
+    0 0 14px var(--orb-glow-neutral-hover),
+    0 0 17px var(--orb-glow-accent-hover),
+    0 6px 16px oklch(0.2 0 0 / 0.18);
   --orb-shadow-active: inset 0 1px 2px oklch(0.2 0 0 / 0.1), 0 1px 3px oklch(0.2 0 0 / 0.08);
-  --orb-shadow-breathe-start:
-    inset 0 1px 1px oklch(1 0 0 / 0.25), 0 1px 3px oklch(0.2 0 0 / 0.1),
-    0 2px 8px oklch(0.2 0 0 / 0.08), 0 0 9px var(--color-brand);
-  --orb-shadow-breathe-end:
-    inset 0 1px 1px oklch(1 0 0 / 0.25), 0 1px 3px oklch(0.2 0 0 / 0.1),
-    0 2px 8px oklch(0.2 0 0 / 0.08), 0 0 9px var(--color-brand);
 
   /* Preview */
   --preview-text-color: var(--color-fg);
@@ -363,32 +354,25 @@
   --button-danger-hover-bg: var(--red-950);
   --button-danger-active-bg: var(--red-900);
 
-  --orb-bg: linear-gradient(
-    135deg,
-    color-mix(in oklab, var(--color-brand) 10%, transparent) 0%,
-    var(--color-bg-elevated) 100%
-  );
-  --orb-bg-fallback: linear-gradient(
-    135deg,
-    var(--color-brand-subtle) 0%,
-    var(--color-bg-elevated) 100%
-  );
-  --orb-border: 1px solid var(--color-brand);
-  --orb-backdrop: blur(10px) saturate(180%);
-  --orb-icon-color: var(--color-brand);
+  /* The darker base preserves the light glyph over a white desktop. */
+  --orb-bg: rgb(22 28 37 / 0.78);
+  --orb-bg-fallback: rgb(22 28 37);
+  --orb-border: 1px solid rgb(255 255 255 / 0.16);
+  --orb-backdrop: blur(24px) saturate(160%);
+  --orb-icon-color: var(--color-fg);
+  --orb-glow-neutral: rgb(139 158 179 / 0.18);
+  --orb-glow-neutral-hover: rgb(160 180 201 / 0.25);
+  --orb-glow-accent: color-mix(in srgb, var(--color-brand) 15%, transparent);
+  --orb-glow-accent-hover: color-mix(in srgb, var(--color-brand) 27%, transparent);
   --orb-shadow:
-    inset 0 1px 1px oklch(1 0 0 / 0.06), 0 1px 3px oklch(0 0 0 / 0.25),
-    0 2px 8px oklch(0 0 0 / 0.35), 0 0 9px var(--color-brand);
+    0 0 12px var(--orb-glow-neutral), 0 0 14px var(--orb-glow-accent),
+    0 5px 14px oklch(0 0 0 / 0.38),
+    inset 0 1px 0 rgb(255 255 255 / 0.1);
   --orb-shadow-hover:
-    inset 0 1px 1px oklch(1 0 0 / 0.08), 0 2px 6px oklch(0 0 0 / 0.3),
-    0 2px 7px oklch(0 0 0 / 0.4), 0 0 9px var(--color-brand);
+    0 0 14px var(--orb-glow-neutral-hover),
+    0 0 17px var(--orb-glow-accent-hover),
+    0 6px 16px oklch(0 0 0 / 0.44), inset 0 1px 0 rgb(255 255 255 / 0.12);
   --orb-shadow-active: inset 0 1px 2px oklch(0 0 0 / 0.2), 0 1px 3px oklch(0 0 0 / 0.25);
-  --orb-shadow-breathe-start:
-    inset 0 1px 1px oklch(1 0 0 / 0.06), 0 1px 3px oklch(0 0 0 / 0.25),
-    0 2px 8px oklch(0 0 0 / 0.35), 0 0 9px var(--color-brand);
-  --orb-shadow-breathe-end:
-    inset 0 1px 1px oklch(1 0 0 / 0.06), 0 1px 3px oklch(0 0 0 / 0.25),
-    0 2px 8px oklch(0 0 0 / 0.35), 0 0 9px var(--color-brand);
 
   --palette-bg: oklch(0.17 0 0);
   --palette-bg-fallback: oklch(0.17 0 0);

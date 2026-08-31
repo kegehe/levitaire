@@ -127,6 +127,7 @@ describe("ScreenshotTool 标注流程", () => {
     expect(screen.getByRole("button", { name: "矩形" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "箭头" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "马赛克" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "钉到桌面" })).toBeTruthy();
   });
 
   it("标注态失焦会退出（清除工具栏），save/pin 夺焦期间不退出", async () => {

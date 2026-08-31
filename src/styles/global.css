@@ -110,3 +110,15 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-scrollbar-hover);
 }
+
+/* Keep motion optional for users who request reduced animation. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}

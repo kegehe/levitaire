@@ -1,3 +1,5 @@
+use image::GenericImageView;
+use std::io::Cursor;
 use windows::Win32::Foundation::{GlobalFree, HANDLE};
 use windows::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
 use windows::Win32::System::DataExchange::{
@@ -7,6 +9,8 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
+const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
+const MAX_IMAGE_PIXELS: u64 = 25_000_000;
 
 pub struct ClipboardManager;
 
@@ -27,7 +31,14 @@ impl ClipboardManager {
 
     /// 将 PNG 字节解码后以 CF_DIB 格式写入剪贴板
     pub fn copy_image(&self, png_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        if png_bytes.len() > MAX_MEDIA_BYTES {
+            return Err("图片数据过大".into());
+        }
         let dyn_img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)?;
+        let (width, height) = dyn_img.dimensions();
+        if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+            return Err("图片像素数量过大".into());
+        }
         let (dib_data, width, height) = build_dib_data(&dyn_img)?;
         unsafe {
             OpenClipboard(None)?;
@@ -83,6 +94,10 @@ impl ClipboardManager {
     /// - 注册的 "GIF" 格式：写入完整动图数据，保留动画（核心格式，供支持 GIF 粘贴的应用使用）
     /// - CF_DIB 位图格式：首帧静态图，作为可选兼容回退，保证不支持 GIF 格式的应用也能粘贴出静态图
     pub fn copy_gif(&self, gif_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        if gif_bytes.len() > MAX_MEDIA_BYTES {
+            return Err("GIF 数据过大".into());
+        }
+        validate_gif_dimensions(gif_bytes)?;
         unsafe {
             OpenClipboard(None)?;
             let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -265,6 +280,19 @@ unsafe fn try_write_dib_fallback(gif_bytes: &[u8]) {
     }
 }
 
+fn validate_gif_dimensions(gif_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let reader = image::ImageReader::new(Cursor::new(gif_bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("GIF 格式无效: {}", e))?;
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|e| format!("读取 GIF 尺寸失败: {}", e))?;
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err("GIF 像素数量过大".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,7 +321,7 @@ mod tests {
             image::RgbaImage::from_pixel(3, 2, image::Rgba([255, 0, 0, 255])),
             0,
             0,
-            delay.clone(),
+            delay,
         );
         let frame2 = image::Frame::from_parts(
             image::RgbaImage::from_pixel(3, 2, image::Rgba([0, 255, 0, 255])),

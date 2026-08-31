@@ -2,7 +2,7 @@ import { lazy, Suspense, useState, useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { ensureSketchWindow } from "./utils/toolWindows";
+import { ensureSketchWindow, ensureTodoWindow } from "./utils/toolWindows";
 import RecordingControls from "./tools/recording/RecordingControls";
 import LongCaptureControls from "./tools/screenshot/LongCaptureControls";
 import LongCaptureFrame from "./tools/screenshot/LongCaptureFrame";
@@ -15,10 +15,13 @@ const ScreenshotTool = lazy(() => import("./tools/screenshot/ScreenshotTool"));
 const RecordingTool = lazy(() => import("./tools/recording/RecordingTool"));
 const SystemMonitor = lazy(() => import("./tools/system-monitor/SystemMonitor"));
 const PomodoroTool = lazy(() => import("./tools/pomodoro/PomodoroTool"));
+const TimerTool = lazy(() => import("./tools/timer/TimerTool"));
+const TodoTool = lazy(() => import("./tools/todo/TodoTool"));
 const QuickInputTool = lazy(() => import("./tools/quick-input/QuickInputTool"));
 const Settings = lazy(() => import("./components/Settings"));
 const UpdatePrompt = lazy(() => import("./components/UpdatePrompt"));
 const ContextMenu = lazy(() => import("./components/ContextMenu"));
+const PinOcrResult = lazy(() => import("./tools/screenshot/PinOcrResult"));
 const SketchTool = lazy(() => import("./tools/sketch/SketchTool"));
 
 /** screenshot-overlay 窗口的模式切换器 */
@@ -83,7 +86,16 @@ function App() {
         console.error("Failed to open sketch window", error);
       }
     });
-    return () => { un.then((fn) => fn()); };
+    const todoQuickAdd = listen("ensure-todo-window-for-quick-add", async () => {
+      try {
+        await ensureTodoWindow();
+        await invoke("show_todo_window");
+        await emit("todo-focus-add");
+      } catch (error) {
+        console.error("Failed to open todo quick add", error);
+      }
+    });
+    return () => { un.then((fn) => fn()); todoQuickAdd.then((fn) => fn()); };
   }, [windowLabel]);
 
   // 非 main 窗口（overlay、controls 等）始终透明背景，
@@ -93,7 +105,8 @@ function App() {
       windowLabel !== "toolbar" &&
       windowLabel !== "orb" &&
       windowLabel !== "palette" &&
-      windowLabel !== "settings"
+      windowLabel !== "settings" &&
+      windowLabel !== "tool-config"
     ) {
       document.documentElement.style.background = "transparent";
       document.body.style.background = "transparent";
@@ -121,12 +134,20 @@ function App() {
     content = <SystemMonitor />;
   } else if (windowLabel === "pomodoro-overlay") {
     content = <PomodoroTool />;
+  } else if (windowLabel === "time-overlay") {
+    content = <TimerTool />;
+  } else if (windowLabel === "todo-overlay") {
+    content = <TodoTool />;
   } else if (windowLabel === "quick-input-overlay") {
     content = <QuickInputTool />;
   } else if (windowLabel === "update-prompt") {
     content = <UpdatePrompt />;
   } else if (windowLabel === "context-menu") {
     content = <ContextMenu />;
+  } else if (windowLabel === "settings" || windowLabel === "tool-config") {
+    content = <Settings />;
+  } else if (windowLabel === "pin-ocr") {
+    content = <PinOcrResult />;
   } else if (windowLabel === "sketch-overlay") {
     content = <SketchTool />;
   } else {

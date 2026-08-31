@@ -35,6 +35,16 @@ export interface FloatingTool {
  */
 export const FLOATING_TOOLS: FloatingTool[] = [
   {
+    id: "todo",
+    name: "待办清单",
+    icon: "ListTodo",
+    description: "快速添加任务、设置截止时间和提醒，随时查看完成进度",
+    category: "system",
+    defaultEnabled: false,
+    loader: () => import("./todo/TodoTool"),
+    activation: "immediate",
+  },
+  {
     id: "sketch",
     name: "屏幕草稿",
     icon: "Pencil",
@@ -85,6 +95,16 @@ export const FLOATING_TOOLS: FloatingTool[] = [
     activation: "immediate",
   },
   {
+    id: "timer",
+    name: "时钟与倒计时",
+    icon: "Timer",
+    description: "桌面时钟与普通倒计时，支持数字和圆环悬浮样式",
+    category: "system",
+    defaultEnabled: false,
+    loader: () => import("./timer/TimerTool"),
+    activation: "immediate",
+  },
+  {
     id: "recording",
     name: "GIF/录屏",
     icon: "Video",
@@ -130,6 +150,8 @@ export const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string }> = [
   { id: "screenshot", getter: "get_screenshot_enabled" },
   { id: "system-monitor", getter: "get_system_monitor_enabled" },
   { id: "pomodoro", getter: "get_pomodoro_enabled" },
+  { id: "timer", getter: "get_timer_enabled" },
+  { id: "todo", getter: "get_todo_enabled" },
   { id: "recording", getter: "get_recording_enabled" },
   { id: "quick-input", getter: "get_quick_input_enabled" },
 ];

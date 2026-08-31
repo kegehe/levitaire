@@ -13,6 +13,46 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use tauri::{Emitter, Manager};
 
+const MAX_GIF_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+struct LimitedVecWriter {
+    data: Vec<u8>,
+    limit: usize,
+}
+
+impl LimitedVecWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            limit,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.data
+    }
+}
+
+impl std::io::Write for LimitedVecWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let next_len = self.data.len().checked_add(buf.len()).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::WriteZero, "GIF 输出大小溢出")
+        })?;
+        if next_len > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "GIF 输出超过大小上限",
+            ));
+        }
+        self.data.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 // ─── 录制模式 ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -363,7 +403,7 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
         }
     };
 
-    let fps = state.get_fps().max(5).min(30);
+    let fps = state.get_fps().clamp(5, 30);
     let frame_interval = Duration::from_millis(1000 / fps as u64);
     let max_frames = max_frames_for(fps, state.max_duration_sec.load(Ordering::SeqCst));
 
@@ -374,7 +414,7 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
     } else {
         10
     };
-    let mut gif_buf = std::io::Cursor::new(Vec::new());
+    let mut gif_buf = LimitedVecWriter::new(MAX_GIF_OUTPUT_BYTES);
     let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(&mut gif_buf, encoder_speed);
     encoder
         .set_repeat(image::codecs::gif::Repeat::Infinite)
@@ -387,6 +427,7 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
     let mut last_capture = Instant::now();
     // Hold one frame so its duration can use the actual interval to the next capture.
     let mut pending_frame: Option<(image::RgbaImage, Instant)> = None;
+    let mut encode_failed = false;
 
     crate::utils::logger::log(
         "recording",
@@ -441,6 +482,8 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
 
                         if encoder.encode_frame(frame).is_err() {
                             crate::utils::logger::log("recording", "GIF 编码帧失败");
+                            encode_failed = true;
+                            break;
                         }
                     }
                     pending_frame = Some((img, captured_at));
@@ -466,6 +509,16 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
         }
     }
 
+    if encode_failed {
+        let _ = state.fail_generation(gen);
+        state.finish_encoding();
+        let _ = app.emit(
+            "recording-progress",
+            serde_json::json!({ "type": "error", "message": "GIF 编码失败或输出超过 64 MiB 上限" }),
+        );
+        return;
+    }
+
     if state.cancel_requested() {
         return;
     }
@@ -478,6 +531,13 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
         let frame = image::Frame::from_parts(last_img, 0, 0, delay);
         if encoder.encode_frame(frame).is_err() {
             crate::utils::logger::log("recording", "GIF final frame encoding failed");
+            let _ = state.fail_generation(gen);
+            state.finish_encoding();
+            let _ = app.emit(
+                "recording-progress",
+                serde_json::json!({ "type": "error", "message": "GIF 编码失败或输出超过 64 MiB 上限" }),
+            );
+            return;
         }
     }
 
@@ -581,7 +641,7 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
         }
     };
 
-    let fps = state.get_fps().max(10).min(60);
+    let fps = state.get_fps().clamp(10, 60);
 
     // H.264 yuv420p 要求偶数宽高，奇数时 ffmpeg 会裁剪最右一列/最下一行。
     // 上报前端时使用裁剪后的实际视频尺寸，保证与成片一致。
@@ -840,5 +900,15 @@ mod tests {
         assert!(!state.is_running());
         assert!(!state.is_finishing());
         assert!(!state.fail_generation(0));
+    }
+
+    #[test]
+    fn limited_writer_rejects_output_above_its_cap() {
+        use std::io::Write;
+
+        let mut writer = LimitedVecWriter::new(3);
+        writer.write_all(&[1, 2, 3]).unwrap();
+        assert!(writer.write_all(&[4]).is_err());
+        assert_eq!(writer.into_inner(), vec![1, 2, 3]);
     }
 }

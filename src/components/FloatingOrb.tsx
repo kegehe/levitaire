@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useEffect, useLayoutEffect, useCallback, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
@@ -18,12 +18,44 @@ import {
 import type { ContextMenuRequest } from "./contextMenuTypes";
 import { saveWindowPosition, persistWindowPositionOnMove } from "../utils/windowPosition";
 import { BACKEND_TOOLS } from "../tools/registry";
+import OrbIcon from "./OrbIcon";
+import { getOrbIcon, type OrbIconId } from "../constants/orbAppearance";
 import "./FloatingOrb.css";
 
 function FloatingOrb() {
   const win = getCurrentWebviewWindow();
   const windowPosOnMouseDown = useRef<PhysicalPosition | null>(null);
   const mouseUpTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [orbIcon, setOrbIcon] = useState<OrbIconId>(() => getOrbIcon());
+
+  // Migrate an existing local preference once so the tray icon is correct even
+  // before the settings window is opened again. Subsequent changes are saved
+  // by Settings, avoiding duplicate writes when the event is received here.
+  useEffect(() => {
+    void invoke("set_orb_icon", { icon: getOrbIcon() }).catch((error) => {
+      console.error("同步托盘悬浮球图标失败:", error);
+    });
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<{ id: string }>("levitaire-orb-icon-changed", (event) => {
+      const icon = event.payload?.id as OrbIconId;
+      if (icon) setOrbIcon(icon);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  const [isPaletteOpen, setIsPaletteOpen] = useState(false);
+  useEffect(() => {
+    const unlisten = listen<boolean>("levitaire-palette-visibility", (event) => {
+      setIsPaletteOpen(event.payload === true);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   // 同步设置页选择的主题（orb 是独立窗口，需手动读取 localStorage）
   useLayoutEffect(() => {
@@ -116,7 +148,7 @@ function FloatingOrb() {
       root.style.padding = "0";
       root.style.overflow = "visible";
       root.style.height = "100%";
-      // orb 收敛到 --orb-size 后，用 flex 让其在 64×64 窗口内居中
+      // orb 视觉体居中在带透明留白的 96×96 窗口内，阴影不会被窗口边界截断
       root.style.display = "flex";
       root.style.alignItems = "center";
       root.style.justifyContent = "center";
@@ -183,7 +215,7 @@ function FloatingOrb() {
   }, [win]);
 
   // 右键快捷菜单：与托盘菜单互补，提供高频操作入口（截图、录屏、设置、隐藏浮球、退出）。
-  // orb 窗口仅 64×64，HTML 菜单会超出窗口边界无法完整显示，
+  // orb 窗口仅用于承载悬浮球，右键菜单使用独立原生窗口，
   // 故用 Tauri 原生菜单 popup（浮于窗口之上）。菜单构建一次缓存复用：
   // Promise 缓存保证并发右键共享同一构建，构建失败自动清除缓存以便下次重试。
   /* legacy native-menu builder retained for compatibility with older tests */
@@ -317,29 +349,14 @@ function FloatingOrb() {
 
   return (
     <div
-      className="orb-container"
+      className={`orb-container ${isPaletteOpen ? "is-open" : ""}`}
       onMouseDown={handleMouseDown}
       onContextMenu={handleContextMenu}
       role="button"
       aria-label="Levitaire 悬浮球 — 左键点击、拖拽移动，右键快捷菜单"
     >
       <div className="orb-inner">
-        {/* 原子轨道图标 — 中心圆点 + 3 条椭圆轨道交叉，象征悬浮球为中心、多工具环绕 */}
-        <svg
-          className="orb-icon"
-          width="24"
-          height="24"
-          viewBox="0 0 18 18"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          {/* 中心实心圆点 */}
-          <circle cx="9" cy="9" r="1.5" fill="currentColor" stroke="none" />
-          {/* 3 条椭圆轨道，分别旋转 0° / 60° / 120° */}
-          <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(0 9 9)" />
-          <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(60 9 9)" />
-          <ellipse cx="9" cy="9" rx="7.5" ry="3" transform="rotate(120 9 9)" />
-        </svg>
+        <OrbIcon icon={orbIcon} />
       </div>
     </div>
   );

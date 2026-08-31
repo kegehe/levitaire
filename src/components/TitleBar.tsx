@@ -11,7 +11,13 @@ import "./TitleBar.css";
  * - 最小化/最大化切换/关闭通过 Tauri 窗口命令实现；
  * - 最大化状态监听 tauri://resize 事件，确保还原/最大化按钮图标同步。
  */
-export default function TitleBar({ title = "Levitaire 设置" }: { title?: string }) {
+export default function TitleBar({
+  title = "Levitaire 设置",
+  onCloseRequested,
+}: {
+  title?: string;
+  onCloseRequested?: () => void;
+}) {
   const [maximized, setMaximized] = useState(false);
   const win = useMemo(() => getCurrentWebviewWindow(), []);
 
@@ -38,7 +44,13 @@ export default function TitleBar({ title = "Levitaire 设置" }: { title?: strin
 
   const onMinimize = () => win.minimize().catch(console.error);
   const onToggleMaximize = () => win.toggleMaximize().catch(console.error);
-  const onClose = () => win.close().catch(console.error);
+  const onClose = () => {
+    if (onCloseRequested) {
+      onCloseRequested();
+      return;
+    }
+    win.close().catch(console.error);
+  };
 
   // 通过显式 startDragging() 触发系统拖拽，替代 data-tauri-drag-region 属性判定。
   // 属性判定的正确性依赖 WebView2 对拖拽区的命中检测，在窗口首次展示/布局未就绪、

@@ -5,6 +5,7 @@
   "windows": [
     "toolbar",
     "settings",
+    "tool-config",
     "orb",
     "palette",
     "screenshot-overlay",
@@ -14,8 +15,11 @@
     "long-capture-frame",
     "quick-input-overlay",
     "pomodoro-overlay",
+    "time-overlay",
+    "todo-overlay",
     "update-prompt",
     "context-menu",
+    "pin-ocr",
     "sketch-overlay"
   ],
   "permissions": [
@@ -46,6 +50,7 @@
     "core:event:allow-emit",
     "core:event:allow-emit-to",
     "updater:default",
-    "updater:allow-download-and-install"
+    "updater:allow-download-and-install",
+    "notification:default"
   ]
 }

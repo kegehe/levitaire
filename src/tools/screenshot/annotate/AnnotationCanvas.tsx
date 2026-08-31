@@ -2,12 +2,13 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { Annotation, ToolKind } from "./types";
-import { fontSizeFor, strokeWidthFor } from "./types";
+import { DEFAULT_COLOR, fontSizeFor, strokeWidthFor } from "./types";
 import { normalizeRect, renderAll } from "./render";
 import type { UseAnnotations } from "./useAnnotations";
 
@@ -30,14 +31,64 @@ interface Props {
   onCommit?: () => void;
 }
 
-const TOOL_CURSOR: Record<ToolKind, string> = {
-  rect: "crosshair",
-  arrow: "crosshair",
-  brush: "crosshair",
-  text: "text",
-  number: "pointer",
-  mosaic: "crosshair",
+/**
+ * The annotation canvas covers the captured image, so the native cursor is
+ * very easy to lose against a busy screenshot. Keep a small tool glyph under
+ * a dark outline and a light keyline; the selected colour is the innermost
+ * stroke and therefore remains visible on both light and dark images.
+ */
+const CURSOR_SHAPES: Record<ToolKind, { shape: string; hotspot: [number, number] }> = {
+  rect: {
+    shape:
+      '<path d="M14 3v6M14 19v6M3 14h6M19 14h6"/><rect x="8" y="8" width="12" height="12" rx="1"/>',
+    hotspot: [14, 14],
+  },
+  arrow: {
+    shape: '<path d="M4 24 22 6M14 6h8v8"/>',
+    hotspot: [4, 24],
+  },
+  brush: {
+    shape:
+      '<path d="m4 24 3.2-8.2L18.8 4.2a2.6 2.6 0 0 1 3.7 3.7L10.7 19.8 4 24Z"/><path d="m13.5 9.5 4.2 4.2"/>',
+    hotspot: [4, 24],
+  },
+  text: {
+    shape: '<path d="M5 5h18M14 5v18M9 23h10"/>',
+    hotspot: [5, 5],
+  },
+  number: {
+    shape: '<circle cx="14" cy="14" r="8"/><path d="m12 11 2-2v10M11 19h6"/>',
+    hotspot: [14, 14],
+  },
+  mosaic: {
+    shape:
+      '<path d="M14 3v6M14 19v6M3 14h6M19 14h6"/><rect x="8" y="8" width="5" height="5"/><rect x="15" y="8" width="5" height="5"/><rect x="8" y="15" width="5" height="5"/><rect x="15" y="15" width="5" height="5"/>',
+    hotspot: [14, 14],
+  },
 };
+
+function cursorColor(color: string): string {
+  // The colour picker emits hex values. Guard the SVG URL in case a persisted
+  // setting from an older version contains an invalid value.
+  return /^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(color) ? color : DEFAULT_COLOR;
+}
+
+export function annotationCursor(tool: ToolKind, color: string): string {
+  const { shape, hotspot } = CURSOR_SHAPES[tool];
+  const accent = cursorColor(color);
+  const svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">',
+    '<g fill="none" stroke="#101216" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">',
+    shape,
+    "</g>",
+    '<g fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">',
+    shape,
+    "</g>",
+    `<g fill="none" stroke="${accent}" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">${shape}</g>`,
+    "</svg>",
+  ].join("");
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${hotspot[0]} ${hotspot[1]}, auto`;
+}
 
 function genId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -70,6 +121,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
   const draftPtsRef = useRef<{ x: number; y: number }[]>([]);
 
   const { committed, draft, setDraft, commit } = annotations;
+  const cursor = useMemo(() => annotationCursor(tool, color), [tool, color]);
 
   // 底图加载
   useEffect(() => {
@@ -384,7 +436,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
           top: selection.top,
           width: selection.width,
           height: selection.height,
-          cursor: TOOL_CURSOR[tool],
+          cursor,
           zIndex: 5,
         }}
         onPointerDown={onPointerDown}

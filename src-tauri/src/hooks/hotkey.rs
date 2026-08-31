@@ -7,7 +7,8 @@
 //! 跨线程调用会报 ERROR_INVALID_WINDOW_HANDLE (0x80070580)。
 //! 因此命令线程通过 PostMessage 投递注册请求到热键线程，并用 oneshot channel 同步等待结果。
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::collections::{hash_map::Entry, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -30,9 +31,10 @@ const HOTKEY_ID_SCREENSHOT: i32 = 9001;
 /// 录屏热键 ID
 const HOTKEY_ID_RECORDING: i32 = 9003;
 const HOTKEY_ID_SKETCH: i32 = 9004;
+const HOTKEY_ID_TODO_QUICK_ADD: i32 = 9005;
 /// 槽位数量
-const SLOT_COUNT: usize = 3;
-/// 自定义消息：注册热键（lparam = *mut HotkeyRequest）
+const SLOT_COUNT: usize = 4;
+/// 自定义消息：注册热键（wparam = 进程内请求令牌）
 const WM_REGISTER_HOTKEY: u32 = WM_USER + 1;
 /// 自定义消息：反注册热键
 const WM_UNREGISTER_HOTKEY: u32 = WM_USER + 2;
@@ -43,6 +45,7 @@ pub enum HotkeySlotId {
     Screenshot,
     Recording,
     Sketch,
+    TodoQuickAdd,
 }
 
 impl HotkeySlotId {
@@ -51,6 +54,7 @@ impl HotkeySlotId {
             Self::Screenshot => HOTKEY_ID_SCREENSHOT,
             Self::Recording => HOTKEY_ID_RECORDING,
             Self::Sketch => HOTKEY_ID_SKETCH,
+            Self::TodoQuickAdd => HOTKEY_ID_TODO_QUICK_ADD,
         }
     }
     fn index(self) -> usize {
@@ -58,6 +62,7 @@ impl HotkeySlotId {
             Self::Screenshot => 0,
             Self::Recording => 1,
             Self::Sketch => 2,
+            Self::TodoQuickAdd => 3,
         }
     }
 }
@@ -67,6 +72,13 @@ struct HotkeyRequest {
     slot: HotkeySlotId,
     hotkey: String,
     reply: mpsc::Sender<Result<(), String>>,
+}
+
+static NEXT_REQUEST_ID: AtomicUsize = AtomicUsize::new(1);
+static HOTKEY_REQUESTS: OnceLock<Mutex<HashMap<usize, HotkeyRequest>>> = OnceLock::new();
+
+fn hotkey_requests() -> &'static Mutex<HashMap<usize, HotkeyRequest>> {
+    HOTKEY_REQUESTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 单个热键槽位状态
@@ -104,7 +116,12 @@ static HOTKEY_STATE: HotkeyState = HotkeyState {
     hwnd: AtomicU32::new(0),
     suppress_until_ms: AtomicU64::new(0),
     app_handle: OnceLock::new(),
-    slots: [HotkeySlot::new(), HotkeySlot::new(), HotkeySlot::new()],
+    slots: [
+        HotkeySlot::new(),
+        HotkeySlot::new(),
+        HotkeySlot::new(),
+        HotkeySlot::new(),
+    ],
 };
 
 /// 当前时间戳（毫秒）
@@ -194,6 +211,7 @@ unsafe extern "system" fn hotkey_wndproc(
                 HOTKEY_ID_SCREENSHOT => HotkeySlotId::Screenshot,
                 HOTKEY_ID_RECORDING => HotkeySlotId::Recording,
                 HOTKEY_ID_SKETCH => HotkeySlotId::Sketch,
+                HOTKEY_ID_TODO_QUICK_ADD => HotkeySlotId::TodoQuickAdd,
                 _ => return LRESULT(0),
             };
             // 注册后短期内忽略触发：录入快捷键时组合键仍按着，注册瞬间会立即触发一次
@@ -265,15 +283,27 @@ unsafe extern "system" fn hotkey_wndproc(
                             let _ = app_clone.emit("ensure-sketch-window", ());
                         });
                     }
+                    HotkeySlotId::TodoQuickAdd => {
+                        let app_clone = app.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            let _ = app_clone.emit("ensure-todo-window-for-quick-add", ());
+                        });
+                    }
                 }
             }
             LRESULT(0)
         }
         WM_REGISTER_HOTKEY => {
-            // 取出请求（Box 转移所有权），执行注册，回传结果
-            let req = Box::from_raw(lparam.0 as *mut HotkeyRequest);
-            let result = register_hotkey_inner(req.slot, &req.hotkey);
-            let _ = req.reply.send(result);
+            // Only accept tokens issued by this process. A forged window message
+            // therefore cannot make us dereference an attacker-controlled pointer.
+            let req = hotkey_requests()
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&wparam.0));
+            if let Some(req) = req {
+                let result = register_hotkey_inner(req.slot, &req.hotkey);
+                let _ = req.reply.send(result);
+            }
             LRESULT(0)
         }
         WM_UNREGISTER_HOTKEY => {
@@ -281,6 +311,7 @@ unsafe extern "system" fn hotkey_wndproc(
                 HOTKEY_ID_SCREENSHOT => HotkeySlotId::Screenshot,
                 HOTKEY_ID_RECORDING => HotkeySlotId::Recording,
                 HOTKEY_ID_SKETCH => HotkeySlotId::Sketch,
+                HOTKEY_ID_TODO_QUICK_ADD => HotkeySlotId::TodoQuickAdd,
                 _ => return LRESULT(0),
             };
             unregister_hotkey_inner(slot);
@@ -407,30 +438,60 @@ pub fn register_hotkey(slot: HotkeySlotId, hotkey: &str) -> Result<(), String> {
     let hwnd = HWND(hwnd_ptr as *mut std::ffi::c_void);
 
     let (tx, rx) = mpsc::channel::<Result<(), String>>();
-    let req = Box::new(HotkeyRequest {
+    let req = HotkeyRequest {
         slot,
         hotkey: hotkey.to_string(),
         reply: tx,
-    });
-    let req_ptr = Box::into_raw(req);
+    };
+    let mut req = Some(req);
+    let request_id = loop {
+        let candidate = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        if candidate == 0 {
+            continue;
+        }
+        let mut pending = hotkey_requests()
+            .lock()
+            .map_err(|_| "热键请求队列锁定失败".to_string())?;
+        match pending.entry(candidate) {
+            Entry::Vacant(entry) => {
+                entry.insert(req.take().expect("request available"));
+                break candidate;
+            }
+            Entry::Occupied(_) => {
+                return Err("热键请求令牌冲突".into());
+            }
+        }
+    };
 
     unsafe {
-        // PostMessage 异步投递；若失败需回收 Box 避免泄漏
+        // PostMessage carries only an integer token; request ownership remains
+        // in the process-local table until the hotkey thread consumes it.
         if PostMessageW(
             Some(hwnd),
             WM_REGISTER_HOTKEY,
-            WPARAM(0),
-            LPARAM(req_ptr as isize),
+            WPARAM(request_id),
+            LPARAM(0),
         )
         .is_err()
         {
-            drop(Box::from_raw(req_ptr));
+            let _ = hotkey_requests()
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&request_id));
             return Err("投递注册请求失败".into());
         }
     }
     // 同步等待热键线程回传结果（命令线程阻塞在此，可接受：用户设置快捷键是同步交互）
-    rx.recv_timeout(Duration::from_secs(2))
-        .map_err(|_| "等待热键注册结果超时".to_string())?
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = hotkey_requests()
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&request_id));
+            Err("等待热键注册结果超时".to_string())
+        }
+    }
 }
 
 /// 反注册热键（清空快捷键时调用，可在任意线程）：PostMessage 到热键线程
@@ -456,6 +517,15 @@ pub fn set_slot_enabled(slot: HotkeySlotId, enabled: bool) {
         .enabled
         .store(enabled, Ordering::SeqCst);
     crate::utils::logger::log("hotkey", &format!("{:?}_enabled = {}", slot, enabled));
+}
+
+/// 查询某个快捷键是否仍由本进程成功注册。
+/// RegisterHotKey 不提供占用者名称，但注册状态可以可靠区分可用和
+/// 注册失败（通常表示被其他程序占用）。
+pub fn is_registered(slot: HotkeySlotId) -> bool {
+    HOTKEY_STATE.slots[slot.index()]
+        .registered
+        .load(Ordering::SeqCst)
 }
 
 /// 设置截图工具启用状态（仅启用时热键才触发）
@@ -607,9 +677,11 @@ mod tests {
         assert_eq!(HotkeySlotId::Screenshot.id(), HOTKEY_ID_SCREENSHOT);
         assert_eq!(HotkeySlotId::Recording.id(), HOTKEY_ID_RECORDING);
         assert_eq!(HotkeySlotId::Sketch.id(), HOTKEY_ID_SKETCH);
+        assert_eq!(HotkeySlotId::TodoQuickAdd.id(), HOTKEY_ID_TODO_QUICK_ADD);
         assert_eq!(HotkeySlotId::Screenshot.index(), 0);
         assert_eq!(HotkeySlotId::Recording.index(), 1);
         assert_eq!(HotkeySlotId::Sketch.index(), 2);
+        assert_eq!(HotkeySlotId::TodoQuickAdd.index(), 3);
     }
 
     #[test]

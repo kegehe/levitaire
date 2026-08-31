@@ -204,6 +204,10 @@
   white-space: nowrap;
 }
 
+.metric-value-content {
+  display: inline-block;
+}
+
 .sparkline {
   display: block;
   height: 28px;
@@ -305,4 +309,23 @@
   font-size: 10px;
   color: var(--color-fg-subtle);
   font-variant-numeric: tabular-nums;
+}
+
+.monitor-body {
+  animation: monitor-window-enter 180ms ease-out both;
+}
+@keyframes monitor-window-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .monitor-body {
+    animation: none;
+  }
 }

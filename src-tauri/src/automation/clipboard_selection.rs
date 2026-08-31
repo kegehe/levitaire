@@ -15,6 +15,7 @@ const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
 /// 剪贴板文本最大字符数（防损坏数据越界）
 const MAX_CLIPBOARD_U16: usize = 1024 * 1024;
+const MAX_CLIPBOARD_DIB_BYTES: usize = 48 * 1024 * 1024;
 
 /// 全局暂存的选区图片数据（CF_DIB 格式）
 static DETECTED_IMAGE: std::sync::OnceLock<std::sync::Mutex<Option<Vec<u8>>>> =
@@ -318,7 +319,7 @@ unsafe fn save_clipboard_text() -> Option<String> {
         }
         let mem_size = GlobalSize(hmem);
         let max_u16 = if mem_size > 0 {
-            mem_size / 2
+            (mem_size / 2).min(MAX_CLIPBOARD_U16)
         } else {
             MAX_CLIPBOARD_U16
         };
@@ -375,9 +376,12 @@ unsafe fn write_clipboard_text(text: &str) -> bool {
     }
     std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr as *mut u16, utf16.len());
     let _ = GlobalUnlock(hmem);
-    let _ = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0)));
+    let set_ok = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))).is_ok();
+    if !set_ok {
+        let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
+    }
     let _ = CloseClipboard();
-    true
+    set_ok
 }
 
 /// 模拟 Ctrl+C 按键
@@ -388,6 +392,217 @@ pub unsafe fn simulate_copy() -> bool {
 /// 模拟 Ctrl+V 按键（公开，供 quick_input 模块调用）
 pub unsafe fn simulate_paste() -> bool {
     simulate_key_combo(VK_CONTROL, 0x56) // 0x56 = 'V'
+}
+
+/// 模拟 Ctrl+V，并恢复调用前用户实际按下的修饰键。
+pub unsafe fn simulate_paste_preserving_modifiers() -> bool {
+    let modifier_state = capture_modifier_state();
+    let complete = simulate_paste();
+    restore_modifier_state(modifier_state);
+    complete
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnicodeInputResult {
+    Complete,
+    Partial,
+    Failed,
+}
+
+/// 直接向当前焦点窗口注入 Unicode 文本，不经过剪贴板。
+///
+/// 这条路径专供快速输入使用：部分终端/AI 工具把 Ctrl+V 定义为图片粘贴，
+/// 此时即使剪贴板中是 CF_UNICODETEXT，也会被目标程序按图片格式读取。
+/// KEYEVENTF_UNICODE 发送 WM_CHAR，不会触发这些 Ctrl+V 的特殊语义。
+pub unsafe fn simulate_unicode_text(text: &str) -> UnicodeInputResult {
+    if text.is_empty() {
+        return UnicodeInputResult::Complete;
+    }
+
+    let modifier_state = capture_modifier_state();
+    release_all_modifiers();
+
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut inputs = Vec::with_capacity(units.len() * 2);
+    for unit in units {
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: unit,
+                    dwFlags: KEYEVENTF_UNICODE,
+                    ..Default::default()
+                },
+            },
+        });
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: unit,
+                    dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
+            },
+        });
+    }
+
+    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    restore_modifier_state(modifier_state);
+    if sent == inputs.len() as u32 {
+        UnicodeInputResult::Complete
+    } else if sent > 0 {
+        UnicodeInputResult::Partial
+    } else {
+        UnicodeInputResult::Failed
+    }
+}
+
+/// 模拟常见终端的「粘贴纯文本」快捷键。
+/// 与 Ctrl+V 区分，避免触发 Codex 等工具的图片粘贴处理。
+pub unsafe fn simulate_text_paste() -> bool {
+    let modifier_state = capture_modifier_state();
+    release_all_modifiers();
+    let inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_CONTROL,
+                    ..Default::default()
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_SHIFT,
+                    ..Default::default()
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0x56),
+                    ..Default::default()
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0x56),
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_SHIFT,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_CONTROL,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
+            },
+        },
+    ];
+    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    let complete = sent == inputs.len() as u32;
+    if !complete {
+        // 部分发送可能只注入了 Ctrl/Shift 的按下事件，立即清理，避免按键卡住。
+        release_all_modifiers();
+    }
+    restore_modifier_state(modifier_state);
+    complete
+}
+
+/// 返回当前前台窗口句柄，供异步输入在真正发送前校验焦点是否变化。
+pub unsafe fn foreground_window_handle() -> isize {
+    GetForegroundWindow().0 as isize
+}
+
+/// 捕获调用前真实处于按下状态的修饰键。
+unsafe fn capture_modifier_state() -> u8 {
+    let keys = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN];
+    let mut state = 0u8;
+    for (index, key) in keys.into_iter().enumerate() {
+        if GetAsyncKeyState(key.0 as i32) < 0 {
+            state |= 1 << index;
+        }
+    }
+    state
+}
+
+/// 恢复之前捕获的修饰键状态。
+unsafe fn restore_modifier_state(state: u8) {
+    let keys = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN];
+    let mut inputs = Vec::new();
+    for (index, key) in keys.into_iter().enumerate() {
+        if state & (1 << index) != 0 {
+            inputs.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: key,
+                        ..Default::default()
+                    },
+                },
+            });
+        }
+    }
+    if !inputs.is_empty() {
+        let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// 判断当前前台窗口是否是常见终端宿主。
+/// 终端中的多行文本应使用 Ctrl+Shift+V，避免 Unicode 注入把换行当成提交。
+pub unsafe fn foreground_is_terminal_like() -> bool {
+    let hwnd = GetForegroundWindow();
+    if hwnd.is_invalid() {
+        return false;
+    }
+    let mut buf = [0u16; 256];
+    let len = GetClassNameW(hwnd, &mut buf);
+    if len <= 0 {
+        return false;
+    }
+    let class = String::from_utf16_lossy(&buf[..len as usize]);
+    is_terminal_window_class(&class)
+}
+
+fn is_terminal_window_class(class: &str) -> bool {
+    matches!(
+        class,
+        "CASCADIA_HOSTING_WINDOW_CLASS"
+            | "ConsoleWindowClass"
+            | "mintty"
+            | "Alacritty"
+            | "org.wezfurlong.wezterm"
+    )
+}
+
+/// 获取剪贴板序列号，用于判断异步粘贴期间用户是否写入了新内容。
+pub unsafe fn clipboard_sequence_number() -> u32 {
+    GetClipboardSequenceNumber()
 }
 
 /// 释放所有修饰键（Ctrl/Shift/Alt），防止按键卡住影响后续操作
@@ -574,7 +789,11 @@ unsafe fn simulate_key_combo(modifier: VIRTUAL_KEY, key: u16) -> bool {
     ];
 
     let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    sent == inputs.len() as u32
+    let complete = sent == inputs.len() as u32;
+    if !complete {
+        release_all_modifiers();
+    }
+    complete
 }
 
 /// 等待剪贴板中出现与旧内容不同的文本
@@ -612,7 +831,7 @@ unsafe fn read_clipboard_text() -> Option<String> {
         }
         let mem_size = GlobalSize(hmem);
         let max_u16 = if mem_size > 0 {
-            mem_size / 2
+            (mem_size / 2).min(MAX_CLIPBOARD_U16)
         } else {
             MAX_CLIPBOARD_U16
         };
@@ -701,7 +920,7 @@ pub(crate) unsafe fn read_clipboard_image() -> Option<Vec<u8>> {
             return None;
         }
         let size = GlobalSize(hmem);
-        if size == 0 {
+        if size == 0 || size > MAX_CLIPBOARD_DIB_BYTES {
             let _ = GlobalUnlock(hmem);
             return None;
         }
@@ -739,10 +958,68 @@ pub fn write_clipboard_image(dib_data: &[u8]) -> bool {
         }
         std::ptr::copy_nonoverlapping(dib_data.as_ptr(), ptr as *mut u8, dib_data.len());
         let _ = GlobalUnlock(hmem);
-        let _ = SetClipboardData(CF_DIB, Some(HANDLE(hmem.0)));
+        let set_ok = SetClipboardData(CF_DIB, Some(HANDLE(hmem.0))).is_ok();
+        if !set_ok {
+            let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
+        }
         let _ = CloseClipboard();
-        true
+        set_ok
     }
+}
+
+/// 恢复快速输入前保存的文本和 DIB 图片格式。
+/// 两种格式必须在同一次 OpenClipboard 中写入，否则后写入的格式会清掉先前内容。
+pub unsafe fn restore_clipboard_snapshot(text: Option<&str>, dib_data: Option<&[u8]>) -> bool {
+    if text.is_none() && dib_data.is_none() {
+        return false;
+    }
+    if let Some(text) = text {
+        crate::clipboard::listener::mark_self_write(text);
+    }
+    if OpenClipboard(None).is_err() {
+        return false;
+    }
+    let _ = EmptyClipboard();
+    let mut all_ok = true;
+
+    let mut write_format = |format: u32, data: &[u8]| {
+        let hmem = match GlobalAlloc(GMEM_MOVEABLE, data.len()) {
+            Ok(h) => h,
+            Err(_) => {
+                all_ok = false;
+                return;
+            }
+        };
+        let ptr = GlobalLock(hmem);
+        if ptr.is_null() {
+            let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
+            all_ok = false;
+            return;
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+        let _ = GlobalUnlock(hmem);
+        if SetClipboardData(format, Some(HANDLE(hmem.0))).is_err() {
+            let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
+            all_ok = false;
+        }
+    };
+
+    if let Some(text) = text {
+        let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        write_format(
+            CF_UNICODETEXT,
+            std::slice::from_raw_parts(
+                utf16.as_ptr() as *const u8,
+                utf16.len() * std::mem::size_of::<u16>(),
+            ),
+        );
+    }
+    if let Some(dib_data) = dib_data {
+        write_format(CF_DIB, dib_data);
+    }
+
+    let _ = CloseClipboard();
+    all_ok
 }
 
 #[cfg(test)]
@@ -755,6 +1032,21 @@ mod tests {
     fn test_constants() {
         assert_eq!(CF_UNICODETEXT, 13);
         assert_eq!(MAX_CLIPBOARD_U16, 1024 * 1024);
+    }
+
+    #[test]
+    fn terminal_window_class_detection_covers_supported_hosts() {
+        for class in [
+            "CASCADIA_HOSTING_WINDOW_CLASS",
+            "ConsoleWindowClass",
+            "mintty",
+            "Alacritty",
+            "org.wezfurlong.wezterm",
+        ] {
+            assert!(is_terminal_window_class(class), "{class}");
+        }
+        assert!(!is_terminal_window_class("Notepad"));
+        assert!(!is_terminal_window_class("Chrome_WidgetWin_1"));
     }
 
     // ─── read_u16_string ──────────────────────────────────────────

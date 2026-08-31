@@ -108,6 +108,7 @@ pub struct PomodoroStatePayload {
     pub running: bool,
     /// 已完成的专注轮数（本次会话累计）
     pub rounds_done: u64,
+    pub active_todo_id: Option<String>,
 }
 
 /// 番茄钟运行状态（Tauri managed state）
@@ -123,6 +124,7 @@ pub struct PomodoroState {
     config: Mutex<PomodoroConfig>,
     /// 线程代次：pause/reset/skip/stop 时递增，作废在跑计时线程
     generation: AtomicU64,
+    active_todo_id: Mutex<Option<String>>,
 }
 
 impl Default for PomodoroState {
@@ -137,6 +139,7 @@ impl Default for PomodoroState {
             remaining_secs: Mutex::new(config.total_secs(stage)),
             config: Mutex::new(config),
             generation: AtomicU64::new(0),
+            active_todo_id: Mutex::new(None),
         }
     }
 }
@@ -196,6 +199,7 @@ impl PomodoroState {
             total_secs: config.total_secs(stage),
             running: self.running.load(Ordering::SeqCst),
             rounds_done: self.rounds_done.load(Ordering::SeqCst),
+            active_todo_id: self.active_todo_id.lock().unwrap().clone(),
         }
     }
 
@@ -289,6 +293,22 @@ impl PomodoroState {
         });
     }
 
+    pub fn start_for_todo(&self, app: &tauri::AppHandle, todo_id: String) {
+        *self.active_todo_id.lock().unwrap() = Some(todo_id);
+        self.start(app);
+    }
+
+    /// Clear a task association without stopping the current timer.
+    pub fn clear_todo(&self, todo_id: &str) -> bool {
+        let mut active = self.active_todo_id.lock().unwrap();
+        if active.as_deref() == Some(todo_id) {
+            active.take();
+            true
+        } else {
+            false
+        }
+    }
+
     /// 暂停计时（保留剩余时间）
     pub fn pause(&self) {
         if !self.running.load(Ordering::SeqCst) {
@@ -313,6 +333,7 @@ impl PomodoroState {
         let stage = *self.stage.lock().unwrap();
         let total = self.config().total_secs(stage);
         *self.remaining_secs.lock().unwrap() = total;
+        self.active_todo_id.lock().unwrap().take();
     }
 
     /// 跳过当前阶段进入下一阶段。返回此前是否在计时（调用方据此决定是否重新 start）
@@ -342,6 +363,7 @@ impl PomodoroState {
         *self.stage.lock().unwrap() = stage;
         let total = self.config().total_secs(stage);
         *self.remaining_secs.lock().unwrap() = total;
+        self.active_todo_id.lock().unwrap().take();
     }
 
     /// 阶段推进：专注结束计一轮，达到轮数阈值进长休息，否则短休息；休息结束回到专注。
@@ -379,6 +401,16 @@ mod tests {
         assert_eq!(p.total_secs, 1500);
         assert!(!p.running);
         assert_eq!(p.rounds_done, 0);
+    }
+
+    #[test]
+    fn clear_todo_only_removes_the_matching_association() {
+        let state = PomodoroState::default();
+        *state.active_todo_id.lock().unwrap() = Some("todo-1".to_string());
+        assert!(!state.clear_todo("todo-2"));
+        assert_eq!(state.payload().active_todo_id.as_deref(), Some("todo-1"));
+        assert!(state.clear_todo("todo-1"));
+        assert!(state.payload().active_todo_id.is_none());
     }
 
     #[test]

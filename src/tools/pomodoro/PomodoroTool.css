@@ -38,6 +38,14 @@
   font-size: 13px;
   font-weight: 600;
 }
+.pomo-title-focus {
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-fg-muted);
+  font-size: 10px;
+}
 
 .pomo-icon-btn {
   position: relative;
@@ -119,6 +127,10 @@
   width: 120px;
   height: 120px;
   flex-shrink: 0;
+}
+
+.pomo-body.is-running .pomo-ring-wrap {
+  animation: pomo-ring-breathe 3s ease-in-out infinite;
 }
 
 .pomo-ring {
@@ -230,6 +242,7 @@
 .pomo-round-dot.is-done {
   background: var(--color-accent);
   border-color: var(--color-accent);
+  animation: pomo-round-pop 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 .pomo-rounds-text {
@@ -237,4 +250,32 @@
   font-size: 10px;
   color: var(--color-fg-subtle);
   font-variant-numeric: tabular-nums;
+}
+
+@keyframes pomo-ring-breathe {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 0 transparent);
+  }
+  50% {
+    filter: drop-shadow(0 0 5px color-mix(in srgb, var(--color-accent) 28%, transparent));
+  }
+}
+
+@keyframes pomo-round-pop {
+  from {
+    transform: scale(0.7);
+    opacity: 0.5;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pomo-body.is-running .pomo-ring-wrap,
+  .pomo-round-dot.is-done {
+    animation: none;
+  }
 }

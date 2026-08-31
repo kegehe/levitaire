@@ -541,20 +541,50 @@ export function applyThemePreferences(preferences: ThemePreferences): ThemePrefe
   root.style.setProperty("--toolbar-bg", scheme.elevated);
   root.style.setProperty("--toolbar-border", scheme.border);
   root.style.setProperty("--toolbar-radius", scheme.radius);
-  root.style.setProperty("--palette-bg", scheme.elevated);
-  root.style.setProperty("--palette-bg-fallback", scheme.elevated);
-  root.style.setProperty("--palette-border", `1px solid ${scheme.border}`);
-  root.style.setProperty("--palette-shadow", scheme.shadow);
-  root.style.setProperty("--palette-card-bg", scheme.sunken);
-  root.style.setProperty("--palette-card-bg-hover", scheme.elevated);
+  const glass = normalized.theme === "dark";
+  root.style.setProperty(
+    "--palette-bg",
+    glass ? "rgb(22 28 37 / .94)" : "rgb(246 249 252 / .94)",
+  );
+  root.style.setProperty(
+    "--palette-bg-fallback",
+    glass ? "rgb(22 28 37)" : "rgb(244 248 250)",
+  );
+  root.style.setProperty(
+    "--palette-border",
+    glass ? "1px solid rgb(255 255 255 / .16)" : "1px solid rgb(105 122 141 / .26)",
+  );
+  root.style.setProperty(
+    "--palette-shadow",
+    glass
+      ? `0 0 60px color-mix(in srgb, ${values.accent} 16%, transparent), 0 22px 55px rgb(0 0 0 / .42), inset 0 1px 0 rgb(255 255 255 / .13)`
+      : `0 0 42px color-mix(in srgb, ${values.accent} 12%, transparent), 0 18px 42px rgb(31 36 45 / .18), inset 0 1px 0 rgb(255 255 255 / .95)`,
+  );
+  root.style.setProperty(
+    "--palette-card-bg",
+    glass ? "rgb(255 255 255 / .1)" : "rgb(255 255 255 / .72)",
+  );
+  root.style.setProperty(
+    "--palette-card-bg-hover",
+    glass ? "rgb(255 255 255 / .16)" : "rgb(255 255 255 / .9)",
+  );
   root.style.setProperty("--palette-card-bg-enabled", values.subtle);
-  root.style.setProperty("--palette-card-border", scheme.border);
-  root.style.setProperty("--palette-card-border-hover", scheme.borderHover);
+  root.style.setProperty(
+    "--palette-card-border",
+    glass ? "rgb(255 255 255 / .18)" : "rgb(105 122 141 / .28)",
+  );
+  root.style.setProperty(
+    "--palette-card-border-hover",
+    glass ? "rgb(255 255 255 / .24)" : `color-mix(in srgb, ${values.accent} 32%, transparent)`,
+  );
   root.style.setProperty("--palette-card-border-enabled", values.accent);
-  root.style.setProperty("--palette-header-border", scheme.border);
+  root.style.setProperty(
+    "--palette-header-border",
+    glass ? "rgb(255 255 255 / .1)" : "rgb(105 122 141 / .18)",
+  );
   root.style.setProperty(
     "--palette-icon-bg",
-    normalized.theme === "dark" ? "rgb(255 255 255 / .08)" : "rgb(0 0 0 / .05)",
+    normalized.theme === "dark" ? "rgb(255 255 255 / .12)" : "rgb(31 48 64 / .08)",
   );
   root.style.setProperty("--palette-icon-color", scheme.muted);
   root.style.setProperty("--preview-bg", scheme.sunken);

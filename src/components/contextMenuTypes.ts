@@ -13,14 +13,14 @@ export const CONTEXT_MENU_WIDTH = 184;
 
 export function contextMenuHeight(source: ContextMenuSource): number {
   // ContextMenu.css: 34px item height, 11px group separator, 12px outer
-  // padding. Keeping these derived values here prevents a transparent tail
-  // below the last item when the native window is resized.
+  // padding. The tool configuration action adds one 34px item (and, for the
+  // pinned-image menu, one extra group separator).
   switch (source) {
     case "pin":
-      return 396;
+      return 464;
     case "orb":
-      return 204;
+      return 238;
     case "tray":
-      return 125;
+      return 204;
   }
 }

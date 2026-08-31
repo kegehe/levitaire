@@ -20,7 +20,10 @@ type ToolWindowLabel =
   | "long-capture-controls"
   | "long-capture-frame"
   | "context-menu"
+  | "pin-ocr"
   | "pomodoro-overlay"
+  | "time-overlay"
+  | "todo-overlay"
   | "sketch-overlay";
 
 const pendingWindows = new Map<ToolWindowLabel, Promise<WebviewWindowInstance>>();
@@ -42,9 +45,19 @@ const longCaptureFrameReadyWaiters = new Set<() => void>();
 let contextMenuReady = false;
 let contextMenuReadyListener: Promise<UnlistenFn> | undefined;
 const contextMenuReadyWaiters = new Set<() => void>();
+let pinOcrReady = false;
+let pinOcrReadyListener: Promise<UnlistenFn> | undefined;
+const pinOcrReadyWaiters = new Set<() => void>();
 let pomodoroReady = false;
 let pomodoroReadyListener: Promise<UnlistenFn> | undefined;
 const pomodoroReadyWaiters = new Set<() => void>();
+let timerReady = false;
+let timerReadyListener: Promise<UnlistenFn> | undefined;
+const timerReadyWaiters = new Set<() => void>();
+let todoReady = false;
+let todoReadyListener: Promise<UnlistenFn> | undefined;
+const todoReadyWaiters = new Set<() => void>();
+let todoCreatePromise: Promise<WebviewWindowInstance> | undefined;
 let sketchReady = false;
 let sketchReadyListener: Promise<UnlistenFn> | undefined;
 const sketchReadyWaiters = new Set<() => void>();
@@ -397,6 +410,36 @@ export async function ensureRecordingControlsWindow(): Promise<WebviewWindowInst
   return window;
 }
 
+async function prepareTimerWindowReadyListener(): Promise<void> {
+  if (!timerReadyListener) {
+    timerReadyListener = listen("timer-window-ready", () => {
+      timerReady = true;
+      timerReadyWaiters.forEach((resolve) => resolve());
+      timerReadyWaiters.clear();
+    });
+  }
+  await timerReadyListener;
+}
+
+async function waitForTimerWindowReady(): Promise<void> {
+  await prepareTimerWindowReadyListener();
+  if (timerReady) return;
+  await new Promise<void>((resolve, reject) => {
+    const retryTimer = startReadyRequestRetry("time-overlay", "timer-window-ready-request");
+    const timeout = window.setTimeout(() => {
+      window.clearInterval(retryTimer);
+      timerReadyWaiters.delete(onReady);
+      reject(new Error("时钟窗口初始化超时"));
+    }, 5000);
+    const onReady = () => {
+      window.clearInterval(retryTimer);
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    timerReadyWaiters.add(onReady);
+  });
+}
+
 async function prepareSketchWindowReadyListener(): Promise<void> {
   if (!sketchReadyListener) {
     sketchReadyListener = listen("sketch-window-ready", () => {
@@ -424,6 +467,36 @@ async function waitForSketchWindowReady(): Promise<void> {
       reject(new Error("Sketch window did not become ready within 5 seconds"));
     }, 5000);
     sketchReadyWaiters.add(onReady);
+  });
+}
+
+async function prepareTodoWindowReadyListener(): Promise<void> {
+  if (!todoReadyListener) {
+    todoReadyListener = listen("todo-window-ready", () => {
+      todoReady = true;
+      todoReadyWaiters.forEach((resolve) => resolve());
+      todoReadyWaiters.clear();
+    });
+  }
+  await todoReadyListener;
+}
+
+async function waitForTodoWindowReady(): Promise<void> {
+  await prepareTodoWindowReadyListener();
+  if (todoReady) return;
+  await new Promise<void>((resolve, reject) => {
+    const retryTimer = startReadyRequestRetry("todo-overlay", "todo-window-ready-request");
+    const onReady = () => {
+      window.clearInterval(retryTimer);
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = window.setTimeout(() => {
+      window.clearInterval(retryTimer);
+      todoReadyWaiters.delete(onReady);
+      reject(new Error("待办窗口初始化超时"));
+    }, 5000);
+    todoReadyWaiters.add(onReady);
   });
 }
 
@@ -557,6 +630,62 @@ export async function ensureContextMenuWindow(): Promise<WebviewWindowInstance> 
   return window;
 }
 
+async function preparePinOcrReadyListener(): Promise<void> {
+  if (!pinOcrReadyListener) {
+    pinOcrReadyListener = listen("pin-ocr-ready", () => {
+      pinOcrReady = true;
+      pinOcrReadyWaiters.forEach((resolve) => resolve());
+      pinOcrReadyWaiters.clear();
+    });
+  }
+}
+
+async function waitForPinOcrReady(): Promise<void> {
+  await preparePinOcrReadyListener();
+  if (pinOcrReady) return;
+  await new Promise<void>((resolve, reject) => {
+    let retryTimer: number | null = null;
+    const onReady = () => {
+      if (retryTimer !== null) window.clearInterval(retryTimer);
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = window.setTimeout(() => {
+      if (retryTimer !== null) window.clearInterval(retryTimer);
+      pinOcrReadyWaiters.delete(onReady);
+      reject(new Error("Pin OCR window did not become ready within 5 seconds"));
+    }, 5000);
+    pinOcrReadyWaiters.add(onReady);
+    retryTimer = startReadyRequestRetry("pin-ocr", "pin-ocr-ready-request");
+  });
+}
+
+export async function ensurePinOcrWindow(): Promise<WebviewWindowInstance> {
+  await preparePinOcrReadyListener();
+  const existing = await WebviewWindow.getByLabel("pin-ocr");
+  if (existing) {
+    await waitForPinOcrReady();
+    return existing;
+  }
+  pinOcrReady = false;
+  const window = await createToolWindow("pin-ocr", {
+    title: "Pin OCR",
+    width: 460,
+    height: 340,
+    resizable: true,
+    transparent: false,
+    decorations: true,
+    shadow: true,
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    focusable: true,
+    x: 120,
+    y: 120,
+  });
+  await waitForPinOcrReady();
+  return window;
+}
+
 interface DesktopBounds {
   originX: number;
   originY: number;
@@ -674,6 +803,68 @@ export async function ensurePomodoroWindow(): Promise<WebviewWindowInstance> {
   return window;
 }
 
+export async function ensureTimerWindow(): Promise<WebviewWindowInstance> {
+  const existing = await WebviewWindow.getByLabel("time-overlay");
+  if (existing) {
+    await waitForTimerWindowReady();
+    return existing;
+  }
+  await prepareTimerWindowReadyListener();
+  timerReady = false;
+  const window = await createToolWindow("time-overlay", {
+    title: "Levitaire Timer",
+    width: 360,
+    height: 220,
+    resizable: false,
+    transparent: true,
+    decorations: false,
+    shadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    x: 100,
+    y: 100,
+    backgroundColor: [0, 0, 0, 0],
+  });
+  await waitForTimerWindowReady();
+  return window;
+}
+
+export async function ensureTodoWindow(): Promise<WebviewWindowInstance> {
+  if (todoCreatePromise) return todoCreatePromise;
+  todoCreatePromise = (async () => {
+    const existing = await WebviewWindow.getByLabel("todo-overlay");
+    if (existing) {
+      await waitForTodoWindowReady();
+      return existing;
+    }
+    await prepareTodoWindowReadyListener();
+    todoReady = false;
+    const window = await createToolWindow("todo-overlay", {
+      title: "Levitaire Todo",
+      width: 360,
+      height: 560,
+      resizable: false,
+      transparent: true,
+      decorations: false,
+      shadow: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focusable: true,
+      x: 100,
+      y: 100,
+      backgroundColor: [0, 0, 0, 0],
+    });
+    await waitForTodoWindowReady();
+    return window;
+  })();
+  try {
+    return await todoCreatePromise;
+  } finally {
+    todoCreatePromise = undefined;
+  }
+}
+
 /**
  * 根据工具 ID 打开对应的工具窗口。
  * 用于 ToolPalette 激活和 FloatingOrb 自启动两种场景。
@@ -735,6 +926,12 @@ export async function preloadEnabledToolWindows(): Promise<void> {
   if (enabledIds.has("pomodoro")) {
     tasks.push({ label: "pomodoro", promise: ensurePomodoroWindow() });
   }
+  if (enabledIds.has("timer")) {
+    tasks.push({ label: "timer", promise: ensureTimerWindow() });
+  }
+  if (enabledIds.has("todo")) {
+    tasks.push({ label: "todo", promise: ensureTodoWindow() });
+  }
   if (enabledIds.has("quick-input")) {
     tasks.push({ label: "quick input", promise: invoke("ensure_quick_input_window") });
   }
@@ -760,6 +957,16 @@ export async function openToolWindow(toolId: string): Promise<boolean> {
     if (toolId === "pomodoro") {
       await ensurePomodoroWindow();
       await invoke("show_pomodoro_window");
+      return true;
+    }
+    if (toolId === "timer") {
+      await ensureTimerWindow();
+      await invoke("show_timer_window");
+      return true;
+    }
+    if (toolId === "todo") {
+      await ensureTodoWindow();
+      await invoke("show_todo_window");
       return true;
     }
     // 其他工具（screenshot、recording、text-toolbar）是按需触发的，

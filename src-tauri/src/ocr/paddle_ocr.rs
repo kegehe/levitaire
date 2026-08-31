@@ -1,14 +1,14 @@
 //! PaddleOCR ONNX 本地推理引擎。
 //!
 //! ## 模型获取
-//! 1. 从 PaddleOCR 下载 PP-OCRv4 推理模型（.pdmodel）
+//! 1. 从 RapidOCR 获取 PP-OCRv6 ONNX 推理模型
 //! 2. 使用 `paddle2onnx` 转换为 ONNX 格式
 //! 3. 或从 RapidAI/RapidOCR 获取预转换的 ONNX 模型
 //!
 //! 模型文件放到 `%APPDATA%/levitaire/ocr/`:
 //! - det.onnx (检测模型)
 //! - rec.onnx (识别模型)
-//! - ppocr_keys_v1.txt (字典)
+//! - ppocr_keys_v1.txt (PP-OCRv6 字典)
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -28,10 +28,14 @@ const DICT_FILE: &str = "ppocr_keys_v1.txt";
 const DET_SIZE: u32 = 960;
 const DET_THRESH: f32 = 0.3;
 const REC_H: u32 = 48;
-const REC_W: u32 = 320;
+const REC_MIN_W: u32 = 320;
+const REC_MAX_W: u32 = 4096;
 
-const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-const STD: [f32; 3] = [0.229, 0.224, 0.225];
+const DET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+// PP-OCR recognition models are trained with symmetric normalization.
+const REC_MEAN: f32 = 0.5;
+const REC_STD: f32 = 0.5;
 const SCALE: f32 = 1.0 / 255.0;
 
 pub struct PaddleOcrEngine {
@@ -96,9 +100,11 @@ impl PaddleOcrEngine {
             OcrError::ModelNotLoaded(format!("读取字典失败 {}: {}", dict_path.display(), e))
         })?;
 
+        // Keep whitespace characters that are actual dictionary entries (notably U+3000).
+        // `trim()` would remove them and shift every following CTC class.
         let char_dict: Vec<String> = dict_content
             .lines()
-            .map(|l| l.trim().to_string())
+            .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
             .filter(|l| !l.is_empty())
             .collect();
 
@@ -162,9 +168,9 @@ impl PaddleOcrEngine {
                 let b = bgra[si] as f32 * SCALE;
                 let g = bgra[si + 1] as f32 * SCALE;
                 let r = bgra[si + 2] as f32 * SCALE;
-                flat[d] = (b - MEAN[0]) / STD[0];
-                flat[ds * ds + d] = (g - MEAN[1]) / STD[1];
-                flat[2 * ds * ds + d] = (r - MEAN[2]) / STD[2];
+                flat[d] = (b - DET_MEAN[0]) / DET_STD[0];
+                flat[ds * ds + d] = (g - DET_MEAN[1]) / DET_STD[1];
+                flat[2 * ds * ds + d] = (r - DET_MEAN[2]) / DET_STD[2];
             }
         }
 
@@ -180,22 +186,31 @@ impl PaddleOcrEngine {
         ih: u32,
         b: &TextBox,
     ) -> Result<Array<f32, ndarray::IxDyn>, OcrError> {
-        let x1 = b.x1.max(0.0).min(iw as f32) as u32;
-        let y1 = b.y1.max(0.0).min(ih as f32) as u32;
-        let x2 = b.x2.max(0.0).min(iw as f32) as u32;
-        let y2 = b.y2.max(0.0).min(ih as f32) as u32;
+        // DB threshold boxes are often tight around glyph pixels. Add a small margin so
+        // anti-aliased tops/bottoms are not clipped before recognition.
+        let raw_cw = (b.x2 - b.x1).max(1.0);
+        let raw_ch = (b.y2 - b.y1).max(1.0);
+        let pad_x = (raw_cw * 0.02).max(1.0);
+        let pad_y = (raw_ch * 0.30).max(2.0);
+        let x1 = (b.x1 - pad_x).max(0.0).min(iw as f32) as u32;
+        let y1 = (b.y1 - pad_y).max(0.0).min(ih as f32) as u32;
+        let x2 = (b.x2 + pad_x).max(0.0).min(iw as f32) as u32;
+        let y2 = (b.y2 + pad_y).max(0.0).min(ih as f32) as u32;
         let cw = (x2.saturating_sub(x1)).max(1);
         let ch = (y2.saturating_sub(y1)).max(1);
 
         let sy = REC_H as f32 / ch as f32;
-        let dw = ((cw as f32) * sy).round() as u32;
-        let dw = dw.clamp(1, REC_W);
-        let sx = cw as f32 / dw as f32;
+        // Recognition models support dynamic width. Preserve the line aspect ratio instead
+        // of squeezing long Chinese lines into 320 px (which drops most characters).
+        let resized_w = ((cw as f32) * sy).ceil() as u32;
+        let target_w = resized_w.clamp(REC_MIN_W, REC_MAX_W);
+        let resized_w = resized_w.min(target_w);
+        let sx = cw as f32 / resized_w as f32;
         let sc_y = ch as f32 / REC_H as f32;
 
-        let mut flat = vec![0f32; (3 * REC_H * REC_W) as usize];
+        let mut flat = vec![0f32; (3 * REC_H * target_w) as usize];
         let fw = iw as usize;
-        let rw = REC_W as usize;
+        let rw = target_w as usize;
         let rh = REC_H as usize;
 
         for row in 0..rh {
@@ -203,7 +218,7 @@ impl PaddleOcrEngine {
             if sr >= ih as usize {
                 break;
             }
-            for col in 0..dw as usize {
+            for col in 0..resized_w as usize {
                 let sc = x1 as usize + ((col as f32) * sx) as usize;
                 if sc >= fw {
                     break;
@@ -213,9 +228,9 @@ impl PaddleOcrEngine {
                 let b = bgra[si] as f32 * SCALE;
                 let g = bgra[si + 1] as f32 * SCALE;
                 let r = bgra[si + 2] as f32 * SCALE;
-                flat[d] = (b - MEAN[0]) / STD[0];
-                flat[rw * rh + d] = (g - MEAN[1]) / STD[1];
-                flat[2 * rw * rh + d] = (r - MEAN[2]) / STD[2];
+                flat[d] = (b - REC_MEAN) / REC_STD;
+                flat[rw * rh + d] = (g - REC_MEAN) / REC_STD;
+                flat[2 * rw * rh + d] = (r - REC_MEAN) / REC_STD;
             }
         }
 
@@ -279,13 +294,28 @@ impl PaddleOcrEngine {
         }
         let h = dims[dims.len() - 2];
         let w = dims[dims.len() - 1];
-
         // data is flat [N, C, H, W] — extract last channel
         let offset = if dims.len() >= 4 && dims[1] >= 1 {
-            (dims[1] - 1) * h * w
+            (dims[1] - 1)
+                .checked_mul(h)
+                .and_then(|v| v.checked_mul(w))
+                .ok_or_else(|| OcrError::RecognitionFailed("det output shape overflow".into()))?
         } else {
             0
         };
+        let required =
+            offset
+                .checked_add(h.checked_mul(w).ok_or_else(|| {
+                    OcrError::RecognitionFailed("det output shape overflow".into())
+                })?)
+                .ok_or_else(|| OcrError::RecognitionFailed("det output shape overflow".into()))?;
+        if required > data.len() {
+            return Err(OcrError::RecognitionFailed(format!(
+                "det output data too short: {} < {}",
+                data.len(),
+                required
+            )));
+        }
 
         let mut binary = vec![false; h * w];
         for i in 0..h {
@@ -405,6 +435,26 @@ impl PaddleOcrEngine {
         }
         let seq_len = dims[dims.len() - 2];
         let num_classes = dims[dims.len() - 1];
+        let required = seq_len
+            .checked_mul(num_classes)
+            .ok_or_else(|| OcrError::RecognitionFailed("rec output shape overflow".into()))?;
+        if required > data.len() {
+            return Err(OcrError::RecognitionFailed(format!(
+                "rec output data too short: {} < {}",
+                data.len(),
+                required
+            )));
+        }
+
+        // CTC output is [blank] + dictionary + optional ASCII space.
+        let expected_base = self.char_dict.len() + 1;
+        if num_classes != expected_base && num_classes != expected_base + 1 {
+            return Err(OcrError::RecognitionFailed(format!(
+                "识别模型类别数 {} 与字典 {} 不匹配",
+                num_classes,
+                self.char_dict.len()
+            )));
+        }
 
         // data is flat: [1, seq_len, num_classes]
         let mut last_char: isize = -1;
@@ -425,10 +475,10 @@ impl PaddleOcrEngine {
             if max_idx != self.blank_idx && max_idx as isize != last_char {
                 // PaddleOCR dictionaries contain only printable characters. Class 0 is
                 // the CTC blank token, so model class n maps to dictionary entry n - 1.
-                if let Some(ch) = max_idx
-                    .checked_sub(1)
-                    .and_then(|idx| self.char_dict.get(idx))
-                {
+                let dict_idx = max_idx.saturating_sub(1);
+                if num_classes == expected_base + 1 && dict_idx == self.char_dict.len() {
+                    chars.push(' ');
+                } else if let Some(ch) = self.char_dict.get(dict_idx) {
                     if !ch.is_empty() && ch != " " {
                         for c in ch.chars() {
                             chars.push(c);
@@ -650,6 +700,17 @@ mod tests {
     }
 
     #[test]
+    fn test_det_postprocess_rejects_short_output() {
+        let tmp = std::env::temp_dir().join(format!("po_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let e = PaddleOcrEngine::new(Some(&tmp)).unwrap();
+        let shape = ort::value::Shape::from(vec![1i64, 1, 64, 64]);
+        let error = e.postprocess_det(&shape, &[0.0; 8], 1.0, 1.0).unwrap_err();
+        assert!(error.to_string().contains("too short"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_det_postprocess_content() {
         let tmp = std::env::temp_dir().join(format!("po_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
@@ -688,6 +749,46 @@ mod tests {
 
         let (text, _) = e.ctc_decode(&shape, &data).unwrap();
         assert_eq!(text, "ab");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_ctc_decode_rejects_short_output() {
+        let tmp = std::env::temp_dir().join(format!("po_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let mut e = PaddleOcrEngine::new(Some(&tmp)).unwrap();
+        e.char_dict = vec!["a".into(), "b".into()];
+        let shape = ort::value::Shape::from(vec![1i64, 2, 3]);
+        let error = e.ctc_decode(&shape, &[0.0; 5]).unwrap_err();
+        assert!(error.to_string().contains("too short"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_dictionary_loader_preserves_full_width_space() {
+        let dict = "甲\n　\n乙\n";
+        let entries: Vec<String> = dict
+            .lines()
+            .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(entries, ["甲", "　", "乙"]);
+    }
+
+    #[test]
+    fn test_preprocess_rec_uses_symmetric_normalization() {
+        let tmp = std::env::temp_dir().join(format!("po_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let e = PaddleOcrEngine::new(Some(&tmp)).unwrap();
+        let bgra = vec![255u8, 255, 255, 255];
+        let tb = TextBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 1.0,
+            y2: 1.0,
+        };
+        let input = e.preprocess_rec(&bgra, 1, 1, &tb).unwrap();
+        assert!((input[[0, 0, 0, 0]] - 1.0).abs() < 1e-5);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

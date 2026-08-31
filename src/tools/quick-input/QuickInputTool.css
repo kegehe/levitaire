@@ -169,3 +169,21 @@
     transition: none;
   }
 }
+
+.quick-input-center-active {
+  animation: quick-input-center-pulse 1.8s ease-in-out infinite;
+}
+@keyframes quick-input-center-pulse {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 0 transparent);
+  }
+  50% {
+    filter: drop-shadow(0 0 5px var(--color-accent-subtle));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .quick-input-center-active {
+    animation: none;
+  }
+}

@@ -11,7 +11,10 @@ export type ToolIconName =
   | "Rocket"
   | "Compass"
   | "Timer"
-  | "Pencil";
+  | "Pencil"
+  | "ListTodo"
+  | "Check"
+  | "GripVertical";
 
 interface ToolIconProps {
   name: ToolIconName;
@@ -40,6 +43,27 @@ function ToolIcon({ name, size = 20, className = "", style }: ToolIconProps) {
   };
 
   switch (name) {
+    case "ListTodo":
+      return (
+        <svg {...common}>
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M7 8h.01M10 8h7M7 12h.01M10 12h7M7 16h.01M10 16h5" />
+        </svg>
+      );
+
+    case "Check":
+      return (
+        <svg {...common}>
+          <path d="m5 12.5 4.2 4.2L19 7" />
+        </svg>
+      );
+
+    case "GripVertical":
+      return (
+        <svg {...common}>
+          <path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01" strokeWidth={2.8} />
+        </svg>
+      );
     // 文字工具栏 — 文档 + 闪烁星标（AI 优化）
     case "Sparkles":
       return (

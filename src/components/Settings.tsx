@@ -49,7 +49,6 @@ import {
   fetchClearOptions,
   saveClearOptions,
 } from "../constants/clearConfig";
-import { OCR_ENGINE_LABELS } from "../constants/ocrEngineConfig";
 import {
   DEFAULT_TTS_CONFIG,
   fetchTtsConfig,
@@ -89,6 +88,17 @@ import {
   type RecordingConfig,
 } from "../tools/recording/recordingConfig";
 import {
+  DEFAULT_PIN_BORDER_COLOR,
+  PIN_BORDER_WIDTH_OPTIONS,
+  fetchPinBorderColor,
+  fetchPinBorderWidth,
+  normalizePinBorderColor,
+  normalizePinBorderWidth,
+  savePinBorderColor,
+  savePinBorderWidth,
+  type PinBorderWidth,
+} from "../constants/pinConfig";
+import {
   THEME_ACCENTS,
   THEME_SCHEMES,
   applyThemePreferences,
@@ -98,6 +108,13 @@ import {
   type ThemePreferences,
   type ThemeSchemeId,
 } from "../styles/themePreferences";
+import OrbIcon from "./OrbIcon";
+import {
+  getOrbIcon,
+  setOrbIcon,
+  ORB_ICON_OPTIONS,
+  type OrbIconId,
+} from "../constants/orbAppearance";
 import { useUpdater } from "../hooks/useUpdater";
 import "./Settings.css";
 import TitleBar from "./TitleBar";
@@ -109,27 +126,57 @@ import {
 } from "../constants/sketchConfig";
 
 /** 设置页左侧菜单项定义 */
-const SETTINGS_TABS = [
+const SYSTEM_SETTINGS_TABS = [
   { id: "general", label: "通用", icon: "Settings" as IconName },
-  { id: "capture", label: "截图/录屏", icon: "Camera" as IconName },
-  { id: "quick-input", label: "快速输入", icon: "Compass" as IconName },
-  { id: "monitor", label: "系统监控", icon: "Activity" as IconName },
-  { id: "pomodoro", label: "番茄钟", icon: "Timer" as IconName },
-  { id: "toolbar", label: "文字工具", icon: "Grid3x3" as IconName },
   { id: "ai", label: "AI 配置", icon: "Sparkles" as IconName },
 ] as const;
 
+const TOOL_SETTINGS_TABS = [
+  { id: "screenshot", label: "屏幕截图", icon: "Camera" as IconName },
+  { id: "recording", label: "GIF/录屏", icon: "Video" as IconName },
+  { id: "sketch", label: "屏幕草稿", icon: "Pencil" as IconName },
+  { id: "quick-input", label: "快速输入", icon: "Compass" as IconName },
+  { id: "monitor", label: "系统监控", icon: "Activity" as IconName },
+  { id: "pomodoro", label: "番茄钟", icon: "Timer" as IconName },
+  { id: "timer", label: "时钟与倒计时", icon: "Timer" as IconName },
+  { id: "todo", label: "待办清单", icon: "ListFilter" as IconName },
+  { id: "toolbar", label: "文字工具栏", icon: "Grid3x3" as IconName },
+] as const;
+
+const SETTINGS_TABS = [...SYSTEM_SETTINGS_TABS, ...TOOL_SETTINGS_TABS] as const;
+
 type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
+
+type HotkeyConflictResult = {
+  id: string;
+  hotkey: string;
+  status: "disabled" | "available" | "internal-conflict" | "external-conflict" | "invalid";
+  message: string;
+};
 
 /** 支持一键恢复默认位置的悬浮窗（与后端 window_positions 的窗口 id 对应） */
 const WINDOW_POSITION_TARGETS = [
   { id: "orb", label: "悬浮球", icon: "GripVertical" as IconName },
   { id: "monitor-overlay", label: "系统监控", icon: "Activity" as IconName },
   { id: "pomodoro-overlay", label: "番茄钟", icon: "Timer" as IconName },
+  { id: "time-overlay", label: "时钟与倒计时", icon: "Timer" as IconName },
+  { id: "todo-overlay", label: "待办清单", icon: "ListFilter" as IconName },
 ] as const;
 
 function Settings() {
-  const [activeTab, setActiveTab] = useState<SettingsTabId>("general");
+  const windowLabel = getCurrentWebviewWindow().label;
+  const isToolConfigWindow = windowLabel === "tool-config";
+  // The fallback keeps the component fully navigable in unit previews where
+  // no Tauri window label is provided; production windows are explicitly
+  // labelled `settings` or `tool-config` by App.tsx.
+  const visibleTabs = isToolConfigWindow
+    ? TOOL_SETTINGS_TABS
+    : windowLabel === "settings"
+      ? SYSTEM_SETTINGS_TABS
+      : SETTINGS_TABS;
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(() =>
+    isToolConfigWindow ? "screenshot" : "general",
+  );
   const [autoStart, setAutoStart] = useState(false);
   const [autoStartError, setAutoStartError] = useState(false);
   const persistedThemePreferencesRef = useRef<ThemePreferences>(getStoredThemePreferences());
@@ -147,6 +194,33 @@ function Settings() {
   );
   const [themePreferencesReady, setThemePreferencesReady] = useState(false);
   const [themePreferencesError, setThemePreferencesError] = useState(false);
+  const [orbIcon, setOrbIconState] = useState<OrbIconId>(() => getOrbIcon());
+  const orbIconSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const [isClosing, setIsClosing] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
+
+  const requestSettingsClose = useCallback(() => {
+    setIsClosing(true);
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      getCurrentWebviewWindow().close().catch(console.error);
+    }, 180);
+  }, []);
+
+  const handleOrbIconChange = (id: OrbIconId) => {
+    setOrbIconState(id);
+    setOrbIcon(id);
+    void emit("levitaire-orb-icon-changed", { id });
+    // Serialize rapid selections so an older IPC request cannot finish after
+    // the latest one and leave the tray/config on the wrong icon.
+    orbIconSaveQueueRef.current = orbIconSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => invoke<void>("set_orb_icon", { icon: id }))
+      .catch((error) => {
+        console.error("更新托盘悬浮球图标失败:", error);
+      });
+  };
 
   // AI 配置
   const [aiConfig, setAiConfig] = useState<AiConfig>({
@@ -193,6 +267,9 @@ function Settings() {
   const [hotkeyRecording, setHotkeyRecording] = useState(false);
   const [hotkeyStatus, setHotkeyStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [hotkeyError, setHotkeyError] = useState("");
+  const [hotkeyConflicts, setHotkeyConflicts] = useState<Record<string, HotkeyConflictResult>>({});
+  const [hotkeyCheckStatus, setHotkeyCheckStatus] = useState<"idle" | "checking" | "error">("idle");
+  const hotkeyCheckRequestRef = useRef(0);
 
   // 屏幕草稿快捷键
   const [sketchHotkey, setSketchHotkey] = useState("Ctrl+Shift+D");
@@ -201,10 +278,14 @@ function Settings() {
   const sketchHotkeyRequestRef = useRef(0);
   const sketchHotkeyQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const [sketchHotkeyRecording, setSketchHotkeyRecording] = useState(false);
-  const [sketchHotkeyStatus, setSketchHotkeyStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [sketchHotkeyStatus, setSketchHotkeyStatus] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
   const [sketchHotkeyError, setSketchHotkeyError] = useState("");
   const [sketchHistoryLimit, setSketchHistoryLimit] = useState(readSketchHistoryLimit);
-  const [sketchHistoryLimitStatus, setSketchHistoryLimitStatus] = useState<"idle" | "saved">("idle");
+  const [sketchHistoryLimitStatus, setSketchHistoryLimitStatus] = useState<"idle" | "saved">(
+    "idle",
+  );
 
   // 系统监控配置
   const [systemMonitorConfig, setSystemMonitorConfig] = useState<SystemMonitorConfig>(
@@ -292,6 +373,21 @@ function Settings() {
   const [qiEditLabel, setQiEditLabel] = useState("");
   const [qiEditText, setQiEditText] = useState("");
 
+  const checkHotkeyConflicts = useCallback(async () => {
+    const requestId = ++hotkeyCheckRequestRef.current;
+    setHotkeyCheckStatus("checking");
+    try {
+      const results = await invoke<HotkeyConflictResult[]>("check_hotkey_conflicts");
+      if (requestId !== hotkeyCheckRequestRef.current) return;
+      setHotkeyConflicts(Object.fromEntries(results.map((result) => [result.id, result])));
+      setHotkeyCheckStatus("idle");
+    } catch (error) {
+      if (requestId !== hotkeyCheckRequestRef.current) return;
+      console.error("Failed to check hotkey conflicts:", error);
+      setHotkeyCheckStatus("error");
+    }
+  }, []);
+
   // 触发键采集状态（true 表示正在监听用户按下的单键）
   const [qiTriggerRecording, setQiTriggerRecording] = useState(false);
   // 触发键保存/校验错误提示文案
@@ -302,13 +398,22 @@ function Settings() {
   const [screenshotSavePathStatus, setScreenshotSavePathStatus] = useState<
     "idle" | "saved" | "error"
   >("idle");
-
-  // OCR 识别引擎（可用列表与当前激活引擎由后端 get_ocr_engines 返回）
-  const [ocrAvailableEngines, setOcrAvailableEngines] = useState<string[]>([]);
-  const [ocrActiveEngine, setOcrActiveEngine] = useState("");
-  const [ocrStatus, setOcrStatus] = useState<"idle" | "saved" | "error">("idle");
-  // 切换序号：快速连续切换时仅最后一次的结果生效，避免乱序返回覆盖新选择
-  const ocrSaveVersionRef = useRef(0);
+  const [pinBorderColor, setPinBorderColor] = useState(DEFAULT_PIN_BORDER_COLOR);
+  const [pinBorderWidth, setPinBorderWidth] = useState<PinBorderWidth>(1);
+  const [pinBorderStatus, setPinBorderStatus] = useState<"idle" | "saved" | "error">("idle");
+  const pinBorderColorRef = useRef(pinBorderColor);
+  const pinBorderWidthRef = useRef(pinBorderWidth);
+  // Keep the last values confirmed by the backend so a failed optimistic save
+  // can recover even when several edits are queued in quick succession.
+  const persistedPinBorderColorRef = useRef(pinBorderColor);
+  const persistedPinBorderWidthRef = useRef<PinBorderWidth>(pinBorderWidth);
+  const pinBorderColorLoadedRef = useRef(false);
+  const pinBorderWidthLoadedRef = useRef(false);
+  const pinBorderColorFailedVersionRef = useRef(0);
+  const pinBorderWidthFailedVersionRef = useRef(0);
+  const pinBorderColorSaveVersionRef = useRef(0);
+  const pinBorderWidthSaveVersionRef = useRef(0);
+  const pinBorderSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   // 悬浮工具「启动时自动打开」配置（默认关闭，真值在后端 config.json）
   const [autostartIds, setAutostartIdsState] = useState<string[]>([]);
@@ -318,6 +423,17 @@ function Settings() {
   const [systemMonitorEnabled, setSystemMonitorEnabled] = useState(true);
   // 番茄钟工具是否启用（自启动仅对已启用工具生效，未加载到后端状态前按启用处理）
   const [pomodoroEnabled, setPomodoroEnabled] = useState(true);
+  const [timerEnabled, setTimerEnabled] = useState(false);
+  const [timerRemindersEnabled, setTimerRemindersEnabled] = useState(true);
+  const [timerReminderSound, setTimerReminderSound] = useState("tone");
+  const [timerLunarEnabled, setTimerLunarEnabled] = useState(true);
+  const [todoEnabled, setTodoEnabled] = useState(false);
+  const [todoRemindersEnabled, setTodoRemindersEnabled] = useState(true);
+  const [todoReminderSound, setTodoReminderSound] = useState("tone");
+  const [todoQuickAddHotkey, setTodoQuickAddHotkey] = useState("Ctrl+Alt+T");
+  const [todoQuickAddRecording, setTodoQuickAddRecording] = useState(false);
+  const [todoQuickAddStatus, setTodoQuickAddStatus] = useState<"idle" | "saved" | "error">("idle");
+  const [todoQuickAddError, setTodoQuickAddError] = useState("");
 
   // 悬浮窗默认位置恢复状态（key 为窗口 id：orb / monitor-overlay / pomodoro-overlay）
   const [resetPosStatus, setResetPosStatus] = useState<
@@ -507,25 +623,6 @@ function Settings() {
     setTimeout(() => setResetAllStatus("idle"), failed ? 3000 : 1500);
   };
 
-  const handleChangeOcrEngine = async (engine: string) => {
-    const version = ++ocrSaveVersionRef.current;
-    const previous = ocrActiveEngine;
-    setOcrActiveEngine(engine);
-    setOcrStatus("idle");
-    try {
-      await invoke("set_ocr_engine", { engine });
-      if (version !== ocrSaveVersionRef.current) return; // 已有更新的切换，忽略本次过期结果
-      setOcrStatus("saved");
-      setTimeout(() => setOcrStatus("idle"), 1500);
-    } catch (err) {
-      if (version !== ocrSaveVersionRef.current) return;
-      console.error("Failed to set OCR engine:", err);
-      setOcrActiveEngine(previous);
-      setOcrStatus("error");
-      setTimeout(() => setOcrStatus("idle"), 3000);
-    }
-  };
-
   const updateSystemMonitorConfig = (partial: Partial<SystemMonitorConfig>) => {
     const previous = systemMonitorConfigRef.current;
     const next = { ...previous, ...partial };
@@ -604,6 +701,24 @@ function Settings() {
   }, []);
 
   useEffect(() => {
+    Promise.all([
+      invoke<boolean>("get_todo_reminders_enabled"),
+      invoke<string>("get_todo_reminder_sound"),
+    ])
+      .then(([enabled, sound]) => {
+        setTodoRemindersEnabled(enabled);
+        setTodoReminderSound(sound);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    invoke<string>("get_todo_quick_add_hotkey")
+      .then((hotkey) => setTodoQuickAddHotkey(hotkey))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     const preferences = applyThemePreferences({ theme, accent: themeAccent, scheme: themeScheme });
     if (!themePreferencesReady) return;
 
@@ -660,6 +775,17 @@ function Settings() {
       .catch((err) => console.error("Failed to load screenshot hotkey:", err));
   }, []);
 
+  // 设置窗口会被隐藏后复用，因此在进入快捷键相关页面时重新检查一次。
+  useEffect(() => {
+    void checkHotkeyConflicts();
+  }, [checkHotkeyConflicts]);
+
+  useEffect(() => {
+    if (activeTab === "screenshot" || activeTab === "recording" || activeTab === "sketch" || activeTab === "todo" || activeTab === "quick-input") {
+      void checkHotkeyConflicts();
+    }
+  }, [activeTab, checkHotkeyConflicts]);
+
   useEffect(() => {
     Promise.allSettled([
       fetchEnabledFeatures(),
@@ -676,11 +802,16 @@ function Settings() {
       invoke<string>("get_recording_hotkey"),
       invoke<string>("get_recording_save_path"),
       invoke<string>("get_screenshot_save_path"),
-      invoke<{ active: string; available: string[] }>("get_ocr_engines"),
+      fetchPinBorderColor(),
+      fetchPinBorderWidth(),
       invoke<string>("get_quick_input_trigger_key"),
       invoke<string>("get_quick_input_mode"),
       invoke<string>("get_quick_input_snippets"),
       invoke<string[]>("get_tools_autostart"),
+      invoke<boolean>("get_timer_enabled"),
+      invoke<boolean>("get_timer_reminders_enabled"),
+      invoke<string>("get_timer_reminder_sound"),
+      invoke<boolean>("get_timer_lunar_enabled"),
       invoke<boolean>("get_quick_input_history_enabled"),
       invoke<Array<{ preview: string; text: string }>>("get_quick_input_history"),
     ]).then(
@@ -699,11 +830,16 @@ function Settings() {
         recHk,
         recSavePath,
         ssSavePath,
-        ocrEngines,
+        pinColor,
+        pinWidth,
         qiKey,
         qiMode,
         qiSnips,
         autostart,
+        timer,
+        timerReminders,
+        timerSound,
+        timerLunar,
         qiHistoryEnabledResult,
         qiHist,
       ]) => {
@@ -736,9 +872,31 @@ function Settings() {
         if (recHk.status === "fulfilled") setRecordingHotkey(recHk.value);
         if (recSavePath.status === "fulfilled") setRecordingSavePath(recSavePath.value);
         if (ssSavePath.status === "fulfilled") setScreenshotSavePath(ssSavePath.value);
-        if (ocrEngines.status === "fulfilled") {
-          setOcrAvailableEngines(ocrEngines.value.available);
-          setOcrActiveEngine(ocrEngines.value.active);
+        if (pinColor.status === "fulfilled") {
+          const value = normalizePinBorderColor(pinColor.value);
+          persistedPinBorderColorRef.current = value;
+          pinBorderColorLoadedRef.current = true;
+          const shouldApply =
+            pinBorderColorSaveVersionRef.current === 0 ||
+            pinBorderColorFailedVersionRef.current === pinBorderColorSaveVersionRef.current;
+          if (shouldApply) {
+            pinBorderColorRef.current = value;
+            setPinBorderColor(value);
+            pinBorderColorFailedVersionRef.current = 0;
+          }
+        }
+        if (pinWidth.status === "fulfilled") {
+          const value = normalizePinBorderWidth(pinWidth.value);
+          persistedPinBorderWidthRef.current = value;
+          pinBorderWidthLoadedRef.current = true;
+          const shouldApply =
+            pinBorderWidthSaveVersionRef.current === 0 ||
+            pinBorderWidthFailedVersionRef.current === pinBorderWidthSaveVersionRef.current;
+          if (shouldApply) {
+            pinBorderWidthRef.current = value;
+            setPinBorderWidth(value);
+            pinBorderWidthFailedVersionRef.current = 0;
+          }
         }
         if (qiKey.status === "fulfilled") setQiTriggerKey(qiKey.value || "CapsLock");
         if (qiMode.status === "fulfilled") setQiMode(qiMode.value === "hold" ? "hold" : "click");
@@ -750,6 +908,11 @@ function Settings() {
           }
         }
         if (autostart.status === "fulfilled") setAutostartIdsState(autostart.value);
+        if (timer.status === "fulfilled") setTimerEnabled(timer.value);
+        if (timerReminders.status === "fulfilled") setTimerRemindersEnabled(timerReminders.value);
+        if (timerSound.status === "fulfilled")
+          setTimerReminderSound(timerSound.value === "none" ? "none" : "tone");
+        if (timerLunar.status === "fulfilled") setTimerLunarEnabled(timerLunar.value);
         if (qiHistoryEnabledResult.status === "fulfilled") {
           qiHistoryEnabledRef.current = qiHistoryEnabledResult.value;
           setQiHistoryEnabled(qiHistoryEnabledResult.value);
@@ -779,7 +942,10 @@ function Settings() {
     let unlisten: (() => void) | undefined;
     void window
       .onFocusChanged(({ payload: focused }) => {
-        if (focused) void refreshQiHistory();
+        if (focused) {
+          setIsClosing(false);
+          void refreshQiHistory();
+        }
       })
       .then((stop) => {
         if (disposed) {
@@ -792,6 +958,7 @@ function Settings() {
 
     return () => {
       disposed = true;
+      if (closeTimerRef.current !== null) globalThis.clearTimeout(closeTimerRef.current);
       unlisten?.();
     };
   }, [refreshQiHistory]);
@@ -830,6 +997,18 @@ function Settings() {
     invoke<boolean>("get_pomodoro_enabled")
       .then((enabled) => {
         if (!cancelled) setPomodoroEnabled(enabled);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<boolean>("get_todo_enabled")
+      .then((enabled) => {
+        if (!cancelled) setTodoEnabled(enabled);
       })
       .catch(() => {});
     return () => {
@@ -878,6 +1057,7 @@ function Settings() {
     setHotkeyStatus("saving");
     try {
       await invoke("set_screenshot_hotkey", { hotkey: combo });
+      void checkHotkeyConflicts();
       setHotkeyStatus("saved");
       setHotkeyError("");
       setTimeout(() => setHotkeyStatus("idle"), 2000);
@@ -893,6 +1073,7 @@ function Settings() {
     setHotkeyStatus("saving");
     try {
       await invoke("set_screenshot_hotkey", { hotkey: "" });
+      void checkHotkeyConflicts();
       setScreenshotHotkey("");
       setHotkeyStatus("idle");
       setHotkeyError("");
@@ -901,6 +1082,54 @@ function Settings() {
       setHotkeyError(String(err));
       setTimeout(() => setHotkeyStatus("idle"), 3000);
     }
+  };
+
+  const saveTodoQuickAddHotkey = async (hotkey: string) => {
+    const previous = todoQuickAddHotkey;
+    setTodoQuickAddHotkey(hotkey);
+    try {
+      await invoke("set_todo_quick_add_hotkey", { hotkey });
+      void checkHotkeyConflicts();
+      setTodoQuickAddStatus("saved");
+      setTodoQuickAddError("");
+      setTimeout(() => setTodoQuickAddStatus("idle"), 2000);
+    } catch (error) {
+      setTodoQuickAddHotkey(previous);
+      setTodoQuickAddStatus("error");
+      setTodoQuickAddError(String(error));
+    }
+  };
+
+  const handleTodoQuickAddKeyDown = (event: React.KeyboardEvent) => {
+    if (!todoQuickAddRecording) return;
+    event.preventDefault();
+    const modifiers: string[] = [];
+    if (event.ctrlKey) modifiers.push("Ctrl");
+    if (event.altKey) modifiers.push("Alt");
+    if (event.shiftKey) modifiers.push("Shift");
+    if (event.metaKey) modifiers.push("Win");
+    if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return;
+    if (event.key === "Escape") {
+      setTodoQuickAddRecording(false);
+      return;
+    }
+    const isFKey = /^F([1-9]|1[0-2])$/.test(event.key);
+    if (modifiers.length === 0 && !isFKey) {
+      setTodoQuickAddError("快捷键需包含修饰键，或使用 F1-F12");
+      return;
+    }
+    const mainKey = isFKey ? event.key : event.key.length === 1 ? event.key.toUpperCase() : "";
+    if (!mainKey) {
+      setTodoQuickAddError("不支持的按键");
+      return;
+    }
+    setTodoQuickAddRecording(false);
+    setTodoQuickAddError("");
+    void saveTodoQuickAddHotkey([...modifiers, mainKey].join("+"));
+  };
+
+  const clearTodoQuickAddHotkey = () => {
+    void saveTodoQuickAddHotkey("");
   };
 
   const handleRecordingHotkeyKeyDown = (e: React.KeyboardEvent) => {
@@ -943,6 +1172,7 @@ function Settings() {
     setRecordingHotkeyStatus("saving");
     try {
       await invoke("set_recording_hotkey", { hotkey: combo });
+      void checkHotkeyConflicts();
       setRecordingHotkeyStatus("saved");
       setRecordingHotkeyError("");
       setTimeout(() => setRecordingHotkeyStatus("idle"), 2000);
@@ -958,6 +1188,7 @@ function Settings() {
     setRecordingHotkeyStatus("saving");
     try {
       await invoke("set_recording_hotkey", { hotkey: "" });
+      void checkHotkeyConflicts();
       setRecordingHotkey("");
       setRecordingHotkeyStatus("idle");
       setRecordingHotkeyError("");
@@ -977,14 +1208,20 @@ function Settings() {
     if (e.shiftKey) mods.push("Shift");
     if (e.metaKey) mods.push("Win");
     if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return;
-    if (e.key === "Escape") { setSketchHotkeyRecording(false); return; }
+    if (e.key === "Escape") {
+      setSketchHotkeyRecording(false);
+      return;
+    }
     const isFKey = e.key.startsWith("F") && /^F([1-9]|1[0-2])$/.test(e.key);
     if (mods.length === 0 && !isFKey) {
       setSketchHotkeyError("快捷键需包含修饰键，或使用 F1-F12 单键");
       return;
     }
     const mainKey = isFKey ? e.key : e.key.length === 1 ? e.key.toUpperCase() : "";
-    if (!mainKey) { setSketchHotkeyError("不支持的按键"); return; }
+    if (!mainKey) {
+      setSketchHotkeyError("不支持的按键");
+      return;
+    }
     setSketchHotkeyRecording(false);
     setSketchHotkeyError("");
     saveSketchHotkey([...mods, mainKey].join("+"));
@@ -1005,6 +1242,7 @@ function Settings() {
       await request;
       if (requestId !== sketchHotkeyRequestRef.current) return;
       setSketchHotkeyStatus("saved");
+      void checkHotkeyConflicts();
       window.setTimeout(() => {
         if (requestId === sketchHotkeyRequestRef.current) setSketchHotkeyStatus("idle");
       }, 2000);
@@ -1034,6 +1272,7 @@ function Settings() {
       await request;
       if (requestId !== sketchHotkeyRequestRef.current) return;
       setSketchHotkey("");
+      void checkHotkeyConflicts();
       setSketchHotkeyStatus("idle");
       setSketchHotkeyError("");
     } catch (err) {
@@ -1050,11 +1289,13 @@ function Settings() {
     setSketchHistoryLimit(writeSketchHistoryLimit(normalized));
     setSketchHistoryLimitStatus("saved");
     window.setTimeout(() => setSketchHistoryLimitStatus("idle"), 2000);
-    window.dispatchEvent(new StorageEvent("storage", {
-      key: SKETCH_HISTORY_LIMIT_KEY,
-      newValue: String(normalized),
-      storageArea: localStorage,
-    }));
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: SKETCH_HISTORY_LIMIT_KEY,
+        newValue: String(normalized),
+        storageArea: localStorage,
+      }),
+    );
   };
 
   const pickRecordingSavePath = async () => {
@@ -1186,6 +1427,7 @@ function Settings() {
     setQiTriggerKeyStatus("idle");
     try {
       await invoke("set_quick_input_trigger_key", { key });
+      void checkHotkeyConflicts();
       setQiTriggerError("");
       setQiTriggerKeyStatus("saved");
       setTimeout(() => setQiTriggerKeyStatus("idle"), 2000);
@@ -1399,6 +1641,74 @@ function Settings() {
     }
   };
 
+  const updatePinBorderColor = async (value: string) => {
+    const color = normalizePinBorderColor(value);
+    const version = ++pinBorderColorSaveVersionRef.current;
+    pinBorderColorRef.current = color;
+    setPinBorderColor(color);
+    setPinBorderStatus("idle");
+    try {
+      const save = pinBorderSaveQueueRef.current
+        .catch(() => undefined)
+        .then(() => savePinBorderColor(color));
+      pinBorderSaveQueueRef.current = save.catch(() => undefined);
+      await save;
+      persistedPinBorderColorRef.current = color;
+      pinBorderColorFailedVersionRef.current = 0;
+      if (version !== pinBorderColorSaveVersionRef.current) return;
+      setPinBorderStatus("saved");
+      window.setTimeout(() => {
+        if (version === pinBorderColorSaveVersionRef.current) setPinBorderStatus("idle");
+      }, 1500);
+    } catch (err) {
+      if (version !== pinBorderColorSaveVersionRef.current) return;
+      console.error("Failed to save pin border color:", err);
+      pinBorderColorFailedVersionRef.current = version;
+      if (!pinBorderColorLoadedRef.current) {
+        setPinBorderStatus("error");
+        return;
+      }
+      const persisted = persistedPinBorderColorRef.current;
+      pinBorderColorRef.current = persisted;
+      setPinBorderColor(persisted);
+      setPinBorderStatus("error");
+    }
+  };
+
+  const updatePinBorderWidth = async (value: number) => {
+    const width = normalizePinBorderWidth(value);
+    const version = ++pinBorderWidthSaveVersionRef.current;
+    pinBorderWidthRef.current = width;
+    setPinBorderWidth(width);
+    setPinBorderStatus("idle");
+    try {
+      const save = pinBorderSaveQueueRef.current
+        .catch(() => undefined)
+        .then(() => savePinBorderWidth(width));
+      pinBorderSaveQueueRef.current = save.catch(() => undefined);
+      await save;
+      persistedPinBorderWidthRef.current = width;
+      pinBorderWidthFailedVersionRef.current = 0;
+      if (version !== pinBorderWidthSaveVersionRef.current) return;
+      setPinBorderStatus("saved");
+      window.setTimeout(() => {
+        if (version === pinBorderWidthSaveVersionRef.current) setPinBorderStatus("idle");
+      }, 1500);
+    } catch (err) {
+      if (version !== pinBorderWidthSaveVersionRef.current) return;
+      console.error("Failed to save pin border width:", err);
+      pinBorderWidthFailedVersionRef.current = version;
+      if (!pinBorderWidthLoadedRef.current) {
+        setPinBorderStatus("error");
+        return;
+      }
+      const persisted = persistedPinBorderWidthRef.current;
+      pinBorderWidthRef.current = persisted;
+      setPinBorderWidth(persisted);
+      setPinBorderStatus("error");
+    }
+  };
+
   const handleSaveAiConfig = async () => {
     setAiSaveStatus("saving");
     try {
@@ -1423,17 +1733,57 @@ function Settings() {
       .catch((err) => console.error("Failed to get app version:", err));
   }, []);
 
+  const renderHotkeyConflict = (id: string) => {
+    const result = hotkeyConflicts[id];
+    if (hotkeyCheckStatus === "checking") {
+      return (
+        <span
+          className="settings-hotkey-status"
+          title="正在检查快捷键冲突"
+          aria-label="正在检查快捷键冲突"
+        >
+          <Icon name="Loader2" size={14} className="settings-save-spinner" aria-hidden="true" />
+        </span>
+      );
+    }
+    if (!result || result.status === "disabled") return null;
+    const color =
+      result.status === "available" ? "var(--color-success-fg)" : "var(--color-danger-fg)";
+    return (
+      <span
+        className="settings-hotkey-status"
+        style={{ color }}
+        title={result.message}
+        aria-label={result.message}
+      >
+        <Icon
+          name={result.status === "available" ? "Check" : "AlertCircle"}
+          size={16}
+          aria-hidden="true"
+        />
+      </span>
+    );
+  };
+
   return (
-    <div className="settings-shell">
-      <TitleBar />
+    <div className={`settings-shell${isClosing ? " is-closing" : ""}`}>
+      <TitleBar
+        title={isToolConfigWindow ? "Levitaire 工具配置" : "Levitaire 系统设置"}
+        onCloseRequested={requestSettingsClose}
+      />
       <div className="settings-layout">
         <nav className="settings-sidebar">
-          <div className="settings-sidebar-title">设置</div>
-          {SETTINGS_TABS.map((tab) => (
+          <div className="settings-sidebar-title">
+            {isToolConfigWindow ? "工具配置" : "系统设置"}
+          </div>
+          {visibleTabs.map((tab) => (
             <button
               key={tab.id}
               className={`settings-nav-item${activeTab === tab.id ? " is-active" : ""}`}
               onClick={() => setActiveTab(tab.id)}
+              // Preserve the historical accessible label used by integrations
+              // while the visible name now matches the floating palette.
+              aria-label={tab.id === "screenshot" ? "截图/录屏" : undefined}
             >
               <Icon name={tab.icon} size={18} />
               <span>{tab.label}</span>
@@ -1580,6 +1930,35 @@ function Settings() {
                 )}
               </div>
 
+              <div className="settings-item settings-orb-item">
+                <span className="settings-label" id="settings-orb-icon-label">
+                  悬浮球形象
+                </span>
+                <div
+                  className="settings-orb-options"
+                  role="radiogroup"
+                  aria-labelledby="settings-orb-icon-label"
+                >
+                  {ORB_ICON_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`settings-orb-option ${orbIcon === option.id ? "is-selected" : ""}`}
+                      role="radio"
+                      aria-checked={orbIcon === option.id}
+                      aria-label={option.label}
+                      title={`${option.label}：${option.description}`}
+                      onClick={() => handleOrbIconChange(option.id)}
+                    >
+                      <span className="settings-orb-preview">
+                        <OrbIcon icon={option.id} size={34} />
+                      </span>
+                      <span className="settings-orb-name">{option.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <hr className="settings-divider" />
               <h3 className="settings-subsection-title">悬浮窗位置</h3>
               <p className="settings-hint">
@@ -1707,9 +2086,13 @@ function Settings() {
           )}
 
           {/* ── 截图 ──────────────────────────────────────── */}
-          {activeTab === "capture" && (
+          {(activeTab === "screenshot" || activeTab === "recording" || activeTab === "sketch") && (
             <>
-              <h2 className="settings-panel-title">截图/录屏</h2>
+              <h2 className="settings-panel-title">
+                {activeTab === "recording" ? "GIF/录屏" : activeTab === "sketch" ? "屏幕草稿" : "屏幕截图"}
+              </h2>
+              {activeTab === "screenshot" && (
+                <>
               <h3 className="settings-subsection-title">截图</h3>
               <div className="settings-item">
                 <label className="settings-label" htmlFor="settings-hotkey">
@@ -1741,6 +2124,7 @@ function Settings() {
                       <Icon name="X" size={16} />
                     </button>
                   )}
+                  {renderHotkeyConflict("screenshot")}
                 </div>
                 {hotkeyStatus === "saving" && <span className="settings-hint">保存中…</span>}
                 {hotkeyStatus === "saved" && <span className="settings-hint">已保存</span>}
@@ -1755,6 +2139,10 @@ function Settings() {
                   </p>
                 )}
               </div>
+                </>
+              )}
+              {activeTab === "sketch" && (
+                <>
               <div className="settings-item">
                 <label className="settings-label" htmlFor="settings-sketch-hotkey">
                   屏幕草稿快捷键
@@ -1766,24 +2154,43 @@ function Settings() {
                     value={sketchHotkeyRecording ? "按下组合键…" : sketchHotkey}
                     readOnly
                     placeholder="点击设置快捷键"
-                    onFocus={() => { setSketchHotkeyRecording(true); setSketchHotkeyError(""); }}
+                    onFocus={() => {
+                      setSketchHotkeyRecording(true);
+                      setSketchHotkeyError("");
+                    }}
                     onBlur={() => setSketchHotkeyRecording(false)}
                     onKeyDown={handleSketchHotkeyKeyDown}
                     className="settings-input"
                     style={{ width: 180 }}
                   />
                   {sketchHotkey && (
-                    <button className="settings-toggle-btn" onClick={clearSketchHotkey} title="清除快捷键" aria-label="清除快捷键">
+                    <button
+                      className="settings-toggle-btn"
+                      onClick={clearSketchHotkey}
+                      title="清除快捷键"
+                      aria-label="清除快捷键"
+                    >
                       <Icon name="X" size={16} />
                     </button>
                   )}
+                  {renderHotkeyConflict("sketch")}
                 </div>
                 {sketchHotkeyStatus === "saving" && <span className="settings-hint">保存中…</span>}
                 {sketchHotkeyStatus === "saved" && <span className="settings-hint">已保存</span>}
-                {sketchHotkeyError && <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>{sketchHotkeyError}</p>}
+                {sketchHotkeyError && (
+                  <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    {sketchHotkeyError}
+                  </p>
+                )}
               </div>
+                </>
+              )}
+              {activeTab === "screenshot" && (
+                <>
               <div className="settings-item">
-                <label className="settings-label" htmlFor="settings-sketch-history-limit">草稿历史保留条数</label>
+                <label className="settings-label" htmlFor="settings-sketch-history-limit">
+                  草稿历史保留条数
+                </label>
                 <div className="settings-inline-group">
                   <input
                     id="settings-sketch-history-limit"
@@ -1799,9 +2206,13 @@ function Settings() {
                     }}
                     style={{ width: 84 }}
                   />
-                  <span className="settings-hint">最多 {MAX_SKETCH_HISTORY_LIMIT} 条，默认 10 条</span>
+                  <span className="settings-hint">
+                    最多 {MAX_SKETCH_HISTORY_LIMIT} 条，默认 10 条
+                  </span>
                 </div>
-                {sketchHistoryLimitStatus === "saved" && <span className="settings-hint">已保存</span>}
+                {sketchHistoryLimitStatus === "saved" && (
+                  <span className="settings-hint">已保存</span>
+                )}
               </div>
               <div className="settings-item">
                 <label className="settings-label">保存路径</label>
@@ -1842,39 +2253,51 @@ function Settings() {
                   </span>
                 )}
               </div>
-              <div className="settings-item">
+              <h3 className="settings-subsection-title">贴图边框</h3>
+              <div className="settings-item settings-row">
                 <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-ocr-engine">
-                    识别引擎
+                  <label className="settings-label" htmlFor="settings-pin-border-color">
+                    颜色
+                  </label>
+                  <input
+                    id="settings-pin-border-color"
+                    className="settings-color-input"
+                    type="color"
+                    value={pinBorderColor}
+                    onChange={(event) => void updatePinBorderColor(event.target.value)}
+                    aria-label="贴图边框颜色"
+                  />
+                  <span className="settings-hint settings-color-value">{pinBorderColor}</span>
+                </div>
+                <div className="settings-inline-group">
+                  <label className="settings-label" htmlFor="settings-pin-border-width">
+                    粗细
                   </label>
                   <select
-                    id="settings-ocr-engine"
-                    value={ocrAvailableEngines.includes(ocrActiveEngine) ? ocrActiveEngine : ""}
-                    onChange={(e) => handleChangeOcrEngine(e.target.value)}
+                    id="settings-pin-border-width"
                     className="settings-select"
-                    disabled={ocrAvailableEngines.length <= 1}
+                    value={pinBorderWidth}
+                    onChange={(event) => void updatePinBorderWidth(Number(event.target.value))}
+                    aria-label="贴图边框粗细"
                   >
-                    {ocrAvailableEngines.map((id) => (
-                      <option key={id} value={id}>
-                        {OCR_ENGINE_LABELS[id] ?? id}
+                    {PIN_BORDER_WIDTH_OPTIONS.map((width) => (
+                      <option key={width} value={width}>
+                        {width}px
                       </option>
                     ))}
                   </select>
                 </div>
-                {ocrAvailableEngines.length === 0 && (
-                  <span className="settings-hint">未检测到可用 OCR 引擎</span>
-                )}
-                {ocrAvailableEngines.length > 1 && (
-                  <span className="settings-hint">截图识别文字时使用的引擎</span>
-                )}
-                {ocrStatus === "saved" && <span className="settings-hint">已保存</span>}
-                {ocrStatus === "error" && (
+                {pinBorderStatus === "saved" && <span className="settings-hint">已保存</span>}
+                {pinBorderStatus === "error" && (
                   <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
                     保存失败
                   </span>
                 )}
               </div>
-
+                </>
+              )}
+              {activeTab === "recording" && (
+                <>
               <hr className="settings-divider" />
               <h3 className="settings-subsection-title">录屏</h3>
               <div className="settings-item">
@@ -1907,6 +2330,7 @@ function Settings() {
                       <Icon name="X" size={16} />
                     </button>
                   )}
+                  {renderHotkeyConflict("recording")}
                 </div>
                 {recordingHotkeyStatus === "saving" && (
                   <span className="settings-hint">保存中…</span>
@@ -2025,6 +2449,8 @@ function Settings() {
                   保存失败，请重试
                 </p>
               )}
+                </>
+              )}
             </>
           )}
 
@@ -2086,21 +2512,24 @@ function Settings() {
                     <Icon name="AlertCircle" size={14} aria-hidden="true" />
                   </span>
                 </div>
-                <input
-                  type="text"
-                  id="settings-qi-trigger"
-                  className="settings-input"
-                  style={{ width: 220 }}
-                  value={qiTriggerRecording ? "按下按键…" : qiTriggerKey}
-                  readOnly
-                  onClick={() => {
-                    setQiTriggerRecording(true);
-                  }}
-                  onKeyDown={handleQiTriggerKeyDown}
-                  onBlur={() => setQiTriggerRecording(false)}
-                  placeholder="点击后按下任意键"
-                  title="点击输入框，再按下你要设为触发键的按键。"
-                />
+                <div className="settings-inline-group settings-hotkey-input-group">
+                  <input
+                    type="text"
+                    id="settings-qi-trigger"
+                    className="settings-input"
+                    style={{ width: 220 }}
+                    value={qiTriggerRecording ? "按下按键…" : qiTriggerKey}
+                    readOnly
+                    onClick={() => {
+                      setQiTriggerRecording(true);
+                    }}
+                    onKeyDown={handleQiTriggerKeyDown}
+                    onBlur={() => setQiTriggerRecording(false)}
+                    placeholder="点击后按下任意键"
+                    title="点击输入框，再按下你要设为触发键的按键。"
+                  />
+                  {renderHotkeyConflict("quick-input-trigger")}
+                </div>
                 {qiTriggerKeyStatus === "saved" && <span className="settings-hint">已保存</span>}
                 {qiTriggerKeyStatus === "error" && qiTriggerError && (
                   <span
@@ -2560,6 +2989,201 @@ function Settings() {
                   保存失败，请重试
                 </p>
               )}
+            </>
+          )}
+
+          {/* ── 待办清单 ──────────────────────────────────── */}
+          {activeTab === "timer" && (
+            <>
+              <h2 className="settings-panel-title">时钟与倒计时</h2>
+              <p className="settings-panel-desc">管理桌面时钟、倒计时和秒表悬浮工具。</p>
+              <div className="settings-item">
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={timerRemindersEnabled}
+                    onChange={(event) => {
+                      const value = event.target.checked;
+                      setTimerRemindersEnabled(value);
+                      invoke("set_timer_reminders_enabled", { enabled: value }).catch(() =>
+                        setTimerRemindersEnabled(!value),
+                      );
+                    }}
+                  />
+                  <span>启用倒计时提醒</span>
+                </label>
+              </div>
+              <div className="settings-item">
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={timerLunarEnabled}
+                    onChange={(event) => {
+                      const value = event.target.checked;
+                      setTimerLunarEnabled(value);
+                      invoke("set_timer_lunar_enabled", { enabled: value }).catch(() =>
+                        setTimerLunarEnabled(!value),
+                      );
+                    }}
+                  />
+                  <span>显示农历日期</span>
+                </label>
+              </div>
+              <div className="settings-item settings-row">
+                <div className="settings-inline-group">
+                  <label className="settings-label" htmlFor="settings-timer-sound">
+                    提醒声音
+                  </label>
+                  <select
+                    id="settings-timer-sound"
+                    className="settings-select"
+                    value={timerReminderSound}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setTimerReminderSound(value);
+                      invoke("set_timer_reminder_sound", { sound: value }).catch(() =>
+                        setTimerReminderSound(timerReminderSound),
+                      );
+                    }}
+                  >
+                    <option value="tone">提示音</option>
+                    <option value="none">静音</option>
+                  </select>
+                </div>
+              </div>
+              <div className="settings-item">
+                <label className={`settings-checkbox-label${timerEnabled ? "" : " is-disabled"}`}>
+                  <input
+                    type="checkbox"
+                    checked={autostartIds.includes("timer")}
+                    disabled={!timerEnabled}
+                    onChange={() => handleToggleToolAutostart("timer")}
+                  />
+                  <span>启动时自动打开</span>
+                </label>
+                {!timerEnabled && (
+                  <span className="settings-hint">请先在悬浮球面板中启用时钟与倒计时</span>
+                )}
+                {autostartError && (
+                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    设置失败
+                  </span>
+                )}
+              </div>
+              <div className="settings-item">
+                <span className="settings-hint">
+                  倒计时结束时会播放提示音并发送系统通知；计时器状态会在应用重启后恢复。
+                </span>
+              </div>
+            </>
+          )}
+
+          {activeTab === "todo" && (
+            <>
+              <h2 className="settings-panel-title">待办清单</h2>
+              <p className="settings-panel-desc">管理待办悬浮窗和任务提醒。</p>
+              <div className="settings-item">
+                <label className={`settings-checkbox-label${todoEnabled ? "" : " is-disabled"}`}>
+                  <input
+                    type="checkbox"
+                    checked={autostartIds.includes("todo")}
+                    disabled={!todoEnabled}
+                    onChange={() => handleToggleToolAutostart("todo")}
+                  />
+                  <span>启动时自动打开</span>
+                </label>
+                {!todoEnabled && (
+                  <span className="settings-hint">请先在悬浮球面板中启用待办清单</span>
+                )}
+                {autostartError && (
+                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    设置失败
+                  </span>
+                )}
+              </div>
+              <div className="settings-item">
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={todoRemindersEnabled}
+                    onChange={(event) => {
+                      const value = event.target.checked;
+                      setTodoRemindersEnabled(value);
+                      invoke("set_todo_reminders_enabled", { enabled: value }).catch(() =>
+                        setTodoRemindersEnabled(!value),
+                      );
+                    }}
+                  />
+                  <span>启用任务提醒</span>
+                </label>
+              </div>
+              <div className="settings-item settings-row">
+                <div className="settings-inline-group">
+                  <label className="settings-label" htmlFor="settings-todo-sound">
+                    提醒声音
+                  </label>
+                  <select
+                    id="settings-todo-sound"
+                    className="settings-select"
+                    value={todoReminderSound}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setTodoReminderSound(value);
+                      invoke("set_todo_reminder_sound", { sound: value }).catch(() =>
+                        setTodoReminderSound(todoReminderSound),
+                      );
+                    }}
+                  >
+                    <option value="tone">提示音</option>
+                    <option value="none">静音</option>
+                  </select>
+                </div>
+              </div>
+              <div className="settings-item">
+                <label className="settings-label" htmlFor="settings-todo-quick-add-hotkey">
+                  快速添加快捷键
+                </label>
+                <div className="settings-inline-group">
+                  <input
+                    id="settings-todo-quick-add-hotkey"
+                    type="text"
+                    value={todoQuickAddRecording ? "按下组合键…" : todoQuickAddHotkey}
+                    readOnly
+                    placeholder="点击设置快捷键"
+                    onFocus={() => {
+                      setTodoQuickAddRecording(true);
+                      setTodoQuickAddError("");
+                    }}
+                    onBlur={() => setTodoQuickAddRecording(false)}
+                    onKeyDown={handleTodoQuickAddKeyDown}
+                    className="settings-input"
+                    style={{ width: 180 }}
+                  />
+                  {todoQuickAddHotkey && (
+                    <button
+                      className="settings-toggle-btn"
+                      onClick={clearTodoQuickAddHotkey}
+                      title="清除快捷键"
+                      aria-label="清除快捷键"
+                    >
+                      <Icon name="X" size={16} />
+                    </button>
+                  )}
+                  {renderHotkeyConflict("todo-quick-add")}
+                  {todoQuickAddStatus === "saved" && <span className="settings-hint">已保存</span>}
+                  {todoQuickAddStatus === "error" && (
+                    <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                      保存失败
+                    </span>
+                  )}
+                </div>
+                <p className="settings-hint">在任意应用中唤起待办并聚焦新任务输入框。</p>
+                {todoQuickAddError && (
+                  <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    {todoQuickAddError}
+                  </p>
+                )}
+              </div>
             </>
           )}
 

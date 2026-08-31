@@ -7,8 +7,13 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
  */
 export async function saveWindowPosition(windowId: string): Promise<void> {
   try {
-    const pos = await getCurrentWebviewWindow().outerPosition();
-    await invoke("set_window_position", { id: windowId, x: pos.x, y: pos.y });
+    const win = getCurrentWebviewWindow();
+    const pos = await win.outerPosition();
+    // Keep the legacy 42px-orb anchor convention while the new 56px orb uses a
+    // larger transparent window, so existing saved positions remain stable.
+    const scale = windowId === "orb" ? await win.scaleFactor().catch(() => 1) : 1;
+    const offset = windowId === "orb" ? Math.round(9 * scale) : 0;
+    await invoke("set_window_position", { id: windowId, x: pos.x + offset, y: pos.y + offset });
   } catch (err) {
     console.error(`保存窗口位置失败 (${windowId}):`, err);
   }

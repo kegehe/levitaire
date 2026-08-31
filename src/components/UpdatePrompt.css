@@ -100,3 +100,38 @@
   max-height: 48px;
   overflow-y: auto;
 }
+
+.update-prompt {
+  animation: update-prompt-enter 180ms ease-out both;
+}
+.update-prompt-error {
+  animation: update-prompt-error 220ms ease-out both;
+}
+@keyframes update-prompt-enter {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes update-prompt-error {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  35% {
+    transform: translateX(-3px);
+  }
+  70% {
+    transform: translateX(3px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-prompt,
+  .update-prompt-error {
+    animation: none;
+  }
+}

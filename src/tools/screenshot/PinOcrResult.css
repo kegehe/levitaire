@@ -1,0 +1,7 @@
+.pin-ocr-result { box-sizing: border-box; display: flex; flex-direction: column; width: 100vw; height: 100vh; padding: 14px; gap: 10px; color: var(--color-fg); background: var(--color-bg-elevated); font: 13px var(--font-sans, "Segoe UI", sans-serif); }
+.pin-ocr-result header, .pin-ocr-result footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pin-ocr-result header button { display: inline-flex; border: 0; padding: 3px; color: inherit; background: transparent; cursor: pointer; }
+.pin-ocr-result textarea { flex: 1; min-height: 0; resize: none; padding: 9px; border: 1px solid var(--color-border); border-radius: 6px; color: inherit; background: var(--color-bg-sunken); font: inherit; line-height: 1.5; }
+.pin-ocr-result footer button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid var(--color-border); border-radius: 6px; color: inherit; background: transparent; cursor: pointer; }
+.pin-ocr-result footer button:disabled { opacity: .5; cursor: default; }
+.pin-ocr-error { color: var(--color-danger-fg, #d84a4a); }

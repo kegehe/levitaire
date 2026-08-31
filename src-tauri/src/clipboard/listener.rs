@@ -223,7 +223,7 @@ unsafe fn read_clipboard_text() -> Option<String> {
         }
         let mem_size = GlobalSize(hmem);
         let max_u16 = if mem_size > 0 {
-            mem_size / 2
+            (mem_size / 2).min(MAX_CLIPBOARD_U16)
         } else {
             MAX_CLIPBOARD_U16
         };

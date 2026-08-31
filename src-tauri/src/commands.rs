@@ -6,19 +6,65 @@ use tauri::Manager;
 use tauri::State;
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetWindowLongPtrW, IsWindow, SetForegroundWindow,
-    SetWindowDisplayAffinity, SetWindowLongPtrW, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, WDA_NONE,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, IsWindow,
+    SetForegroundWindow, SetWindowDisplayAffinity, SetWindowLongPtrW, WindowFromPoint, GA_ROOT,
+    GWL_EXSTYLE, WDA_NONE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 use crate::automation::SelectionInfo;
 use crate::clipboard::ClipboardManager;
 use crate::config::ConfigManager;
+use serde::Serialize;
 
 static SCREENSHOT_STARTING: AtomicBool = AtomicBool::new(false);
 static SKETCH_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static SKETCH_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
 static SCREENSHOT_START_PENDING: AtomicBool = AtomicBool::new(false);
+
+const MAX_IPC_MEDIA_BYTES: usize = 64 * 1024 * 1024;
+// GIF keeps each captured frame as an RGBA bitmap before palette encoding.
+// This bounds peak per-frame allocation to roughly 64 MiB while allowing UHD.
+const MAX_GIF_RECORDING_PIXELS: u64 = 16_000_000;
+
+fn decode_base64_media(data: &str, kind: &str) -> Result<Vec<u8>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let raw = data.find(',').map(|idx| &data[idx + 1..]).unwrap_or(data);
+    // Reject before decoding so a malicious IPC payload cannot force a large allocation.
+    let max_encoded = MAX_IPC_MEDIA_BYTES
+        .checked_add(2)
+        .and_then(|n| n.checked_div(3))
+        .and_then(|n| n.checked_mul(4))
+        .unwrap_or(usize::MAX);
+    if raw.len() > max_encoded {
+        return Err(format!("{} 数据过大，已拒绝", kind));
+    }
+    let bytes = STANDARD
+        .decode(raw)
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    if bytes.len() > MAX_IPC_MEDIA_BYTES {
+        return Err(format!("{} 数据过大，已拒绝", kind));
+    }
+    Ok(bytes)
+}
+
+#[derive(Clone, Copy)]
+struct ScreenshotMonitorBounds {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+// Captured before the overlay takes focus so the selection controls stay on
+// the monitor where the screenshot was started, even if the cursor moves while
+// the overlay is being prepared.
+static SCREENSHOT_MONITOR_BOUNDS: OnceLock<Mutex<Option<ScreenshotMonitorBounds>>> =
+    OnceLock::new();
+
+fn screenshot_monitor_bounds() -> &'static Mutex<Option<ScreenshotMonitorBounds>> {
+    SCREENSHOT_MONITOR_BOUNDS.get_or_init(|| Mutex::new(None))
+}
 
 pub fn queue_screenshot_start_pending() {
     SCREENSHOT_START_PENDING.store(true, Ordering::SeqCst);
@@ -27,6 +73,8 @@ static SCREENSHOT_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static SCREENSHOT_SESSION: AtomicU64 = AtomicU64::new(0);
 static MONITOR_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static POMODORO_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
+static TIMER_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
+static TODO_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 /// 截图/录屏会话开始前 orb 的可见状态。
 /// 会话清理（取消截图/录屏）时按此状态恢复 orb，而不是无条件 show：
@@ -69,6 +117,8 @@ fn now_ms() -> u64 {
 /// 保护 settings 窗口"检查+创建+注册关闭拦截"的异步互斥锁，防止快速双击导致竞态
 /// 使用 tokio::sync::Mutex 而非 std::sync::Mutex，避免在 async 函数中持有同步锁导致死锁
 static SETTINGS_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Protect the independently-created tool configuration window from duplicate creation.
+static TOOL_CONFIG_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// 保护 palette 窗口"检查+创建+注册关闭拦截"的异步互斥锁，防止快速双击导致竞态
 static PALETTE_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -178,6 +228,7 @@ fn is_levitaire_window(app: &tauri::AppHandle, hwnd: HWND) -> bool {
         "toolbar",
         "palette",
         "settings",
+        "tool-config",
         "screenshot-overlay",
         "recording-controls",
         "long-capture-controls",
@@ -339,8 +390,10 @@ pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
                     .visible(false)
                     // 自绘标题栏：去掉原生装饰，由前端渲染标题栏并跟随主题/主题色。
                     // 失去 Windows 原生边框/阴影，由 CSS border 负责窗口边界（见 .settings-shell）。
+                    .transparent(true)
                     .decorations(false)
                     .shadow(false)
+                    .background_color(tauri::webview::Color(0, 0, 0, 0))
                     .resizable(true)
                     .min_inner_size(520.0, 420.0)
                     .build()
@@ -365,6 +418,59 @@ pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
 
     // 注册完成后释放初始化锁，show/set_focus 不需要在锁内执行
     drop(_init_guard);
+
+    // Keep native title-bar surfaces aligned with the icon shipped by the installer.
+    let _ = window.set_icon(crate::app_icon_image());
+
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Show the tool-specific configuration window. System preferences intentionally
+/// live in the separate `settings` window so the two scopes do not compete in
+/// a single navigation tree.
+#[tauri::command]
+pub async fn show_tool_config(app: tauri::AppHandle) -> Result<(), String> {
+    let _init_guard = TOOL_CONFIG_INIT_LOCK.lock().await;
+
+    let window = match app.get_webview_window("tool-config") {
+        Some(win) => win,
+        None => {
+            use tauri::WebviewUrl;
+            use tauri::WebviewWindowBuilder;
+            WebviewWindowBuilder::new(&app, "tool-config", WebviewUrl::App("index.html".into()))
+                .title("Levitaire Tool Configuration")
+                .inner_size(780.0, 560.0)
+                .center()
+                .visible(false)
+                .transparent(true)
+                .decorations(false)
+                .shadow(false)
+                .background_color(tauri::webview::Color(0, 0, 0, 0))
+                .resizable(true)
+                .min_inner_size(520.0, 420.0)
+                .build()
+                .map_err(|e| format!("创建工具配置窗口失败: {}", e))?
+        }
+    };
+
+    static TOOL_CONFIG_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
+    if !TOOL_CONFIG_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
+        let tool_config_app_handle = app.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Some(win) = tool_config_app_handle.get_webview_window("tool-config") {
+                    let _ = win.hide();
+                }
+            }
+        });
+    }
+
+    drop(_init_guard);
+
+    let _ = window.set_icon(crate::app_icon_image());
 
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())?;
@@ -496,9 +602,19 @@ pub fn get_theme_preferences(
 #[tauri::command]
 pub fn set_theme_preferences(
     preferences: crate::config::ThemePreferences,
+    _app: tauri::AppHandle,
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     config_manager.update_theme_preferences(preferences)
+}
+
+#[tauri::command]
+pub fn set_orb_icon(
+    icon: String,
+    _app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_orb_icon(icon)
 }
 
 /// 替换选中文字
@@ -653,6 +769,143 @@ pub fn set_screenshot_hotkey(
         return Err(error);
     }
     Ok(())
+}
+
+#[derive(Clone, Serialize)]
+pub struct HotkeyConflictResult {
+    pub id: String,
+    pub hotkey: String,
+    pub status: String,
+    pub message: String,
+}
+
+/// 检查所有可配置的全局快捷键当前是否成功注册。
+/// Windows RegisterHotKey 能判断是否被占用，但不会暴露占用者进程名称。
+#[tauri::command]
+pub fn check_hotkey_conflicts(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<Vec<HotkeyConflictResult>, String> {
+    let config = config_manager.get_startup_config()?;
+    let entries = [
+        (
+            "screenshot",
+            "截图",
+            crate::hooks::hotkey::HotkeySlotId::Screenshot,
+            config.screenshot_hotkey,
+        ),
+        (
+            "sketch",
+            "屏幕草稿",
+            crate::hooks::hotkey::HotkeySlotId::Sketch,
+            config.sketch_hotkey,
+        ),
+        (
+            "recording",
+            "录屏",
+            crate::hooks::hotkey::HotkeySlotId::Recording,
+            config.recording_hotkey,
+        ),
+        (
+            "todo-quick-add",
+            "待办快速添加",
+            crate::hooks::hotkey::HotkeySlotId::TodoQuickAdd,
+            config.todo_quick_add_hotkey,
+        ),
+    ];
+    let mut results = Vec::with_capacity(entries.len() + 1);
+    let parsed_entries: Vec<_> = entries
+        .iter()
+        .map(|(id, label, _slot, hotkey)| (*id, *label, hotkey.trim().to_string(), crate::hooks::hotkey::parse_hotkey(hotkey)))
+        .collect();
+    for (id, _label, slot, hotkey) in entries.iter() {
+        let trimmed = hotkey.trim().to_string();
+        if trimmed.is_empty() {
+            results.push(HotkeyConflictResult {
+                id: (*id).into(),
+                hotkey: trimmed,
+                status: "disabled".into(),
+                message: "未设置".into(),
+            });
+            continue;
+        }
+        let parsed = crate::hooks::hotkey::parse_hotkey(&trimmed);
+        if parsed.is_none() {
+            results.push(HotkeyConflictResult {
+                id: (*id).into(),
+                hotkey: trimmed,
+                status: "invalid".into(),
+                message: "快捷键格式无效".into(),
+            });
+            continue;
+        }
+        let conflict_label = parsed_entries.iter().find_map(|(other_id, other_label, _, other_parsed)| {
+            (*other_id != *id && *other_parsed == parsed).then_some(*other_label)
+        });
+        if let Some(conflict_label) = conflict_label {
+            results.push(HotkeyConflictResult {
+                id: (*id).into(),
+                hotkey: trimmed,
+                status: "internal-conflict".into(),
+                message: format!("与其他 Levitaire 功能冲突（{}）", conflict_label),
+            });
+        } else if crate::hooks::hotkey::is_registered(*slot) {
+            results.push(HotkeyConflictResult {
+                id: (*id).into(),
+                hotkey: trimmed,
+                status: "available".into(),
+                message: "快捷键可用".into(),
+            });
+        } else {
+            results.push(HotkeyConflictResult {
+                id: (*id).into(),
+                hotkey: trimmed,
+                status: "external-conflict".into(),
+                message: "快捷键可能已被其他程序占用".into(),
+            });
+        }
+    }
+
+    let quick_input_enabled = config.quick_input_enabled;
+    let quick_input_hotkey = config.quick_input_trigger_key;
+    let quick_input_hotkey = if quick_input_hotkey.trim().is_empty() {
+        "CapsLock".to_string()
+    } else {
+        quick_input_hotkey.trim().to_string()
+    };
+    if !quick_input_enabled {
+        results.push(HotkeyConflictResult {
+            id: "quick-input-trigger".into(),
+            hotkey: quick_input_hotkey,
+            status: "disabled".into(),
+            message: "快速输入未启用".into(),
+        });
+    } else if let Some(trigger_vk) = crate::quick_input::parse_trigger_key(&quick_input_hotkey) {
+        let conflict_label = parsed_entries.iter().find_map(|(_, label, _, parsed)| {
+            parsed.filter(|(_, vk)| *vk == trigger_vk).map(|_| *label)
+        });
+        results.push(HotkeyConflictResult {
+            id: "quick-input-trigger".into(),
+            hotkey: quick_input_hotkey,
+            status: if conflict_label.is_some() {
+                "internal-conflict".into()
+            } else {
+                "available".into()
+            },
+            message: if let Some(label) = conflict_label {
+                format!("与{}快捷键使用相同按键，可能同时触发", label)
+            } else {
+                "未发现 Levitaire 内部冲突；其他软件的单键占用无法可靠查询".into()
+            },
+        });
+    } else {
+        results.push(HotkeyConflictResult {
+            id: "quick-input-trigger".into(),
+            hotkey: quick_input_hotkey,
+            status: "invalid".into(),
+            message: "触发键格式无效".into(),
+        });
+    }
+    Ok(results)
 }
 
 #[tauri::command]
@@ -842,15 +1095,18 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     let _init_guard = PALETTE_INIT_LOCK.lock().await;
 
     // 首次打开时动态创建窗口（palette 不再预创建，延迟到首次 show）
-    let palette = match app.get_webview_window("palette") {
-        Some(win) => win,
+    let (palette, should_anchor_to_orb) = match app.get_webview_window("palette") {
+        Some(win) => (win, false),
         None => {
             use tauri::WebviewUrl;
             use tauri::WebviewWindowBuilder;
             let win =
                 WebviewWindowBuilder::new(&app, "palette", WebviewUrl::App("index.html".into()))
                     .title("Levitaire Tools")
-                    .inner_size(360.0, 260.0)
+                    // The nine-card grid is about 194px tall; using a close
+                    // initial size keeps the first placement anchored while
+                    // the frontend performs its final content measurement.
+                    .inner_size(330.0, 194.0)
                     .resizable(false)
                     .transparent(true)
                     .decorations(false)
@@ -867,7 +1123,7 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
                     .background_color(tauri::webview::Color(0, 0, 0, 0))
                     .build()
                     .map_err(|e| format!("创建 palette 窗口失败: {}", e))?;
-            win
+            (win, true)
         }
     };
 
@@ -888,22 +1144,25 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     // 注册完成后释放初始化锁，后续定位和 show 不需要在锁内执行
     drop(_init_guard);
 
-    // palette 物理尺寸：宽度固定 360，高度由前端自适应调整（fit-content + setSize）。
+    // Only the first opening is anchored beside the orb. Subsequent openings retain the
+    // position selected by dragging the palette window.
+    if should_anchor_to_orb {
+    // palette 物理尺寸：宽度固定 330，高度由前端自适应调整（fit-content + setSize）。
     // 首次创建时 inner_size() 可能返回 0，使用 WebviewWindowBuilder 中指定的逻辑尺寸乘 scale_factor 作为 fallback。
     // 高度取 inner_size()（非首次时已是前端上次调整的值），首次创建 fallback 用初始值。
     let scale = palette.scale_factor().unwrap_or(1.0);
     let inner = palette.inner_size().unwrap_or_else(|_| {
-        tauri::PhysicalSize::new((360.0 * scale) as u32, (260.0 * scale) as u32)
+        tauri::PhysicalSize::new((330.0 * scale) as u32, (194.0 * scale) as u32)
     });
     let pw = if inner.width > 0 {
         inner.width as i32
     } else {
-        (360.0 * scale) as i32
+        (330.0 * scale) as i32
     };
     let ph = if inner.height > 0 {
         inner.height as i32
     } else {
-        (260.0 * scale) as i32
+        (194.0 * scale) as i32
     };
 
     // 锚点：优先用 orb 窗口位置；失败则用鼠标位置
@@ -915,7 +1174,11 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
                 let oh = oi.height as i32;
                 let hwnd = orb.hwnd().map(|h| h.0).unwrap_or(std::ptr::null_mut());
                 // 默认放在 orb 右上方，间隔 8px
-                (p.x + ow + 8, p.y - ph + oh, hwnd)
+                let orb_scale = orb.scale_factor().unwrap_or(1.0);
+                let visual_size = (56.0 * orb_scale).round() as i32;
+                let visual_right = p.x + (ow + visual_size) / 2;
+                let visual_bottom = p.y + (oh + visual_size) / 2;
+                (visual_right + 8, visual_bottom - ph, hwnd)
             }
             Err(_) => {
                 if let Ok(cur) = crate::automation::get_mouse_position() {
@@ -953,7 +1216,10 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
                     // 右边放不下，改为放在 orb 左边
                     if let Some(orb) = app.get_webview_window("orb") {
                         if let Ok(p) = orb.outer_position() {
-                            x = p.x - pw - 8;
+                            let ow = orb.inner_size().map(|size| size.width as i32).unwrap_or(96);
+                            let visual_size = (56.0 * orb.scale_factor().unwrap_or(1.0)).round() as i32;
+                            let visual_left = p.x + (ow - visual_size) / 2;
+                            x = visual_left - pw - 8;
                         }
                     }
                     // 如果左边也放不下，贴左边工作区
@@ -981,6 +1247,7 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     // 前端 useLayoutEffect 会在渲染后按实际内容高度再次 setSize 修正，
     // 两者之间可能有一帧微调，可接受。
     let _ = palette.set_size(tauri::PhysicalSize::new(pw, ph));
+    }
 
     palette.show().map_err(|e| e.to_string())?;
     palette.set_focus().map_err(|e| e.to_string())?;
@@ -998,27 +1265,31 @@ pub fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn show_sketch_window(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("sketch-overlay").ok_or_else(|| "草稿窗口尚未创建".to_string())?;
+    let window = app
+        .get_webview_window("sketch-overlay")
+        .ok_or_else(|| "草稿窗口尚未创建".to_string())?;
     if SKETCH_CLOSE_HANDLER_REGISTERED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
         let app_for_window = app.clone();
-        window
-            .on_window_event(move |event| match event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    crate::utils::logger::log("sketch", "CloseRequested intercepted; hiding sketch window");
-                    if let Some(sketch) = app_for_window.get_webview_window("sketch-overlay") {
-                        let _ = sketch.hide();
-                    }
+        window.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                crate::utils::logger::log(
+                    "sketch",
+                    "CloseRequested intercepted; hiding sketch window",
+                );
+                if let Some(sketch) = app_for_window.get_webview_window("sketch-overlay") {
+                    let _ = sketch.hide();
                 }
-                tauri::WindowEvent::Destroyed => {
-                    SKETCH_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
-                    crate::utils::logger::log("sketch", "sketch window destroyed");
-                }
-                _ => {}
-            });
+            }
+            tauri::WindowEvent::Destroyed => {
+                SKETCH_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+                crate::utils::logger::log("sketch", "sketch window destroyed");
+            }
+            _ => {}
+        });
     }
     crate::utils::logger::log("sketch", "show_sketch_window");
     window.show().map_err(|e| e.to_string())?;
@@ -1063,17 +1334,32 @@ pub fn set_sketch_enabled(
 }
 
 #[tauri::command]
-pub fn capture_sketch_background(app: tauri::AppHandle, left: i32, top: i32, width: i32, height: i32) -> Result<String, String> {
+pub fn capture_sketch_background(
+    app: tauri::AppHandle,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+) -> Result<String, String> {
     if width <= 0 || height <= 0 {
         return Err("草稿背景尺寸无效".to_string());
     }
     if let Some(window) = app.get_webview_window("sketch-overlay") {
-        window.hide().map_err(|e| format!("隐藏草稿窗口失败: {}", e))?;
+        window
+            .hide()
+            .map_err(|e| format!("隐藏草稿窗口失败: {}", e))?;
         std::thread::sleep(std::time::Duration::from_millis(45));
-        let result = crate::screenshot::capture_screen_region(left, top, width as u32, height as u32)
-            .and_then(|bgra| crate::screenshot::encode_png_base64(&bgra, width as u32, height as u32));
-        window.show().map_err(|e| format!("恢复草稿窗口失败: {}", e))?;
-        window.set_focus().map_err(|e| format!("恢复草稿窗口焦点失败: {}", e))?;
+        let result =
+            crate::screenshot::capture_screen_region(left, top, width as u32, height as u32)
+                .and_then(|bgra| {
+                    crate::screenshot::encode_png_base64(&bgra, width as u32, height as u32)
+                });
+        window
+            .show()
+            .map_err(|e| format!("恢复草稿窗口失败: {}", e))?;
+        window
+            .set_focus()
+            .map_err(|e| format!("恢复草稿窗口焦点失败: {}", e))?;
         return result;
     }
     let bgra = crate::screenshot::capture_screen_region(left, top, width as u32, height as u32)?;
@@ -1088,6 +1374,46 @@ pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 进入截图模式：显示全屏遮罩窗口并屏蔽鼠标钩子的选区检测
+fn monitor_work_area_for_cursor() -> Option<ScreenshotMonitorBounds> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+
+        let mut cursor = POINT::default();
+        if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+            return None;
+        }
+        let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
+        if monitor.is_invalid() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+            return None;
+        }
+        let rc = info.rcWork;
+        if rc.right <= rc.left || rc.bottom <= rc.top {
+            return None;
+        }
+        Some(ScreenshotMonitorBounds {
+            left: rc.left,
+            top: rc.top,
+            right: rc.right,
+            bottom: rc.bottom,
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 #[tauri::command]
 pub fn start_screenshot(app: tauri::AppHandle) -> Result<(), String> {
     // 命令入口：Tauri 注入 app，缓存 State 在内部用 app.state() 获取
@@ -1103,6 +1429,11 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         crate::utils::logger::log("screenshot", "screenshot start already in progress");
         return Ok(());
     };
+    // Capture the initiating monitor before any asynchronous/frontend work can
+    // move the cursor or allow the overlay to take focus.
+    if let Ok(mut stored) = screenshot_monitor_bounds().lock() {
+        *stored = monitor_work_area_for_cursor();
+    }
     // 录制模式激活时，不允许启动截图（避免两种模式同时激活导致 Esc 处理混乱）
     if crate::hooks::mouse::is_recording_mode() {
         crate::utils::logger::log(
@@ -1244,7 +1575,7 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }
-        if !hwnd_ready {
+    if !hwnd_ready {
         crate::utils::logger::log(
             "screenshot",
             "ERROR: overlay hwnd 2秒内未就绪，遮罩可能无法显示",
@@ -1507,6 +1838,40 @@ pub fn get_virtual_desktop_bounds() -> Result<serde_json::Value, String> {
     }))
 }
 
+/// 获取截图控件应使用的显示器工作区。活跃会话优先使用启动截图时
+/// 捕获的显示器，避免前端加载期间鼠标移动造成控件跳到另一块屏幕。
+#[tauri::command]
+pub fn get_screenshot_monitor_bounds() -> Result<serde_json::Value, String> {
+    let stored = screenshot_monitor_bounds()
+        .lock()
+        .ok()
+        .and_then(|guard| *guard);
+    let monitor = if CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
+        || SCREENSHOT_STARTING.load(Ordering::SeqCst)
+    {
+        stored.or_else(monitor_work_area_for_cursor)
+    } else {
+        monitor_work_area_for_cursor().or(stored)
+    };
+    let bounds = monitor.or_else(|| {
+        crate::screenshot::virtual_desktop_bounds()
+            .ok()
+            .map(|b| ScreenshotMonitorBounds {
+                left: b.origin_x,
+                top: b.origin_y,
+                right: b.origin_x.saturating_add(b.width),
+                bottom: b.origin_y.saturating_add(b.height),
+            })
+    });
+    let b = bounds.ok_or_else(|| "无法获取显示器工作区".to_string())?;
+    Ok(serde_json::json!({
+        "left": b.left,
+        "top": b.top,
+        "right": b.right,
+        "bottom": b.bottom,
+    }))
+}
+
 /// 返回全屏缓存的 PNG base64（不带 data: 前缀），供前端放大镜铺底取像素。
 /// 缓存由 start_screenshot 在 overlay 显示前截取，为纯净桌面画面。
 /// 缓存未就绪时返回 Err，前端降级为仅显示十字线。
@@ -1582,15 +1947,7 @@ pub fn clipboard_set_image(
     base64_data: String,
     clipboard: State<'_, ClipboardManager>,
 ) -> Result<(), String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let raw = if let Some(idx) = base64_data.find(',') {
-        &base64_data[idx + 1..]
-    } else {
-        &base64_data
-    };
-    let bytes = STANDARD
-        .decode(raw)
-        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    let bytes = decode_base64_media(&base64_data, "图片")?;
     clipboard.copy_image(&bytes).map_err(|e| e.to_string())
 }
 
@@ -1647,6 +2004,7 @@ pub async fn ocr_region(
 #[tauri::command]
 pub fn pin_image(
     app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
     base64_data: String,
     x: i32,
     y: i32,
@@ -1660,8 +2018,18 @@ pub fn pin_image(
     if width <= 0 || height <= 0 {
         return Err("贴图尺寸无效".into());
     }
-    let id =
-        crate::screenshot::pin::create_pin(&app, &base64_data, x, y, width as u32, height as u32)?;
+    let border_color = config_manager.get_pin_border_color()?;
+    let border_width = config_manager.get_pin_border_width()?;
+    let id = crate::screenshot::pin::create_pin(
+        &app,
+        &base64_data,
+        x,
+        y,
+        width as u32,
+        height as u32,
+        &border_color,
+        border_width,
+    )?;
     crate::utils::logger::log("screenshot", &format!("pin_image created id={}", id));
     Ok(id)
 }
@@ -1686,18 +2054,7 @@ pub async fn save_image(
     base64_data: String,
     filename: String,
 ) -> Result<bool, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-
-    // 去除 data:image/png;base64, 前缀
-    let raw = if let Some(idx) = base64_data.find(',') {
-        &base64_data[idx + 1..]
-    } else {
-        &base64_data
-    };
-
-    let bytes = STANDARD
-        .decode(raw)
-        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    let bytes = decode_base64_media(&base64_data, "图片")?;
 
     // 检查是否配置了截图保存路径
     let config_manager = app.state::<ConfigManager>();
@@ -1920,8 +2277,9 @@ fn default_orb_position(win_w: i32, win_h: i32) -> Option<(i32, i32)> {
             .is_ok()
         };
         if ok {
-            let x = rc.right as f64 - win_w as f64 - margin;
-            let y = rc.bottom as f64 - win_h as f64 - margin;
+            let visual_size = 56.0 * (win_w as f64 / 96.0);
+            let x = rc.right as f64 - (win_w as f64 + visual_size) / 2.0 - margin;
+            let y = rc.bottom as f64 - (win_h as f64 + visual_size) / 2.0 - margin;
             return Some((x as i32, y as i32));
         }
     }
@@ -2158,6 +2516,364 @@ pub fn set_system_monitor_config(
     config_manager.update_system_monitor_config(config)
 }
 
+// ─── 待办清单 ──────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_todos(
+    include_completed: Option<bool>,
+    sort_mode: Option<String>,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<Vec<crate::todo::TodoItem>, String> {
+    state.list(include_completed.unwrap_or(true), sort_mode.as_deref())
+}
+
+#[tauri::command]
+pub fn get_deleted_todos(
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<Vec<crate::todo::TodoItem>, String> {
+    state.deleted()
+}
+
+#[tauri::command]
+pub fn purge_deleted_todos(
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<(), String> {
+    state.purge_deleted()?;
+    let _ = app.emit("todo-changed", serde_json::json!({ "trashPurged": true }));
+    Ok(())
+}
+
+#[tauri::command]
+pub fn export_todos(state: State<'_, crate::todo::TodoStore>) -> Result<bool, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Todo JSON", &["json"])
+        .set_file_name("levitaire-todos.json")
+        .save_file()
+    else {
+        return Ok(false);
+    };
+    state.export_to(&path)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn import_todos(
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<bool, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Todo JSON", &["json"])
+        .pick_file()
+    else {
+        return Ok(false);
+    };
+    state.import_from(&path)?;
+    let _ = app.emit("todo-changed", serde_json::json!({ "imported": true }));
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn reorder_todos(
+    id: String,
+    direction: i32,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoItem, String> {
+    let item = state.reorder(&id, direction)?;
+    let _ = app.emit("todo-changed", &item);
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn get_todo_lists(
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<Vec<crate::todo::TodoList>, String> {
+    state.list_lists()
+}
+
+#[tauri::command]
+pub fn create_todo_list(
+    input: crate::todo::CreateTodoListInput,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoList, String> {
+    let list = state.create_list(input)?;
+    let _ = app.emit("todo-changed", &list);
+    Ok(list)
+}
+
+#[tauri::command]
+pub fn update_todo_list(
+    id: String,
+    input: crate::todo::UpdateTodoListInput,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoList, String> {
+    let list = state.update_list(&id, input)?;
+    let _ = app.emit("todo-changed", &list);
+    Ok(list)
+}
+
+#[tauri::command]
+pub fn delete_todo_list(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<(), String> {
+    state.delete_list(&id)?;
+    let _ = app.emit(
+        "todo-changed",
+        serde_json::json!({ "id": id, "listDeleted": true }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn create_todo(
+    input: crate::todo::CreateTodoInput,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoItem, String> {
+    let item = state.create(input)?;
+    let _ = app.emit("todo-changed", &item);
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn update_todo(
+    id: String,
+    input: crate::todo::UpdateTodoInput,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoItem, String> {
+    let item = state.update(&id, input)?;
+    let _ = app.emit("todo-changed", &item);
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn set_todo_completed(
+    id: String,
+    completed: bool,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoItem, String> {
+    let item = state.set_completed(&id, completed)?;
+    let _ = app.emit("todo-changed", &item);
+    if completed {
+        if let Some(pomodoro) = app.try_state::<crate::pomodoro::PomodoroState>() {
+            if pomodoro.clear_todo(&id) {
+                let _ = app.emit("pomodoro-tick", pomodoro.payload());
+            }
+        }
+    }
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn snooze_todo(
+    id: String,
+    minutes: u32,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoItem, String> {
+    let item = state.snooze(&id, minutes)?;
+    let _ = app.emit("todo-changed", &item);
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn delete_todo(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<(), String> {
+    state.delete(&id)?;
+    let _ = app.emit(
+        "todo-changed",
+        serde_json::json!({ "id": id, "deleted": true }),
+    );
+    if let Some(pomodoro) = app.try_state::<crate::pomodoro::PomodoroState>() {
+        if pomodoro.clear_todo(&id) {
+            let _ = app.emit("pomodoro-tick", pomodoro.payload());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn restore_todo(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoItem, String> {
+    let restored = state.restore(&id)?;
+    let _ = app.emit("todo-changed", &restored);
+    Ok(restored)
+}
+
+#[tauri::command]
+pub fn get_todo_quick_add_hotkey(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<String, String> {
+    config_manager.get_todo_quick_add_hotkey()
+}
+
+#[tauri::command]
+pub fn set_todo_quick_add_hotkey(
+    hotkey: String,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let hotkey = hotkey.trim().to_string();
+    let previous = config_manager.get_todo_quick_add_hotkey()?;
+    let tool_enabled = config_manager.get_todo_enabled()?;
+    let slot = crate::hooks::hotkey::HotkeySlotId::TodoQuickAdd;
+    if hotkey.is_empty() {
+        crate::hooks::hotkey::unregister_hotkey(slot);
+        if let Err(error) = config_manager.update_todo_quick_add_hotkey(String::new()) {
+            if tool_enabled && !previous.is_empty() {
+                let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
+            }
+            return Err(error);
+        }
+        return Ok(());
+    }
+    if tool_enabled {
+        crate::hooks::hotkey::register_hotkey(slot, &hotkey)?;
+    }
+    if let Err(error) = config_manager.update_todo_quick_add_hotkey(hotkey) {
+        if !tool_enabled || previous.is_empty() {
+            crate::hooks::hotkey::unregister_hotkey(slot);
+        } else {
+            let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_todo_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
+    config_manager.get_todo_enabled()
+}
+
+#[tauri::command]
+pub fn get_todo_reminders_enabled(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<bool, String> {
+    config_manager.get_todo_reminders_enabled()
+}
+
+#[tauri::command]
+pub fn set_todo_reminders_enabled(
+    enabled: bool,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_todo_reminders_enabled(enabled)
+}
+
+#[tauri::command]
+pub fn get_todo_reminder_sound(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
+    config_manager.get_todo_reminder_sound()
+}
+
+#[tauri::command]
+pub fn set_todo_reminder_sound(
+    sound: String,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_todo_reminder_sound(sound)
+}
+
+#[tauri::command]
+pub fn set_todo_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let previous = config_manager.get_todo_enabled()?;
+    if !enabled {
+        if let Some(window) = app.get_webview_window("todo-overlay") {
+            let _ = window.hide();
+        }
+    }
+    if enabled {
+        if let Ok(hotkey) = config_manager.get_todo_quick_add_hotkey() {
+            if !hotkey.is_empty() {
+                crate::hooks::hotkey::register_hotkey(
+                    crate::hooks::hotkey::HotkeySlotId::TodoQuickAdd,
+                    &hotkey,
+                )?;
+            }
+        }
+    } else {
+        crate::hooks::hotkey::unregister_hotkey(crate::hooks::hotkey::HotkeySlotId::TodoQuickAdd);
+    }
+    if let Err(error) = config_manager.update_todo_enabled(enabled) {
+        let slot = crate::hooks::hotkey::HotkeySlotId::TodoQuickAdd;
+        if previous {
+            if let Ok(hotkey) = config_manager.get_todo_quick_add_hotkey() {
+                if !hotkey.is_empty() {
+                    let _ = crate::hooks::hotkey::register_hotkey(slot, &hotkey);
+                }
+            }
+        } else {
+            crate::hooks::hotkey::unregister_hotkey(slot);
+        }
+        crate::hooks::hotkey::set_slot_enabled(slot, previous);
+        return Err(error);
+    }
+    crate::hooks::hotkey::set_slot_enabled(
+        crate::hooks::hotkey::HotkeySlotId::TodoQuickAdd,
+        enabled,
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn show_todo_window(
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window("todo-overlay")
+        .ok_or_else(|| "todo-overlay 窗口未找到".to_string())?;
+    win.set_size(tauri::LogicalSize::new(360.0, 560.0))
+        .map_err(|e| e.to_string())?;
+    if !TODO_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
+        let on_close = win.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = on_close.hide();
+            }
+        });
+    }
+    if !win.is_visible().unwrap_or(true) {
+        if let Ok(Some(pos)) = config_manager.get_window_position("todo-overlay") {
+            let inner = win.inner_size().unwrap_or_default();
+            let (x, y) =
+                clamp_position_to_workarea(pos.x, pos.y, inner.width as i32, inner.height as i32);
+            win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, y,
+            )))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn hide_todo_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("todo-overlay") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ─── 番茄钟 ────────────────────────────────────────────────────
 
 /// 显示番茄钟悬浮窗。关闭拦截仅隐藏窗口、不停计时（窗口隐藏后倒计时继续，
@@ -2211,6 +2927,97 @@ pub fn hide_pomodoro_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn show_timer_window(
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window("time-overlay")
+        .ok_or_else(|| "time-overlay 窗口未找到".to_string())?;
+    if !TIMER_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
+        let win_on_close = win.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = win_on_close.hide();
+            }
+        });
+    }
+    if !win.is_visible().unwrap_or(true) {
+        if let Ok(Some(pos)) = config_manager.get_window_position("time-overlay") {
+            let inner = win.inner_size().unwrap_or_default();
+            let (x, y) = clamp_position_to_workarea(pos.x, pos.y, inner.width as i32, inner.height as i32);
+            win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn hide_timer_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("time-overlay") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_timer_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
+    config_manager.get_timer_enabled()
+}
+
+#[tauri::command]
+pub fn set_timer_enabled(enabled: bool, app: tauri::AppHandle, config_manager: State<'_, ConfigManager>) -> Result<(), String> {
+    if !enabled {
+        if let Some(state) = app.try_state::<crate::timer::TimerState>() {
+            let payload = state.pause_all();
+            let _ = app.emit("timers-changed", &payload);
+        }
+        if let Some(window) = app.get_webview_window("time-overlay") { let _ = window.hide(); }
+    }
+    config_manager.update_timer_enabled(enabled)
+}
+
+#[tauri::command]
+pub fn get_timer_reminders_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
+    config_manager.get_timer_reminders_enabled()
+}
+
+#[tauri::command]
+pub fn set_timer_reminders_enabled(enabled: bool, config_manager: State<'_, ConfigManager>) -> Result<(), String> {
+    config_manager.update_timer_reminders_enabled(enabled)
+}
+
+#[tauri::command]
+pub fn get_timer_reminder_sound(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
+    config_manager.get_timer_reminder_sound()
+}
+
+#[tauri::command]
+pub fn set_timer_reminder_sound(sound: String, config_manager: State<'_, ConfigManager>) -> Result<(), String> {
+    config_manager.update_timer_reminder_sound(sound)
+}
+
+#[tauri::command]
+pub fn get_timer_lunar_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
+    config_manager.get_timer_lunar_enabled()
+}
+
+#[tauri::command]
+pub fn set_timer_lunar_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_timer_lunar_enabled(enabled)?;
+    let _ = app.emit("timer-lunar-enabled-changed", enabled);
+    Ok(())
+}
+
 /// 获取番茄钟当前状态（窗口重开/初始化时拉取，前端据此恢复渲染）
 #[tauri::command]
 pub fn get_pomodoro_state(
@@ -2226,6 +3033,19 @@ pub fn start_pomodoro(
     state: State<'_, crate::pomodoro::PomodoroState>,
 ) -> Result<(), String> {
     state.start(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_pomodoro_for_todo(
+    todo_id: String,
+    app: tauri::AppHandle,
+    todo_state: State<'_, crate::todo::TodoStore>,
+    pomodoro_state: State<'_, crate::pomodoro::PomodoroState>,
+) -> Result<(), String> {
+    todo_state.active_item(&todo_id)?;
+    pomodoro_state.start_for_todo(&app, todo_id);
+    let _ = app.emit("pomodoro-tick", pomodoro_state.payload());
     Ok(())
 }
 
@@ -2314,6 +3134,91 @@ pub fn set_pomodoro_config(
     config_manager.update_pomodoro_config(config)
 }
 
+// ─── 时钟与计时 ───────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_timers(
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
+    Ok(state.payload())
+}
+
+#[tauri::command]
+pub fn create_timer(
+    input: crate::timer::CreateTimerInput,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.create(input)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn delete_timer(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.delete(&id)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn set_timer_duration(
+    id: String,
+    seconds: u64,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.set_duration(&id, seconds)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn rename_timer(id: String, label: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.rename(&id, label)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn add_timer_lap(id: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.add_lap(&id)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn start_timer(id: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.start(&id)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn pause_timer(id: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.pause(&id)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn reset_timer(id: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.reset(&id)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn add_timer_seconds(id: String, seconds: u64, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+    let payload = state.add_seconds(&id, seconds)?;
+    let _ = app.emit("timers-changed", &payload);
+    Ok(payload)
+}
+
 // ─── OCR 引擎管理 ─────────────────────────────────────────────────
 
 /// 获取可用 OCR 引擎列表及当前激活引擎
@@ -2345,6 +3250,9 @@ pub async fn set_ocr_engine(
 ) -> Result<(), String> {
     let id = crate::ocr::EngineId::from_str(&engine)
         .ok_or_else(|| format!("无效的引擎标识: {}", engine))?;
+    if id != crate::ocr::EngineId::Paddle {
+        return Err("OCR 已固定使用 PaddleOCR".into());
+    }
 
     // 在阻塞池切换引擎（加载模型/初始化可能耗时）。
     // 返回切换前的激活引擎，供持久化失败时回滚，保证内存引擎与 UI 显示一致。
@@ -2381,8 +3289,6 @@ pub async fn set_ocr_engine(
         return Err(error);
     }
 
-    // 同步全局偏好变量（防御：服务当前不会重建，但若未来出现重建路径偏好仍正确）
-    crate::ocr::set_preferred_engine(Some(id));
     Ok(())
 }
 
@@ -2587,6 +3493,7 @@ pub fn start_recording_select(app: tauri::AppHandle) -> Result<(), String> {
 
 /// 开始录制（区域+模式+fps 已确定）
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn start_recording(
     app: tauri::AppHandle,
     left: i32,
@@ -2600,7 +3507,8 @@ pub fn start_recording(
     if width == 0 || height == 0 || width > 32_768 || height > 32_768 {
         return Err("invalid recording dimensions".to_string());
     }
-    if u64::from(width) * u64::from(height) > 100_000_000 {
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > 100_000_000 {
         return Err("recording region contains too many pixels".to_string());
     }
     if !(1..=60).contains(&max_duration_sec) {
@@ -2619,6 +3527,10 @@ pub fn start_recording(
         "video" => crate::recording::RecordMode::Video,
         _ => return Err(format!("无效的录制模式: {}", mode)),
     };
+    if matches!(record_mode, crate::recording::RecordMode::Gif) && pixels > MAX_GIF_RECORDING_PIXELS
+    {
+        return Err("GIF 录制区域过大，最多支持 1600 万像素".to_string());
+    }
 
     let region = crate::recording::RecordRegion {
         left,
@@ -2771,15 +3683,7 @@ pub fn clipboard_set_gif(
     base64_data: String,
     clipboard: State<'_, ClipboardManager>,
 ) -> Result<(), String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let raw = if let Some(idx) = base64_data.find(',') {
-        &base64_data[idx + 1..]
-    } else {
-        &base64_data
-    };
-    let bytes = STANDARD
-        .decode(raw)
-        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    let bytes = decode_base64_media(&base64_data, "GIF")?;
     clipboard.copy_gif(&bytes).map_err(|e| e.to_string())
 }
 
@@ -2792,15 +3696,7 @@ pub async fn save_gif(
     base64_data: String,
     filename: String,
 ) -> Result<bool, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let raw = if let Some(idx) = base64_data.find(',') {
-        &base64_data[idx + 1..]
-    } else {
-        &base64_data
-    };
-    let bytes = STANDARD
-        .decode(raw)
-        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    let bytes = decode_base64_media(&base64_data, "GIF")?;
 
     // 检查是否配置了录屏保存路径
     let config_manager = app.state::<ConfigManager>();
@@ -3044,6 +3940,36 @@ pub fn set_screenshot_save_path(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     config_manager.update_screenshot_save_path(path)
+}
+
+/// 获取贴图窗口边框颜色（#RRGGBB）
+#[tauri::command]
+pub fn get_pin_border_color(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
+    config_manager.get_pin_border_color()
+}
+
+/// 更新贴图窗口边框颜色并持久化
+#[tauri::command]
+pub fn set_pin_border_color(
+    color: String,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_pin_border_color(color)
+}
+
+/// 获取贴图窗口边框粗细（像素）
+#[tauri::command]
+pub fn get_pin_border_width(config_manager: State<'_, ConfigManager>) -> Result<u32, String> {
+    config_manager.get_pin_border_width()
+}
+
+/// 更新贴图窗口边框粗细并持久化
+#[tauri::command]
+pub fn set_pin_border_width(
+    width: u32,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config_manager.update_pin_border_width(width)
 }
 
 /// 打开文件夹选择对话框，返回用户选择的目录路径；取消返回 null

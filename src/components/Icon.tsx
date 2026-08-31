@@ -69,6 +69,7 @@ import {
   ZoomIn,
   ZoomOut,
   Minus,
+  Plus,
   Circle,
 } from "lucide-react";
 import type { LucideProps } from "lucide-react";
@@ -144,6 +145,7 @@ const ICON_MAP = {
   ZoomIn,
   ZoomOut,
   Minus,
+  Plus,
   Circle,
 } as const;
 

@@ -585,36 +585,145 @@ pub fn clear_history() {
 /// 是否有粘贴线程正在执行（防止快速连续选中时多个线程对同一剪贴板互踩）
 static PASTE_INFLIGHT: AtomicBool = AtomicBool::new(false);
 
-/// 将文本输入到当前焦点输入框：保存原剪贴板 → 写入新文本 → 模拟 Ctrl+V → 恢复原剪贴板。
-/// 在独立线程执行，避免阻塞 hook；粘贴后短暂等待再恢复，给目标应用处理 Ctrl+V 的时间。
+/// 逐字符注入的上限。多行/超长内容改走剪贴板，避免终端把换行当成提交，
+/// 也避免 SendInput 一次生成过多键盘事件。
+const DIRECT_INPUT_MAX_UTF16: usize = 4096;
+
+/// 将文本输入到当前焦点输入框：优先直接注入 Unicode 文本，必要时回退到纯文本粘贴。
+/// 回退在独立线程执行，避免阻塞 hook；粘贴后短暂等待再恢复原剪贴板文本。
 /// 若上一次粘贴仍在进行，本次请求直接丢弃，避免并发线程竞争同一剪贴板导致状态错乱。
 pub fn type_text_async(text: String) {
     if PASTE_INFLIGHT.swap(true, Ordering::SeqCst) {
         crate::utils::logger::log("quick_input", "paste already in-flight, drop request");
         return;
     }
+    let target_hwnd = unsafe { crate::automation::clipboard_selection::foreground_window_handle() };
+    if target_hwnd == 0 {
+        PASTE_INFLIGHT.store(false, Ordering::SeqCst);
+        crate::utils::logger::log("quick_input", "no foreground target; skip input");
+        return;
+    }
+    let terminal_target =
+        unsafe { crate::automation::clipboard_selection::foreground_is_terminal_like() };
     std::thread::spawn(move || {
         let _guard = PasteGuard;
-        // 保存原剪贴板文本（仅文本，图片不恢复——转盘工具只处理文本输入场景）
+        if unsafe { crate::automation::clipboard_selection::foreground_window_handle() }
+            != target_hwnd
+        {
+            crate::utils::logger::log("quick_input", "foreground target changed; skip input");
+            return;
+        }
+        // 主路径直接注入 Unicode 文本，不修改剪贴板，也不会触发目标程序对 Ctrl+V 的特殊语义。
+        let utf16_len = text.encode_utf16().count();
+        let has_newline = text.bytes().any(|b| b == b'\r' || b == b'\n');
+        // 终端优先走其稳定的纯文本粘贴快捷键；普通控件的短单行文本才逐字注入。
+        let use_clipboard_fallback =
+            terminal_target || utf16_len > DIRECT_INPUT_MAX_UTF16 || has_newline;
+        if !use_clipboard_fallback {
+            match unsafe { crate::automation::clipboard_selection::simulate_unicode_text(&text) } {
+                crate::automation::clipboard_selection::UnicodeInputResult::Complete => {
+                    crate::utils::logger::log(
+                        "quick_input",
+                        &format!("text injected directly: {} UTF-16 units", utf16_len),
+                    );
+                    return;
+                }
+                crate::automation::clipboard_selection::UnicodeInputResult::Partial => {
+                    // 部分事件已经进入目标窗口，不能再发送完整文本，否则会重复输入。
+                    crate::utils::logger::log(
+                        "quick_input",
+                        "Unicode input partially sent; skip clipboard retry",
+                    );
+                    return;
+                }
+                crate::automation::clipboard_selection::UnicodeInputResult::Failed => {}
+            }
+        }
+        let snapshot_sequence_before =
+            unsafe { crate::automation::clipboard_selection::clipboard_sequence_number() };
         let original = unsafe { read_clipboard_text_sync() };
-        // 释放可能残留的修饰键，防止 Ctrl 卡住影响粘贴
-        unsafe { crate::automation::clipboard_selection::release_all_modifiers() };
+        let original_image =
+            unsafe { crate::automation::clipboard_selection::read_clipboard_image() };
+        let snapshot_stable = snapshot_sequence_before
+            == unsafe { crate::automation::clipboard_selection::clipboard_sequence_number() };
+        if !snapshot_stable
+            || unsafe { crate::automation::clipboard_selection::foreground_window_handle() }
+                != target_hwnd
+        {
+            crate::utils::logger::log(
+                "quick_input",
+                "target or clipboard changed before write; skip input",
+            );
+            return;
+        }
         // 写入目标文本
         if !unsafe { crate::automation::clipboard_selection::set_clipboard_text_pub(&text) } {
             crate::utils::logger::log("quick_input", "set_clipboard_text failed");
+            if snapshot_stable && (original.is_some() || original_image.is_some()) {
+                unsafe {
+                    crate::automation::clipboard_selection::restore_clipboard_snapshot(
+                        original.as_deref(),
+                        original_image.as_deref(),
+                    );
+                }
+            }
+            return;
+        }
+        let write_sequence =
+            unsafe { crate::automation::clipboard_selection::clipboard_sequence_number() };
+        if unsafe { crate::automation::clipboard_selection::foreground_window_handle() }
+            != target_hwnd
+        {
+            if unsafe { crate::automation::clipboard_selection::clipboard_sequence_number() }
+                == write_sequence
+            {
+                unsafe {
+                    crate::automation::clipboard_selection::restore_clipboard_snapshot(
+                        original.as_deref(),
+                        original_image.as_deref(),
+                    );
+                }
+            }
+            crate::utils::logger::log("quick_input", "target changed before paste; skip input");
             return;
         }
         // 短暂等待剪贴板就绪
         std::thread::sleep(std::time::Duration::from_millis(40));
-        // 模拟 Ctrl+V
-        if !unsafe { crate::automation::clipboard_selection::simulate_paste() } {
-            crate::utils::logger::log("quick_input", "simulate_paste failed");
+        // 终端使用纯文本粘贴；普通输入框保留 Ctrl+V 兼容路径。
+        let pasted = if terminal_target {
+            unsafe { crate::automation::clipboard_selection::simulate_text_paste() }
+        } else {
+            unsafe { crate::automation::clipboard_selection::simulate_paste_preserving_modifiers() }
+        };
+        if !pasted {
+            crate::utils::logger::log("quick_input", "clipboard paste shortcut failed");
         }
         // 等待目标应用处理粘贴
         std::thread::sleep(std::time::Duration::from_millis(120));
-        // 恢复原剪贴板
-        if let Some(orig) = original {
-            unsafe { crate::automation::clipboard_selection::set_clipboard_text_pub(&orig) };
+        // 用户在等待期间复制了新内容时不恢复，避免覆盖用户的最新剪贴板。
+        let unchanged = unsafe {
+            crate::automation::clipboard_selection::clipboard_sequence_number() == write_sequence
+        };
+        if !unchanged {
+            crate::utils::logger::log(
+                "quick_input",
+                "clipboard changed during paste; skip restoration",
+            );
+        } else if !snapshot_stable {
+            crate::utils::logger::log(
+                "quick_input",
+                "clipboard changed while capturing snapshot; skip restoration",
+            );
+        } else if original.is_some() || original_image.is_some() {
+            let restored = unsafe {
+                crate::automation::clipboard_selection::restore_clipboard_snapshot(
+                    original.as_deref(),
+                    original_image.as_deref(),
+                )
+            };
+            if !restored {
+                crate::utils::logger::log("quick_input", "clipboard restoration failed");
+            }
         }
     });
 
@@ -634,6 +743,7 @@ unsafe fn read_clipboard_text_sync() -> Option<String> {
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
     const CF_UNICODETEXT: u32 = 13;
+    const MAX_CLIPBOARD_U16: usize = 1024 * 1024;
     if OpenClipboard(None).is_err() {
         return None;
     }
@@ -648,7 +758,11 @@ unsafe fn read_clipboard_text_sync() -> Option<String> {
             return None;
         }
         let size = GlobalSize(hmem);
-        let max_u16 = if size > 0 { size / 2 } else { 0 };
+        let max_u16 = if size > 0 {
+            (size / 2).min(MAX_CLIPBOARD_U16)
+        } else {
+            0
+        };
         if max_u16 == 0 {
             let _ = GlobalUnlock(hmem);
             return None;

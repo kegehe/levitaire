@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, act } from "@testing-library/react";
 import { createRef } from "react";
-import AnnotationCanvas, { type AnnotationCanvasHandle } from "./AnnotationCanvas";
+import AnnotationCanvas, {
+  annotationCursor,
+  type AnnotationCanvasHandle,
+} from "./AnnotationCanvas";
 import { useAnnotations } from "./useAnnotations";
 import type { Annotation } from "./types";
 
@@ -88,6 +91,50 @@ describe("AnnotationCanvas", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("为每个标注工具生成带颜色和点击热点的自定义光标", () => {
+    const tools: Annotation["kind"][] = ["rect", "arrow", "brush", "text", "number", "mosaic"];
+
+    for (const tool of tools) {
+      const cursor = annotationCursor(tool, "#123456");
+      expect(cursor).toMatch(/^url\("data:image\/svg\+xml,/);
+      expect(cursor).toContain("%23123456");
+      expect(cursor).toMatch(/\) \d+ \d+, auto$/);
+    }
+
+    // Invalid persisted values must not be interpolated into the SVG URL.
+    expect(annotationCursor("brush", "not-a-color")).toContain("%23E53935");
+    expect(annotationCursor("brush", "#12345")).toContain("%23E53935");
+    expect(annotationCursor("brush", "#1234567")).toContain("%23E53935");
+  });
+
+  it("将光标绑定到画布，并在工具或颜色变化时更新", () => {
+    setup();
+    function Host({ tool, color }: { tool: Annotation["kind"]; color: string }) {
+      const annotations = useAnnotations();
+      return (
+        <AnnotationCanvas
+          image={image}
+          selection={selection}
+          scale={scale}
+          tool={tool}
+          color={color}
+          widthIndex={1}
+          annotations={annotations}
+        />
+      );
+    }
+
+    const { container, rerender } = render(<Host tool="rect" color="#123456" />);
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    const rectCursor = canvas.style.cursor;
+    expect(rectCursor).toContain("data:image/svg+xml");
+    expect(rectCursor).toContain("%23123456");
+
+    rerender(<Host tool="arrow" color="#0A84FF" />);
+    expect(canvas.style.cursor).toContain("%230A84FF");
+    expect(canvas.style.cursor).not.toBe(rectCursor);
   });
 
   it("渲染 canvas 元素，内部尺寸 = image 物理尺寸", () => {

@@ -13,7 +13,10 @@ import {
   subscribeThemePreferences,
 } from "../../styles/themePreferences";
 import "./ScreenshotTool.css";
-import { ensureLongCaptureControlsWindow, ensureLongCaptureFrameWindow } from "../../utils/toolWindows";
+import {
+  ensureLongCaptureControlsWindow,
+  ensureLongCaptureFrameWindow,
+} from "../../utils/toolWindows";
 
 /** 截图模式：绘制选区 / 选区完成后进入标注 */
 type Mode = "selecting" | "long-capturing" | "annotating";
@@ -34,6 +37,13 @@ interface CapturedImage {
 interface PanelPosition {
   left: number;
   top: number;
+}
+
+interface MonitorWorkArea {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 }
 
 /** 选区方式：区域拖框 / 窗口识别 */
@@ -90,6 +100,9 @@ function ScreenshotTool() {
   const [ocrSelection, setOcrSelection] = useState("");
   const [ocrPanelPosition, setOcrPanelPosition] = useState<PanelPosition | null>(null);
   const [toolbarAbove, setToolbarAbove] = useState(false);
+  const [monitorWorkArea, setMonitorWorkArea] = useState<MonitorWorkArea | null>(null);
+  const [captureTabsPosition, setCaptureTabsPosition] = useState<PanelPosition | null>(null);
+  const [windowListPosition, setWindowListPosition] = useState<PanelPosition | null>(null);
   const [ready, setReady] = useState(false);
   const readyRef = useRef(false);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -103,6 +116,9 @@ function ScreenshotTool() {
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ocrTextRef = useRef<HTMLTextAreaElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const captureTabsRef = useRef<HTMLDivElement>(null);
+  const windowListRef = useRef<HTMLDivElement>(null);
+  const monitorRequestRef = useRef(0);
   const ocrPanelDrag = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
   // 失焦退出防抖计时器：失焦后延迟一小段时间再退出，期间若重新获焦则取消，
   // 兼顾「失焦应退出标注态」与「RDP/远程桌面等环境下 overlay 频繁瞬时失焦」。
@@ -125,6 +141,121 @@ function ScreenshotTool() {
     const shouldPlaceAbove = !belowFits && aboveFits;
     setToolbarAbove((current) => (current === shouldPlaceAbove ? current : shouldPlaceAbove));
   }, [mode, selection, image, busy, error]);
+
+  // The overlay spans the virtual desktop, so 50% would place the controls at
+  // the seam between monitors. Anchor them to the monitor active at startup,
+  // then clamp using their measured size for mixed layouts and DPI scales.
+  useLayoutEffect(() => {
+    if (mode !== "selecting" || !ready || !captureTabsRef.current) return;
+
+    const updateCapturePanelPosition = () => {
+      const tabs = captureTabsRef.current;
+      if (!tabs) return;
+      const scale = scaleRef.current || 1;
+      const origin = originRef.current;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const monitor = monitorWorkArea ?? {
+        left: origin.x,
+        top: origin.y,
+        right: origin.x + viewportWidth * scale,
+        bottom: origin.y + viewportHeight * scale,
+      };
+      const monitorLeft = (monitor.left - origin.x) / scale;
+      const monitorTop = (monitor.top - origin.y) / scale;
+      const monitorRight = (monitor.right - origin.x) / scale;
+      const monitorBottom = (monitor.bottom - origin.y) / scale;
+      const horizontalMin = Math.max(VIEWPORT_PADDING, monitorLeft + VIEWPORT_PADDING);
+      const horizontalMax = Math.min(
+        viewportWidth - tabs.offsetWidth - VIEWPORT_PADDING,
+        monitorRight - tabs.offsetWidth - VIEWPORT_PADDING,
+      );
+      const centeredLeft = (monitorLeft + monitorRight - tabs.offsetWidth) / 2;
+      const left =
+        horizontalMax >= horizontalMin
+          ? Math.max(horizontalMin, Math.min(centeredLeft, horizontalMax))
+          : Math.max(
+              VIEWPORT_PADDING,
+              Math.min(centeredLeft, viewportWidth - tabs.offsetWidth - VIEWPORT_PADDING),
+            );
+      const verticalMin = Math.max(VIEWPORT_PADDING, monitorTop + VIEWPORT_PADDING);
+      const verticalMax = Math.min(
+        viewportHeight - tabs.offsetHeight - VIEWPORT_PADDING,
+        monitorBottom - tabs.offsetHeight - VIEWPORT_PADDING,
+      );
+      let top =
+        verticalMax >= verticalMin
+          ? Math.max(verticalMin, Math.min(monitorTop + VIEWPORT_PADDING, verticalMax))
+          : VIEWPORT_PADDING;
+
+      // Keep the mode bar out of a selection when the user drags through the
+      // top area. Prefer below, then above, while retaining the monitor bounds.
+      if (selection && selection.width > 0 && selection.height > 0) {
+        const overlaps =
+          selection.left < left + tabs.offsetWidth &&
+          selection.left + selection.width > left &&
+          selection.top < top + tabs.offsetHeight &&
+          selection.top + selection.height > top;
+        if (overlaps) {
+          const below = selection.top + selection.height + 8;
+          const above = selection.top - tabs.offsetHeight - 8;
+          if (below + tabs.offsetHeight <= monitorBottom - VIEWPORT_PADDING) {
+            top = below;
+          } else if (above >= verticalMin) {
+            top = above;
+          }
+        }
+      }
+
+      setCaptureTabsPosition((current) =>
+        current?.left === left && current.top === top ? current : { left, top },
+      );
+
+      const list = windowListRef.current;
+      if (list && selectMode === "window") {
+        const listMin = Math.max(VIEWPORT_PADDING, monitorLeft + VIEWPORT_PADDING);
+        const listMax = Math.min(
+          viewportWidth - list.offsetWidth - VIEWPORT_PADDING,
+          monitorRight - list.offsetWidth - VIEWPORT_PADDING,
+        );
+        const listCenteredLeft = (monitorLeft + monitorRight - list.offsetWidth) / 2;
+        const listLeft =
+          listMax >= listMin
+            ? Math.max(listMin, Math.min(listCenteredLeft, listMax))
+            : Math.max(
+                VIEWPORT_PADDING,
+                Math.min(listCenteredLeft, viewportWidth - list.offsetWidth - VIEWPORT_PADDING),
+              );
+        const listGap = 8;
+        const listMinTop = Math.max(
+          VIEWPORT_PADDING,
+          monitorTop + VIEWPORT_PADDING + tabs.offsetHeight + listGap,
+        );
+        const listMaxTop = Math.min(
+          viewportHeight - list.offsetHeight - VIEWPORT_PADDING,
+          monitorBottom - list.offsetHeight - VIEWPORT_PADDING,
+        );
+        const listTop =
+          listMaxTop >= listMinTop
+            ? Math.max(listMinTop, Math.min(top + tabs.offsetHeight + listGap, listMaxTop))
+            : Math.max(
+                VIEWPORT_PADDING,
+                Math.min(listMinTop, viewportHeight - list.offsetHeight - VIEWPORT_PADDING),
+              );
+        setWindowListPosition((current) =>
+          current?.left === listLeft && current.top === listTop
+            ? current
+            : { left: listLeft, top: listTop },
+        );
+      } else {
+        setWindowListPosition(null);
+      }
+    };
+
+    updateCapturePanelPosition();
+    window.addEventListener("resize", updateCapturePanelPosition);
+    return () => window.removeEventListener("resize", updateCapturePanelPosition);
+  }, [mode, ready, monitorWorkArea, selection, selectMode, windows]);
 
   useEffect(() => {
     const unlistenTheme = subscribeThemePreferences();
@@ -151,6 +282,27 @@ function ScreenshotTool() {
   // 透明背景 + scale + 虚拟桌面原点（用于把窗口相对坐标换算为虚拟桌面绝对物理坐标）
   // 两者都就绪前禁止交互，避免坐标换算用默认值导致错位
   // 拉取失败时 ready 保持 false，由 onFocusChanged 获焦重试，避免永久卡死
+  const refreshMonitorWorkArea = useCallback(() => {
+    const requestId = ++monitorRequestRef.current;
+    invoke<MonitorWorkArea>("get_screenshot_monitor_bounds")
+      .then((bounds) => {
+        if (requestId !== monitorRequestRef.current) return;
+        if (
+          Number.isFinite(bounds.left) &&
+          Number.isFinite(bounds.top) &&
+          bounds.right > bounds.left &&
+          bounds.bottom > bounds.top
+        ) {
+          setMonitorWorkArea(bounds);
+        }
+      })
+      .catch((e) => {
+        if (requestId !== monitorRequestRef.current) return;
+        console.error("get_screenshot_monitor_bounds failed:", e);
+        setMonitorWorkArea(null);
+      });
+  }, []);
+
   const fetchReady = useCallback(() => {
     let scaleReady = false;
     let originReady = false;
@@ -177,7 +329,8 @@ function ScreenshotTool() {
         markReady();
       })
       .catch((e) => console.error("get_virtual_desktop_bounds failed:", e));
-  }, [win]);
+    refreshMonitorWorkArea();
+  }, [refreshMonitorWorkArea, win]);
 
   useEffect(() => {
     fetchReady();
@@ -191,7 +344,7 @@ function ScreenshotTool() {
       root.style.margin = "0";
       root.style.overflow = "hidden";
     }
-  }, [win, fetchReady]);
+  }, [win, fetchReady, refreshMonitorWorkArea]);
 
   // 窗口识别模式：加载窗口列表；切回区域模式时清理旧状态
   useEffect(() => {
@@ -246,6 +399,11 @@ function ScreenshotTool() {
       // save_image/pin_image 夺焦期间（弹系统对话框）忽略全局 Esc，避免与对话框取消冲突清空标注
       if (suppressFocusReset.current) return;
       genRef.current++;
+      readyRef.current = false;
+      setReady(false);
+      setMonitorWorkArea(null);
+      setCaptureTabsPosition(null);
+      setWindowListPosition(null);
       setSelection(null);
       setMode("selecting");
       setSelectMode("region");
@@ -270,6 +428,11 @@ function ScreenshotTool() {
   useEffect(() => {
     const un = listen("long-capture-overlay-reset", () => {
       genRef.current++;
+      readyRef.current = false;
+      setReady(false);
+      setMonitorWorkArea(null);
+      setCaptureTabsPosition(null);
+      setWindowListPosition(null);
       setSelection(null);
       setMode("selecting");
       setSelectMode("region");
@@ -302,6 +465,10 @@ function ScreenshotTool() {
         }
         if (!readyRef.current) {
           fetchReady();
+        } else {
+          // 每次新截图会话都由后端重新记录启动显示器；刷新轻量布局信息
+          // 可覆盖复用 overlay 窗口时上一次会话留下的屏幕位置。
+          refreshMonitorWorkArea();
         }
         return;
       }
@@ -320,7 +487,7 @@ function ScreenshotTool() {
     return () => {
       un.then((fn) => fn());
     };
-  }, [win, fetchReady]);
+  }, [win, fetchReady, refreshMonitorWorkArea]);
 
   // 组件卸载时清除计时器，避免对已卸载组件 setState
   useEffect(() => {
@@ -333,6 +500,11 @@ function ScreenshotTool() {
   const cancel = useCallback(() => {
     // 自增代际，使进行中的异步回调（capture/ocr/pin 等）失效
     genRef.current++;
+    readyRef.current = false;
+    setReady(false);
+    setMonitorWorkArea(null);
+    setCaptureTabsPosition(null);
+    setWindowListPosition(null);
     // 重置组件状态，避免 overlay 复用时残留上次的选区/图片
     setSelection(null);
     setMode("selecting");
@@ -439,6 +611,11 @@ function ScreenshotTool() {
               : ((err as { message?: string })?.message ?? "长截图启动失败，请重新选择区域");
           showError(message);
           setMode("selecting");
+          readyRef.current = false;
+          setReady(false);
+          setMonitorWorkArea(null);
+          setCaptureTabsPosition(null);
+          setWindowListPosition(null);
           setSelection(null);
           // start_long_capture may have cleaned up the native session. Re-open
           // the overlay so the user can retry without restarting the app.
@@ -687,7 +864,16 @@ function ScreenshotTool() {
     >
       {/* 顶部模式切换栏：区域拖框 / 窗口识别 */}
       {mode === "selecting" && (
-        <div className="ss-area-tabs" onPointerDown={(e) => e.stopPropagation()}>
+        <div
+          ref={captureTabsRef}
+          className="ss-area-tabs"
+          onPointerDown={(e) => e.stopPropagation()}
+          style={
+            captureTabsPosition
+              ? { left: captureTabsPosition.left, top: captureTabsPosition.top, transform: "none" }
+              : undefined
+          }
+        >
           <button
             className={`ss-area-tab ${captureKind === "long" ? "active" : ""}`}
             onClick={() => {
@@ -723,7 +909,16 @@ function ScreenshotTool() {
 
       {/* 窗口识别模式：窗口列表，点击后按窗口区域自动框选截取 */}
       {mode === "selecting" && captureKind === "normal" && selectMode === "window" && (
-        <div className="ss-window-list" onPointerDown={(e) => e.stopPropagation()}>
+        <div
+          ref={windowListRef}
+          className="ss-window-list"
+          onPointerDown={(e) => e.stopPropagation()}
+          style={
+            windowListPosition
+              ? { left: windowListPosition.left, top: windowListPosition.top, transform: "none" }
+              : undefined
+          }
+        >
           {windows.length === 0 ? (
             <p className="ss-window-empty">未检测到可截图的窗口</p>
           ) : (
