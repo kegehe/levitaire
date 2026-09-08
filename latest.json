@@ -1,11 +1,11 @@
 {
-  "version": "0.1.2",
-  "notes": "新增待办与计时工具，增强截图、OCR、悬浮球和工具面板，修复窗口状态与快捷键问题",
-  "pub_date": "2026-08-31T07:10:05.949Z",
+  "version": "0.1.3",
+  "notes": "新增便利贴、滚动导航与系统快捷工具，增强截图标注与长图捕获、本地OCR与语音朗读；优化悬浮球、工具面板与主题外观；修复多项窗口交互与稳定性问题",
+  "pub_date": "2026-09-08T10:48:27.505Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDJWRWRvTEtpN2ZsbDgvQXNWNFBmZ1hac1U4N1lQaVpzTy96dFhKalBzUUE2ZVRLeG5Db0lHNnRUd2tZeXI0bUx3Z0JIZ1Y5ODBpODJYYjVLSjRReUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MTYwMjA1CWZpbGU6TGV2aXRhaXJlXzAuMS4yX3g2NC1zZXR1cC5leGUKUHplNmVGbXMrU2swMzFEaFkyZjBwSmg2dkVncUNRLzU4Qk9iLzNPYlBqVmlaSWRUUkFSZitxUG1tR3o1Njlja1F6S1hoWlJqWG8zZitla2VPZ1NXQXc9PQo=",
-      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.2/Levitaire_0.1.2_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMC82cjgyUDhmcUtWWGN1NjJtRmh2R0hXcmNNOVkzN0g2YUpMZ2t1QVF2clRKenQvQmlKZHN4L29JUjROSWNaZjFpTXd4WSt2Q2xIV0NJWEtjdklPWUFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODY0NTA3CWZpbGU6TGV2aXRhaXJlXzAuMS4zX3g2NC1zZXR1cC5leGUKRlg3elllQ0ptR0ZmMVVtYS9sWXphRmo5b0thZUhsbmtOekI1UXlabExmOW8wVXJaek1ORFZlZUVlN2NzeWdXUjYxY203a0VrdzNJVkthazhvYU5WQWc9PQo=",
+      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.3/Levitaire_0.1.3_x64-setup.exe"
     }
   }
 }
