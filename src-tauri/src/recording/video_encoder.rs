@@ -200,11 +200,18 @@ impl Drop for FfmpegEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // These tests mutate the process-wide ffmpeg override environment
+    // variable. Keep them serialized so parallel test execution cannot make a
+    // path assertion observe another test's value.
+    static FFMPEG_PATH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     // ── ffmpeg_path 测试 ──────────────────────────────────────────
 
     #[test]
     fn ffmpeg_path_uses_env_var_when_set() {
+        let _lock = FFMPEG_PATH_TEST_LOCK.lock().unwrap();
         // 创建一个临时文件模拟 ffmpeg
         let tmp = std::env::temp_dir().join("_levitaire_test_ffmpeg_env.exe");
         std::fs::write(&tmp, b"").ok();
@@ -218,6 +225,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_path_falls_back_to_candidates() {
+        let _lock = FFMPEG_PATH_TEST_LOCK.lock().unwrap();
         std::env::remove_var("LEVITAIRE_FFMPEG_PATH");
         // 传入一个不存在的候选路径，但当前目录或 exe 目录可能存在 ffmpeg，
         // 因此只验证函数不会 panic，返回值为某个 PathBuf
@@ -229,6 +237,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_path_uses_extra_candidate_when_present() {
+        let _lock = FFMPEG_PATH_TEST_LOCK.lock().unwrap();
         std::env::remove_var("LEVITAIRE_FFMPEG_PATH");
         let tmp = std::env::temp_dir().join("_levitaire_test_extra_ffmpeg.exe");
         std::fs::write(&tmp, b"").ok();

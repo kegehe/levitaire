@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -227,40 +227,23 @@ unsafe extern "system" fn hotkey_wndproc(
                 match slot {
                     HotkeySlotId::Screenshot => {
                         crate::utils::logger::log("hotkey", "screenshot hotkey triggered");
-                        // The screenshot overlay is a configured native window, so
-                        // start it directly. Routing through the orb WebView made
-                        // this hotkey depend on an asynchronous frontend listener,
-                        // which can be unavailable while that WebView reloads.
+                        // A native overlay HWND can exist before its React
+                        // listeners are mounted. Route every start request through
+                        // the resident orb and consume it after readiness.
                         let app = app.clone();
                         std::thread::spawn(move || {
-                            if app.get_webview_window("screenshot-overlay").is_none() {
-                                // The overlay is a frontend-created window. Ask
-                                // the resident orb to create it and start the
-                                // session instead of failing with "overlay not loaded".
-                                crate::commands::queue_screenshot_start_pending();
-                                let _ = app.emit("ensure-overlay-and-start-screenshot", ());
-                                crate::utils::logger::log(
-                                    "hotkey",
-                                    "overlay missing; requested frontend screenshot startup",
-                                );
-                            } else if let Err(error) = crate::commands::start_screenshot_inner(app)
-                            {
-                                crate::utils::logger::log(
-                                    "hotkey",
-                                    &format!("failed to start screenshot from hotkey: {}", error),
-                                );
-                            }
+                            crate::commands::queue_screenshot_start_pending();
+                            let _ = app.emit("ensure-overlay-and-start-screenshot", ());
                         });
                     }
                     HotkeySlotId::Recording => {
                         crate::utils::logger::log("hotkey", "recording hotkey triggered");
                         let app_clone = app.clone();
                         let _ = app.run_on_main_thread(move || {
-                            if app_clone.get_webview_window("screenshot-overlay").is_none() {
-                                // overlay 窗口不存在，通知前端创建并启动录制
-                                let _ = app_clone.emit("ensure-overlay-and-start-recording", ());
-                            } else {
-                                // overlay 已存在，直接启动录制选区
+                            // While recording, the hotkey is a native stop toggle.
+                            // Otherwise, wait for the overlay WebView to become
+                            // ready even if a native window already exists.
+                            if crate::hooks::mouse::is_recording_mode() {
                                 let inner_app = app_clone.clone();
                                 std::thread::spawn(move || {
                                     if let Err(error) =
@@ -272,6 +255,9 @@ unsafe extern "system" fn hotkey_wndproc(
                                         );
                                     }
                                 });
+                            } else {
+                                crate::commands::queue_recording_select_start_pending();
+                                let _ = app_clone.emit("ensure-overlay-and-start-recording", ());
                             }
                         });
                     }
@@ -280,12 +266,14 @@ unsafe extern "system" fn hotkey_wndproc(
                         let _ = app.run_on_main_thread(move || {
                             // The frontend positions the overlay from the current cursor monitor
                             // before showing it, which also handles an existing window.
+                            crate::commands::queue_sketch_start_pending();
                             let _ = app_clone.emit("ensure-sketch-window", ());
                         });
                     }
                     HotkeySlotId::TodoQuickAdd => {
                         let app_clone = app.clone();
                         let _ = app.run_on_main_thread(move || {
+                            crate::commands::queue_todo_quick_add_pending();
                             let _ = app_clone.emit("ensure-todo-window-for-quick-add", ());
                         });
                     }

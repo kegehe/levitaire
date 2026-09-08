@@ -13,13 +13,13 @@ export const CONTEXT_MENU_WIDTH = 184;
 
 export function contextMenuHeight(source: ContextMenuSource): number {
   // ContextMenu.css: 34px item height, 11px group separator, 12px outer
-  // padding. The tool configuration action adds one 34px item (and, for the
-  // pinned-image menu, one extra group separator).
+  // padding. The orb menu intentionally contains app controls only; capture
+  // actions are available from the palette opened by clicking the orb.
   switch (source) {
     case "pin":
       return 464;
     case "orb":
-      return 238;
+      return 159;
     case "tray":
       return 204;
   }

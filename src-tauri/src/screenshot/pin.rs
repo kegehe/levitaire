@@ -313,7 +313,11 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
         let win_x = params.x - params.border_width;
         let win_y = params.y - params.border_width;
 
-        let hwnd = CreateWindowExW(
+        // CreateWindowExW does not take ownership of the user-data pointer when
+        // creation fails. Keep the raw pointer so the failure path can reclaim
+        // PinState (including the potentially large pixel buffer).
+        let state_ptr = Box::into_raw(state);
+        let hwnd = match CreateWindowExW(
             ex_style,
             PIN_CLASS_NAME,
             w!("Levitaire Pin"),
@@ -325,9 +329,16 @@ fn run_pin_window(app: tauri::AppHandle, params: PinCreateParams) -> Result<(), 
             None,
             None,
             Some(hinst.into()),
-            Some(Box::into_raw(state) as *const _),
-        )
-        .map_err(|e| format!("CreateWindowExW failed: {}", e))?;
+            Some(state_ptr as *const _),
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(e) => {
+                // No WM_NCDESTROY is delivered for a failed creation, so the
+                // window procedure cannot release this allocation for us.
+                drop(Box::from_raw(state_ptr));
+                return Err(format!("CreateWindowExW failed: {}", e));
+            }
+        };
 
         // 初始化分层窗口 alpha，否则 layered 窗口默认不可见
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), params.opacity, LWA_ALPHA);

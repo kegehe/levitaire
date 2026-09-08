@@ -208,7 +208,7 @@
 
 .settings-theme-row {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-4);
 }
 
@@ -224,6 +224,13 @@
 .settings-theme-row .settings-select {
   flex: 1 1 auto;
   width: 1px;
+}
+
+.settings-theme-row .settings-inline-group input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
 }
 
 /* ── Checkbox label ───────────────────────────────────────── */
@@ -723,23 +730,12 @@
   }
 }
 
-.qi-history-toggle-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-2);
-}
-
-.qi-history-toggle-label {
-  margin-bottom: 0;
-}
-
-.qi-history-switch {
+.qi-toggle-switch {
   position: relative;
   width: 38px;
   height: 22px;
   flex-shrink: 0;
+  margin-left: auto;
   padding: 0;
   border: 1px solid var(--settings-border);
   border-radius: 999px;
@@ -750,17 +746,17 @@
     border-color var(--transition-fast);
 }
 
-.qi-history-switch.is-on {
+.qi-toggle-switch.is-on {
   border-color: var(--color-accent);
   background: var(--color-accent);
 }
 
-.qi-history-switch:focus-visible {
+.qi-toggle-switch:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
 
-.qi-history-switch-thumb {
+.qi-toggle-switch-thumb {
   position: absolute;
   top: 3px;
   left: 3px;
@@ -773,13 +769,9 @@
     background-color var(--transition-fast);
 }
 
-.qi-history-switch.is-on .qi-history-switch-thumb {
+.qi-toggle-switch.is-on .qi-toggle-switch-thumb {
   transform: translateX(16px);
   background: var(--color-fg-on-accent);
-}
-
-.qi-history-disabled-hint {
-  margin-top: 0;
 }
 
 .qi-snippet-row {
@@ -790,6 +782,21 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-bg-elevated);
+  cursor: grab;
+}
+
+/* 拖拽排序进行中：被拖拽行半透明虚边，隐藏操作按钮避免误触（含 hover/focus 变体，覆盖下方操作按钮显示规则） */
+.qi-snippet-row.qi-snippet-dragging {
+  opacity: 0.5;
+  border-style: dashed;
+  cursor: grabbing;
+}
+
+.qi-snippet-row.qi-snippet-dragging .qi-snippet-actions,
+.qi-snippet-row.qi-snippet-dragging:hover .qi-snippet-actions,
+.qi-snippet-row.qi-snippet-dragging:focus-within .qi-snippet-actions {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .qi-snippet-row .settings-input,
@@ -805,6 +812,7 @@
 .qi-snippet-row.qi-snippet-editing {
   border-color: var(--settings-focus-border);
   box-shadow: 0 0 0 3px var(--settings-focus-shadow);
+  cursor: default;
 }
 
 .qi-snippet-label {
@@ -1112,10 +1120,27 @@
 }
 
 /* ── 在线更新 ──────────────────────────────────── */
+.settings-updater-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.settings-updater-head .settings-subsection-title {
+  margin-bottom: 0;
+}
+
 .settings-updater-row {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.settings-updater-row .settings-label {
+  display: inline;
+  margin-bottom: 0;
+  flex-shrink: 0;
 }
 
 .settings-updater-current {
@@ -1126,10 +1151,10 @@
 
 .settings-updater-actions {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
-  margin-top: var(--space-2);
 }
 
 .settings-updater-actions .settings-hint {

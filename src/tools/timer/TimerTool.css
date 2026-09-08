@@ -16,8 +16,6 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-eyebrow, .timer-date { color: var(--color-fg-muted); font-size: 11px; }
 .timer-local-clock-value { font-size: 39px; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: 0; }
 .timer-date { font-size: 12px; }
-.timer-secondary-action { display: inline-flex; align-items: center; gap: 5px; margin-top: 13px; padding: 6px 10px; border: 1px solid var(--color-border); border-radius: 5px; color: var(--color-fg-muted); background: var(--color-bg-sunken); cursor: pointer; }
-.timer-secondary-action:hover { color: var(--color-fg); }
 .timer-primary-value { margin: 12px 0 4px; font-size: 46px; line-height: 1; font-variant-numeric: tabular-nums; }
 .timer-countdown-view.is-complete .timer-primary-value, .timer-countdown-view.is-complete .timer-ring-view strong { color: var(--color-danger-fg); }
 .timer-presets { justify-content: center; flex-wrap: wrap; margin: 2px 0 4px; }
@@ -32,6 +30,75 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-ring-view svg { width: 148px; height: 148px; transform: rotate(-90deg); }
 .timer-ring-bg, .timer-ring-fg { fill: none; stroke-width: 8; }
 .timer-ring-bg { stroke: var(--color-bg-sunken); }
-.timer-ring-fg { stroke: var(--color-accent); stroke-linecap: round; stroke-dasharray: 314; transition: stroke-dashoffset .35s linear; }
+.timer-ring-fg { stroke: var(--color-accent); stroke-linecap: round; transition: stroke-dashoffset .35s linear; }
 .timer-ring-view strong { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 27px; font-variant-numeric: tabular-nums; }
+/* 模拟指针表盘：面盘/刻度/数字用主题变量取色，指针端点由 JSX 直接计算，无 CSS 过渡 */
+.timer-clock-face { display: block; width: 148px; height: 148px; }
+.timer-clock-view .timer-clock-face { margin: 2px 0 0; }
+.timer-face-dial { fill: var(--color-bg-sunken); stroke: var(--color-border); stroke-width: 1; }
+.timer-face-tick-major { stroke: var(--color-fg-muted); stroke-width: 2; }
+.timer-face-tick-minor { stroke: var(--color-fg-subtle); stroke-width: 0.8; }
+.timer-face-number { fill: var(--color-fg-muted); font-size: 8.5px; font-weight: 600; }
+.timer-face-hand-hour { stroke: var(--color-fg); stroke-width: 5; }
+.timer-face-hand-minute { stroke: var(--color-fg); stroke-width: 3; }
+.timer-face-hand-second { stroke: var(--color-accent); stroke-width: 1.5; }
+.timer-face-cap { fill: var(--color-fg); }
+.timer-face-cap-accent { fill: var(--color-accent); }
+.timer-calendar-view { padding-top: 8px; }
+.calendar-toolbar { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 10px; }
+.calendar-toolbar strong { min-width: 108px; color: var(--color-fg); font-size: 14px; font-weight: 600; text-align: center; }
+.calendar-toolbar button { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 5px; color: var(--color-fg-muted); background: transparent; cursor: pointer; }
+.calendar-toolbar button:hover { color: var(--color-fg); background: var(--button-hover-bg); }
+.calendar-toolbar button[data-tooltip]::after { content: attr(data-tooltip); position: absolute; z-index: 5; top: calc(100% + 4px); left: 50%; padding: 3px 7px; white-space: nowrap; color: var(--tooltip-text); background: var(--tooltip-bg); border: 1px solid var(--tooltip-border); border-radius: 4px; opacity: 0; pointer-events: none; transform: translateX(-50%); }
+.calendar-toolbar button[data-tooltip]:hover::after { opacity: 1; }
+.calendar-toolbar .calendar-today { width: auto; margin-left: 2px; padding: 0 7px; border: 1px solid var(--color-border); color: var(--color-fg-muted); background: var(--color-bg-sunken); font-size: 11px; }
+.calendar-weekdays, .calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+.calendar-weekdays { margin-bottom: 3px; color: var(--color-fg-subtle); font-size: 10px; text-align: center; }
+.calendar-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; height: 39px; border: 1px solid transparent; border-radius: 5px; color: var(--color-fg); background: transparent; cursor: pointer; }
+.calendar-cell:hover { border-color: var(--color-border-hover); background: var(--button-hover-bg); }
+.calendar-cell > span { font-size: 13px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.calendar-cell small { max-width: 100%; overflow: hidden; color: var(--color-fg-subtle); font-size: 9px; line-height: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.calendar-cell small.note-festival { color: var(--color-danger-fg); font-weight: 600; }
+.calendar-cell small.note-term { color: var(--color-success-fg); }
+.calendar-cell.is-outside { color: var(--color-fg-subtle); opacity: 0.58; }
+.calendar-cell.is-today { border-color: var(--color-accent); color: var(--color-accent); }
+.calendar-cell.is-selected { background: var(--color-accent-subtle); }
+.calendar-cell.is-selected.is-today { background: var(--color-accent); color: var(--color-fg-on-accent); }
+.calendar-cell.is-selected.is-today small { color: color-mix(in srgb, var(--color-fg-on-accent) 78%, transparent); }
+.calendar-selection { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--color-border); }
+.calendar-selection strong { color: var(--color-fg); font-size: 11px; font-weight: 600; }
+.calendar-selection-meta { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }
+.calendar-selection span { color: var(--color-fg-muted); font-size: 10px; }
+.calendar-selection span.note-festival { color: var(--color-danger-fg); font-weight: 600; }
+.calendar-selection span.note-term { color: var(--color-success-fg); }
+.timer-stopwatch-view { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding-top: 12px; }
+.timer-label { position: relative; display: inline-flex; align-items: center; padding: 1px 4px; border: 0; border-bottom: 1px dashed transparent; border-radius: 4px; color: var(--color-fg-muted); background: transparent; cursor: text; }
+.timer-label .icon { position: absolute; left: 100%; top: 50%; transform: translate(2px, -50%); opacity: 0; }
+.timer-label:hover { color: var(--color-fg); border-bottom-color: var(--color-border); }
+.timer-label:hover .icon { opacity: 1; }
+.timer-label-input { height: 20px; padding: 0 6px; border: 1px solid var(--color-accent); border-radius: 4px; color: var(--color-fg); background: var(--color-bg-sunken); font-size: 11px; text-align: center; outline: none; }
+.timer-laps { display: flex; flex-direction: column; gap: 2px; width: 100%; margin: 4px 0 0; padding: 8px 10px 2px; border-top: 1px solid var(--color-border); list-style: none; box-sizing: border-box; max-height: 152px; overflow-y: auto; }
+.timer-laps li { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--color-fg-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.timer-lap-index { color: var(--color-fg); }
+.timer-lap-interval { margin-left: auto; }
+.timer-lap-total { min-width: 56px; text-align: right; color: var(--color-fg-subtle); }
+
+/* 顶部页签/操作工具条默认收起（悬浮到工具区域或聚焦时展开，见 TimerTool 的
+   .is-chrome-open）。收起后让内容区上移使用原工具条高度，避免常驻占用显示区域。 */
+.timer-shell:not(.is-chrome-open) .timer-header {
+  height: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+/* 收起时压缩各视图顶部为工具条预留的留白，使悬浮窗保持紧凑 */
+.timer-shell:not(.is-chrome-open) .timer-clock-view { padding-top: 8px; }
+.timer-shell:not(.is-chrome-open) .timer-countdown-view,
+.timer-shell:not(.is-chrome-open) .timer-stopwatch-view { padding-top: 2px; }
+.timer-shell:not(.is-chrome-open) .timer-calendar-view { padding-top: 0; }
+
 @media (prefers-reduced-motion: reduce) { .timer-ring-fg { transition: none; } }

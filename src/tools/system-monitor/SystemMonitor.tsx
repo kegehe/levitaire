@@ -140,6 +140,8 @@ function SystemMonitor() {
     intervalMs: 1000,
     displayMode: "full",
   });
+  const [isControlsVisible, setIsControlsVisible] = useState(false);
+  const [controlsLayoutVersion, setControlsLayoutVersion] = useState(0);
   const configRef = useRef<SystemMonitorConfig>({ intervalMs: 1000, displayMode: "full" });
   const configVersionRef = useRef(0);
 
@@ -204,7 +206,8 @@ function SystemMonitor() {
   useLayoutEffect(() => {
     const body = monitorBodyRef.current;
     const titlebar = body?.querySelector<HTMLElement>(".monitor-titlebar");
-    if (!body || !titlebar || titlebar.offsetHeight === 0) return;
+    // 收起状态下 titlebar 的高度就是 0，仍需测量 body 以同步原生窗口高度。
+    if (!body || !titlebar) return;
 
     const styles = getComputedStyle(body);
     const paddingY =
@@ -256,7 +259,7 @@ function SystemMonitor() {
     getCurrentWebviewWindow()
       .setSize(new LogicalSize(MONITOR_WINDOW_SIZES.full.width, height))
       .catch(console.error);
-  }, [isMini, stats]);
+  }, [isMini, stats, isControlsVisible, controlsLayoutVersion]);
 
   // 加载配置
   useEffect(() => {
@@ -359,10 +362,29 @@ function SystemMonitor() {
     <div className="monitor-container">
       <div
         ref={monitorBodyRef}
-        className={`monitor-body${isMini ? " is-mini" : ""}`}
+        className={`monitor-body${isMini ? " is-mini" : ""}${
+          isControlsVisible ? " is-controls-visible" : ""
+        }`}
         data-tauri-drag-region=""
+        onMouseEnter={() => setIsControlsVisible(true)}
+        onMouseLeave={() => setIsControlsVisible(false)}
+        onFocusCapture={() => setIsControlsVisible(true)}
+        onBlurCapture={(event) => {
+          const nextFocus = event.relatedTarget;
+          if (!(nextFocus instanceof Node) || !event.currentTarget.contains(nextFocus)) {
+            setIsControlsVisible(false);
+          }
+        }}
       >
-        <div className="monitor-titlebar" data-tauri-drag-region="">
+        <div
+          className="monitor-titlebar"
+          data-tauri-drag-region=""
+          onTransitionEnd={(event) => {
+            if (event.target === event.currentTarget && event.propertyName === "max-height") {
+              setControlsLayoutVersion((version) => version + 1);
+            }
+          }}
+        >
           <span className="monitor-title" data-tauri-drag-region="">
             系统监控
           </span>
@@ -370,6 +392,7 @@ function SystemMonitor() {
             className="monitor-icon-btn"
             aria-label={isMini ? "切换到标准模式" : "切换到迷你模式"}
             data-tooltip={isMini ? "切换到标准模式" : "切换到迷你模式"}
+            tabIndex={isControlsVisible ? 0 : -1}
             onClick={toggleDisplayMode}
           >
             <Icon name={isMini ? "Maximize2" : "Minimize2"} size={14} />
@@ -378,6 +401,7 @@ function SystemMonitor() {
             className="monitor-icon-btn"
             aria-label="关闭系统监控"
             data-tooltip="关闭系统监控"
+            tabIndex={isControlsVisible ? 0 : -1}
             onClick={() => invoke("hide_monitor_window").catch(console.error)}
           >
             <Icon name="X" size={14} />

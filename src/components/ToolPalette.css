@@ -299,6 +299,99 @@
   background: color-mix(in srgb, var(--palette-bg) 42%, transparent);
   border-top: 1px solid var(--palette-header-border);
 }
+
+.color-picker-result {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--palette-card-border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--palette-card-bg) 78%, transparent);
+}
+.color-picker-preview {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  border: 1px solid rgb(255 255 255 / 0.25);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.1);
+}
+.color-picker-values {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.color-picker-hex {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-fg-subtle);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.color-picker-hex input {
+  width: 92px;
+  padding: 3px 5px;
+  border: 1px solid var(--palette-card-border);
+  border-radius: 4px;
+  color: var(--color-fg);
+  background: var(--settings-input-bg, rgb(0 0 0 / 0.14));
+  font: 600 12px/1.2 "Cascadia Mono", Consolas, monospace;
+  letter-spacing: 0;
+}
+.color-picker-hex input:focus {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+.color-picker-rgb {
+  color: var(--color-fg-muted);
+  font: 11px/1.2 "Cascadia Mono", Consolas, monospace;
+}
+.color-picker-native {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.color-picker-copy {
+  padding: 5px 8px;
+  border: 1px solid var(--palette-card-border);
+  border-radius: 5px;
+  color: var(--color-fg);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.color-picker-copy:hover {
+  border-color: var(--color-accent);
+  background: var(--button-hover-bg);
+}
+.color-picker-recent {
+  grid-column: 2 / -1;
+  display: flex;
+  gap: 5px;
+  padding-top: 2px;
+}
+.color-picker-recent-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 0.3);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.color-picker-recent-swatch:hover {
+  transform: scale(1.12);
+}
 .palette-count {
   color: var(--color-fg-muted);
   font-size: 11.5px;
@@ -306,6 +399,10 @@
 .palette-count strong {
   color: var(--color-fg);
   font-weight: 600;
+}
+.palette-all-group {
+  display: flex;
+  gap: 4px;
 }
 .palette-all {
   padding: 3px 8px;
@@ -320,6 +417,17 @@
 }
 .palette-all:hover {
   background: color-mix(in srgb, var(--color-accent) 13%, transparent);
+}
+.palette-all-off {
+  color: var(--error-text-color);
+}
+.palette-all-off:hover {
+  background: color-mix(in srgb, var(--error-text-color) 13%, transparent);
+}
+.palette-all:disabled {
+  opacity: 0.45;
+  cursor: default;
+  background: transparent;
 }
 @supports not (backdrop-filter: blur(10px)) {
   .palette-container {

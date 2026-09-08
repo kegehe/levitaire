@@ -264,6 +264,50 @@ impl TodoStore {
         Ok(result)
     }
 
+    /// 将任务移动到同一清单、同一状态分组中的任意位置。
+    /// `before_id` 指定插入到该任务之前，为空表示移动到组末尾。
+    /// 移动后对该分组的 sort_order 重新紧凑编号，保持分组内相对顺序与前端一致。
+    pub fn move_to(&self, id: &str, before_id: Option<&str>) -> Result<TodoItem, String> {
+        let mut data = self.data.lock().map_err(|e| e.to_string())?;
+        let previous = data.clone();
+        let index = data
+            .items
+            .iter()
+            .position(|item| item.id == id && item.deleted_at.is_none())
+            .ok_or_else(|| "Task does not exist".to_string())?;
+        let target_list_id = data.items[index].list_id.clone();
+        let target_status = data.items[index].status.clone();
+        let mut peers: Vec<usize> = data
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                item.deleted_at.is_none()
+                    && item.list_id == target_list_id
+                    && item.status == target_status
+            })
+            .map(|(index, _)| index)
+            .collect();
+        peers.sort_by_key(|index| data.items[*index].sort_order);
+        peers.retain(|candidate| *candidate != index);
+        let insert_at = before_id
+            .and_then(|before| {
+                peers
+                    .iter()
+                    .position(|candidate| data.items[*candidate].id == before)
+            })
+            .unwrap_or(peers.len());
+        peers.insert(insert_at, index);
+        for (position, item_index) in peers.iter().enumerate() {
+            data.items[*item_index].sort_order = position as i64;
+        }
+        data.items[index].updated_at = Utc::now().to_rfc3339();
+        let result = data.items[index].clone();
+        // 移动会重编号整组 sort_order，保存失败时必须回滚内存，避免前端 refresh 读到未持久化的顺序。
+        self.save_with_rollback(&mut data, previous)?;
+        Ok(result)
+    }
+
     pub fn list_lists(&self) -> Result<Vec<TodoList>, String> {
         let data = self.data.lock().map_err(|e| e.to_string())?;
         Ok(data.lists.clone())
@@ -943,6 +987,41 @@ mod tests {
         let (store, path) = test_store(vec![deleted, test_item("active", 2)]);
         store.reorder("active", -1).unwrap();
         assert_eq!(store.list(true, Some("manual")).unwrap()[0].id, "active");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn move_to_repositions_within_the_same_group() {
+        let (store, path) = test_store(vec![
+            test_item("a", 1),
+            test_item("b", 2),
+            test_item("c", 3),
+        ]);
+        // 把 a 移到 c 之前
+        store.move_to("a", Some("c")).unwrap();
+        let listed = store.list(true, Some("manual")).unwrap();
+        let ids: Vec<_> = listed.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "a", "c"]);
+        // 把 a 移到组末尾
+        store.move_to("a", None).unwrap();
+        let listed = store.list(true, Some("manual")).unwrap();
+        let ids: Vec<_> = listed.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "c", "a"]);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn move_to_ignores_deleted_tasks_and_unknown_before() {
+        let mut deleted = test_item("deleted", 0);
+        deleted.deleted_at = Some("2026-01-02T00:00:00Z".to_string());
+        let (store, path) = test_store(vec![deleted, test_item("a", 1), test_item("b", 2)]);
+        // before 指向不存在的任务时退化为移动到末尾
+        store.move_to("a", Some("ghost")).unwrap();
+        let listed = store.list(true, Some("manual")).unwrap();
+        let ids: Vec<_> = listed.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "a"]);
+        // 已删除任务不能移动
+        assert!(store.move_to("deleted", None).is_err());
         let _ = fs::remove_file(path);
     }
 

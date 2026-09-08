@@ -46,19 +46,21 @@ interface MonitorWorkArea {
   bottom: number;
 }
 
-/** 选区方式：区域拖框 / 窗口识别 */
+/** 选区方式：区域拖框 / 智能目标识别 */
 type SelectMode = "region" | "window";
 type CaptureKind = "normal" | "long";
+type TargetScope = "element" | "window";
 
-/** 窗口信息（后端 enumerate_windows 的返回映射，坐标为虚拟桌面绝对物理像素） */
-interface WindowInfo {
+/** 后端智能截图目标的映射，坐标为虚拟桌面绝对物理像素。 */
+interface ScreenshotTarget {
+  kind: TargetScope;
   hwnd: number;
-  title: string;
-  className: string;
   left: number;
   top: number;
   width: number;
   height: number;
+  controlType?: number;
+  name?: string;
 }
 
 const OCR_PANEL_WIDTH = 420;
@@ -89,9 +91,30 @@ function ScreenshotTool() {
   const modeRef = useRef<Mode>("selecting");
   modeRef.current = mode;
   const [selectMode, setSelectMode] = useState<SelectMode>("region");
+  const selectModeRef = useRef<SelectMode>("region");
+  selectModeRef.current = selectMode;
   const [captureKind, setCaptureKind] = useState<CaptureKind>("normal");
-  const [windows, setWindows] = useState<WindowInfo[]>([]);
-  const [selectedWindow, setSelectedWindow] = useState<WindowInfo | null>(null);
+  const captureKindRef = useRef<CaptureKind>("normal");
+  captureKindRef.current = captureKind;
+  const [targetScope, setTargetScope] = useState<TargetScope>("element");
+  const targetScopeRef = useRef<TargetScope>("element");
+  targetScopeRef.current = targetScope;
+  const targetRef = useRef<ScreenshotTarget | null>(null);
+  const targetRequestRef = useRef(0);
+  const targetMoveInFlightRef = useRef(false);
+  const targetMovePendingRef = useRef<{ x: number; y: number } | null>(null);
+  const smartModeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const enqueueSmartModeCommand = useCallback(
+    (operation: () => Promise<unknown>, reportError = true) => {
+      smartModeQueueRef.current = smartModeQueueRef.current
+        .then(() => operation())
+        .catch((error) => {
+          if (reportError) console.error("smart screenshot state update failed:", error);
+        })
+        .then(() => undefined);
+    },
+    [],
+  );
   const [selection, setSelection] = useState<Selection | null>(null);
   const [image, setImage] = useState<CapturedImage | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -102,7 +125,6 @@ function ScreenshotTool() {
   const [toolbarAbove, setToolbarAbove] = useState(false);
   const [monitorWorkArea, setMonitorWorkArea] = useState<MonitorWorkArea | null>(null);
   const [captureTabsPosition, setCaptureTabsPosition] = useState<PanelPosition | null>(null);
-  const [windowListPosition, setWindowListPosition] = useState<PanelPosition | null>(null);
   const [ready, setReady] = useState(false);
   const readyRef = useRef(false);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -117,7 +139,6 @@ function ScreenshotTool() {
   const ocrTextRef = useRef<HTMLTextAreaElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const captureTabsRef = useRef<HTMLDivElement>(null);
-  const windowListRef = useRef<HTMLDivElement>(null);
   const monitorRequestRef = useRef(0);
   const ocrPanelDrag = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
   // 失焦退出防抖计时器：失焦后延迟一小段时间再退出，期间若重新获焦则取消，
@@ -210,52 +231,29 @@ function ScreenshotTool() {
       setCaptureTabsPosition((current) =>
         current?.left === left && current.top === top ? current : { left, top },
       );
-
-      const list = windowListRef.current;
-      if (list && selectMode === "window") {
-        const listMin = Math.max(VIEWPORT_PADDING, monitorLeft + VIEWPORT_PADDING);
-        const listMax = Math.min(
-          viewportWidth - list.offsetWidth - VIEWPORT_PADDING,
-          monitorRight - list.offsetWidth - VIEWPORT_PADDING,
-        );
-        const listCenteredLeft = (monitorLeft + monitorRight - list.offsetWidth) / 2;
-        const listLeft =
-          listMax >= listMin
-            ? Math.max(listMin, Math.min(listCenteredLeft, listMax))
-            : Math.max(
-                VIEWPORT_PADDING,
-                Math.min(listCenteredLeft, viewportWidth - list.offsetWidth - VIEWPORT_PADDING),
-              );
-        const listGap = 8;
-        const listMinTop = Math.max(
-          VIEWPORT_PADDING,
-          monitorTop + VIEWPORT_PADDING + tabs.offsetHeight + listGap,
-        );
-        const listMaxTop = Math.min(
-          viewportHeight - list.offsetHeight - VIEWPORT_PADDING,
-          monitorBottom - list.offsetHeight - VIEWPORT_PADDING,
-        );
-        const listTop =
-          listMaxTop >= listMinTop
-            ? Math.max(listMinTop, Math.min(top + tabs.offsetHeight + listGap, listMaxTop))
-            : Math.max(
-                VIEWPORT_PADDING,
-                Math.min(listMinTop, viewportHeight - list.offsetHeight - VIEWPORT_PADDING),
-              );
-        setWindowListPosition((current) =>
-          current?.left === listLeft && current.top === listTop
-            ? current
-            : { left: listLeft, top: listTop },
-        );
-      } else {
-        setWindowListPosition(null);
+      if (captureKind === "normal" && selectMode === "window") {
+        enqueueSmartModeCommand(() => invoke("set_smart_screenshot_controls_bounds", {
+          left: Math.round(left * scale + origin.x),
+          top: Math.round(top * scale + origin.y),
+          width: Math.round(tabs.offsetWidth * scale),
+          height: Math.round(tabs.offsetHeight * scale),
+        }), false);
       }
+
     };
 
     updateCapturePanelPosition();
     window.addEventListener("resize", updateCapturePanelPosition);
-    return () => window.removeEventListener("resize", updateCapturePanelPosition);
-  }, [mode, ready, monitorWorkArea, selection, selectMode, windows]);
+    return () => {
+      enqueueSmartModeCommand(() => invoke("set_smart_screenshot_controls_bounds", {
+        left: 0,
+        top: 0,
+        width: 0,
+        height: 0,
+      }), false);
+      window.removeEventListener("resize", updateCapturePanelPosition);
+    };
+  }, [mode, ready, monitorWorkArea, selection, selectMode, captureKind, enqueueSmartModeCommand]);
 
   useEffect(() => {
     const unlistenTheme = subscribeThemePreferences();
@@ -346,17 +344,102 @@ function ScreenshotTool() {
     }
   }, [win, fetchReady, refreshMonitorWorkArea]);
 
-  // 窗口识别模式：加载窗口列表；切回区域模式时清理旧状态
+  // 智能截图模式：同步后端钩子状态；切回其他模式时清理旧状态
   useEffect(() => {
-    if (selectMode === "window") {
-      invoke<WindowInfo[]>("enumerate_windows")
-        .then((list) => setWindows(Array.isArray(list) ? list : []))
-        .catch(console.error);
-    } else {
-      setWindows([]);
-      setSelectedWindow(null);
-    }
-  }, [selectMode]);
+    const smart = mode === "selecting" && selectMode === "window" && captureKind === "normal";
+    targetRef.current = null;
+    targetRequestRef.current++;
+    enqueueSmartModeCommand(() => invoke("set_smart_screenshot_mode", { active: smart }));
+    return () => {
+      enqueueSmartModeCommand(() => invoke("set_smart_screenshot_mode", { active: false }), false);
+    };
+  }, [mode, selectMode, captureKind, enqueueSmartModeCommand]);
+
+  useEffect(() => {
+    const unMove = listen<{ x: number; y: number }>("screenshot-target-move", async ({ payload }) => {
+      if (modeRef.current !== "selecting" || selectModeRef.current !== "window" || captureKindRef.current !== "normal") return;
+      targetMovePendingRef.current = payload;
+      if (targetMoveInFlightRef.current) return;
+      targetMoveInFlightRef.current = true;
+      try {
+        while (targetMovePendingRef.current) {
+          const point = targetMovePendingRef.current;
+          targetMovePendingRef.current = null;
+          const requestId = ++targetRequestRef.current;
+          const target = await invoke<ScreenshotTarget | null>("detect_screenshot_target", {
+            x: point.x,
+            y: point.y,
+            scope: targetScopeRef.current,
+          }).catch(() => null);
+          if (requestId !== targetRequestRef.current) continue;
+          targetRef.current = target;
+          if (!target) { setSelection(null); continue; }
+          const scale = scaleRef.current || 1;
+          const origin = originRef.current;
+          setSelection({ left: (target.left - origin.x) / scale, top: (target.top - origin.y) / scale, width: target.width / scale, height: target.height / scale });
+        }
+      } finally {
+        targetMoveInFlightRef.current = false;
+      }
+    });
+    const unClick = listen<{ x: number; y: number }>("screenshot-target-click", async ({ payload }) => {
+      if (modeRef.current !== "selecting" || selectModeRef.current !== "window" || captureKindRef.current !== "normal") return;
+      const clickSessionGeneration = genRef.current;
+      const clickScope = targetScopeRef.current;
+      ++targetRequestRef.current;
+      targetMovePendingRef.current = null;
+      // Resolve once more at click time so a delayed mouse-move IPC response
+      // can never cause a neighboring target to be captured.
+      let target: ScreenshotTarget | null;
+      try {
+        target = await invoke<ScreenshotTarget | null>("detect_screenshot_target", {
+          x: payload.x,
+          y: payload.y,
+          scope: clickScope,
+        });
+      } catch (error) {
+        showError(
+          typeof error === "string"
+            ? error
+            : ((error as { message?: string })?.message ?? "智能截图目标识别失败，请重试"),
+        );
+        return;
+      }
+      if (
+        !target ||
+        clickSessionGeneration !== genRef.current ||
+        modeRef.current !== "selecting" ||
+        selectModeRef.current !== "window" ||
+        captureKindRef.current !== "normal" ||
+        clickScope !== targetScopeRef.current
+      ) return;
+      const gen = ++genRef.current;
+      setBusy("capture");
+      try {
+        const res = await invoke<{ pngBase64: string; width: number; height: number }>("capture_region_live", { left: target.left, top: target.top, width: target.width, height: target.height });
+        if (gen !== genRef.current) return;
+        const scale = scaleRef.current || 1;
+        const origin = originRef.current;
+        setSelection({ left: (target.left - origin.x) / scale, top: (target.top - origin.y) / scale, width: target.width / scale, height: target.height / scale });
+        setImage({ base64: res.pngBase64, width: res.width, height: res.height });
+        setMode("annotating");
+      } catch (error) { showError(typeof error === "string" ? error : "智能截图失败"); }
+      finally { if (gen === genRef.current) setBusy(null); }
+    });
+    const unScope = listen("screenshot-target-scope-toggle", () => {
+      if (modeRef.current === "selecting" && selectModeRef.current === "window") {
+        setTargetScope((scope) => (scope === "element" ? "window" : "element"));
+      }
+    });
+    return () => {
+      // Invalidate an in-flight detection from the previous scope/listener.
+      targetRequestRef.current++;
+      targetMovePendingRef.current = null;
+      unMove.then((fn) => fn());
+      unClick.then((fn) => fn());
+      unScope.then((fn) => fn());
+    };
+  }, [showError]);
 
   // Esc 取消 + Ctrl+Z/Y 撤销重做（标注态）
   const cancelRef = useRef<() => void>(() => {});
@@ -403,13 +486,11 @@ function ScreenshotTool() {
       setReady(false);
       setMonitorWorkArea(null);
       setCaptureTabsPosition(null);
-      setWindowListPosition(null);
       setSelection(null);
       setMode("selecting");
       setSelectMode("region");
       setCaptureKind("normal");
-      setWindows([]);
-      setSelectedWindow(null);
+      setTargetScope("element");
       setImage(null);
       setBusy(null);
       setOcrText(null);
@@ -432,13 +513,11 @@ function ScreenshotTool() {
       setReady(false);
       setMonitorWorkArea(null);
       setCaptureTabsPosition(null);
-      setWindowListPosition(null);
       setSelection(null);
       setMode("selecting");
       setSelectMode("region");
       setCaptureKind("normal");
-      setWindows([]);
-      setSelectedWindow(null);
+      setTargetScope("element");
       setImage(null);
       setBusy(null);
       setOcrText(null);
@@ -504,14 +583,12 @@ function ScreenshotTool() {
     setReady(false);
     setMonitorWorkArea(null);
     setCaptureTabsPosition(null);
-    setWindowListPosition(null);
     // 重置组件状态，避免 overlay 复用时残留上次的选区/图片
     setSelection(null);
     setMode("selecting");
     setSelectMode("region");
     setCaptureKind("normal");
-    setWindows([]);
-    setSelectedWindow(null);
+    setTargetScope("element");
     setImage(null);
     setBusy(null);
     setOcrText(null);
@@ -615,7 +692,6 @@ function ScreenshotTool() {
           setReady(false);
           setMonitorWorkArea(null);
           setCaptureTabsPosition(null);
-          setWindowListPosition(null);
           setSelection(null);
           // start_long_capture may have cleaned up the native session. Re-open
           // the overlay so the user can retry without restarting the app.
@@ -644,7 +720,11 @@ function ScreenshotTool() {
       setMode("annotating");
     } catch (err) {
       console.error("capture_region failed:", err);
-      cancel();
+      showError(
+        typeof err === "string" ? err : ((err as { message?: string })?.message ?? "截图失败，请重试"),
+      );
+      setSelection(null);
+      setMode("selecting");
     } finally {
       if (gen === genRef.current) {
         setBusy(null);
@@ -652,51 +732,12 @@ function ScreenshotTool() {
     }
   };
 
-  // 窗口识别模式：选中窗口后直接按窗口物理区域截取，无需手动拖框。
-  // enumerate_windows 返回的 left/top 是虚拟桌面绝对物理坐标，与拖框选区
-  // 换算后的 capture_region 入参一致，可原样传入；CSS 坐标仅用于显示选区框。
-  const captureWindow = async (w: WindowInfo) => {
-    if (mode !== "selecting" || busy || !ready) return;
-    const scale = scaleRef.current;
-    const origin = originRef.current;
-    const css: Selection = {
-      left: (w.left - origin.x) / scale,
-      top: (w.top - origin.y) / scale,
-      width: w.width / scale,
-      height: w.height / scale,
-    };
-    setSelectedWindow(w);
-    setSelection(css);
-    setBusy("capture");
-    // 自增代际使前一次未完成的窗口截取失效：快速连点不同窗口时，
-    // 旧 capture_region 返回后被丢弃，保证"最后点击的窗口获胜"
-    // （与 cancel 的 genRef 语义一致，且 selecting 阶段无其他异步依赖它）。
-    genRef.current++;
-    const gen = genRef.current;
-    try {
-      const res = await invoke<{ pngBase64: string; width: number; height: number }>(
-        "capture_region",
-        { left: w.left, top: w.top, width: w.width, height: w.height },
-      );
-      // 若期间已取消（Esc / 窗口隐藏），丢弃结果
-      if (gen !== genRef.current) return;
-      setImage({ base64: res.pngBase64, width: res.width, height: res.height });
-      setMode("annotating");
-    } catch (err) {
-      console.error("capture_region failed:", err);
-      cancel();
-    } finally {
-      if (gen === genRef.current) {
-        setBusy(null);
-      }
-    }
-  };
-  // 导出前把标注烧入底图，得到含标注的纯 base64
   const flushAnnotated = useCallback((): string | null => {
     if (!annotateRef.current) return image?.base64 ?? null;
     if (!annotateRef.current.isReady()) return null;
     return annotateRef.current.flushBase64();
   }, [image]);
+
 
   // 小工具栏按钮
   const copyToClipboard = async () => {
@@ -847,8 +888,9 @@ function ScreenshotTool() {
       cancel();
     } catch (err) {
       console.error("pin_image failed:", err);
-      // pin 失败也要退出截图模式，否则 overlay 全屏置顶卡死无法退出
-      cancel();
+      showError(
+        typeof err === "string" ? err : ((err as { message?: string })?.message ?? "贴图失败，请重试"),
+      );
     } finally {
       suppressFocusReset.current = false;
       setBusy(null);
@@ -899,7 +941,7 @@ function ScreenshotTool() {
               setSelectMode("window");
             }}
           >
-            <Icon name="AppWindow" size={14} /> 窗口
+            <Icon name="AppWindow" size={14} /> 智能
           </button>
           <button className="ss-area-cancel" onClick={cancel}>
             取消
@@ -907,43 +949,15 @@ function ScreenshotTool() {
         </div>
       )}
 
-      {/* 窗口识别模式：窗口列表，点击后按窗口区域自动框选截取 */}
+      {/* 智能截图模式：悬停识别目标，点击后直接截取 */}
       {mode === "selecting" && captureKind === "normal" && selectMode === "window" && (
-        <div
-          ref={windowListRef}
-          className="ss-window-list"
-          onPointerDown={(e) => e.stopPropagation()}
-          style={
-            windowListPosition
-              ? { left: windowListPosition.left, top: windowListPosition.top, transform: "none" }
-              : undefined
-          }
-        >
-          {windows.length === 0 ? (
-            <p className="ss-window-empty">未检测到可截图的窗口</p>
-          ) : (
-            windows.map((w) => (
-              <button
-                key={w.hwnd}
-                className={`ss-window-item ${selectedWindow?.hwnd === w.hwnd ? "selected" : ""}`}
-                onClick={() => captureWindow(w)}
-              >
-                <Icon name="AppWindow" size={16} />
-                <div className="ss-window-item-info">
-                  <span className="ss-window-item-title">{w.title}</span>
-                  <span className="ss-window-item-size">
-                    {w.width}×{w.height}
-                  </span>
-                </div>
-              </button>
-            ))
-          )}
-        </div>
+        <div className="ss-smart-hint">{targetScope === "element" ? "智能识别控件" : "智能识别窗口"} · 按 Tab 切换</div>
       )}
       {/* 半透明遮罩：用 4 个 div 框出选区外的区域。尺寸标签仅在 selecting 时显示，
           参照 Snipaste：选区完成后只留工具栏，避免标签与工具栏并存干扰。
-          截图瞬间 Rust 侧会临时 hide 整个 overlay 窗口，选区框/遮罩随之从屏幕消失，
-          不会被 GDI 截入底图，因此前端无需在此条件渲染上做额外处理。 */}
+          截取底图来自 start_screenshot 时在 overlay 显示前抓取的全屏缓存，
+          capture_region 直接裁剪该缓存，选区框/遮罩不会被截入，也无需 hide/show overlay，
+          因此前端无需在此条件渲染上做额外处理。 */}
       {selection && selection.width > 0 && selection.height > 0 && (
         <>
           <div
@@ -986,7 +1000,7 @@ function ScreenshotTool() {
           {ready
             ? selectMode === "region"
               ? "拖动鼠标选择截图区域，按 Esc 取消"
-              : "点击上方列表选择要截取的窗口，按 Esc 取消"
+              : "移动鼠标悬停识别目标，单击截取，按 Tab 切换，按 Esc 取消"
             : "正在准备截图…"}
         </div>
       )}

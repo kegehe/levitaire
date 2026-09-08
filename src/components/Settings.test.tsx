@@ -1,10 +1,15 @@
 import { act, render, screen, fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { clearMockListeners } from "../test/tauri-mock";
+import { clearMockListeners, emitMockFocus } from "../test/tauri-mock";
 import Settings from "./Settings";
 
 const mockInvoke = vi.mocked(invoke);
+
+/** happy-dom 的 DragEvent 构造不传递 clientY，改用 MouseEvent 模拟拖拽（事件名一致，React 按事件名委托，效果一致） */
+function dispatchDrag(el: Element, type: string, clientY: number) {
+  el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientY }));
+}
 
 describe("Settings 悬浮窗位置恢复", () => {
   beforeEach(() => {
@@ -48,6 +53,7 @@ describe("Settings 悬浮窗位置恢复", () => {
       if (command === "get_quick_input_history_enabled") return Promise.resolve(true);
       if (command === "get_quick_input_history_limit") return Promise.resolve(5);
       if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_snippets_enabled") return Promise.resolve(true);
       return Promise.resolve("");
     });
     render(<Settings />);
@@ -60,14 +66,115 @@ describe("Settings 悬浮窗位置恢复", () => {
       await Promise.resolve();
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("switch", { name: "使用剪贴板历史" }));
+      fireEvent.click(screen.getByRole("switch", { name: "剪贴板历史" }));
       await Promise.resolve();
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("set_quick_input_history_enabled", {
       enabled: false,
     });
-    expect(screen.getByText(/已关闭.*保留条数设置将在重新开启后生效/)).toBeInTheDocument();
+  });
+
+  it("拖拽整行调整预设词顺序并保存", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_history_limit") return Promise.resolve(5);
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_snippets_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_snippets")
+        return Promise.resolve(
+          JSON.stringify([
+            { label: "第一条", text: "first" },
+            { label: "第二条", text: "second" },
+          ]),
+        );
+      return Promise.resolve("");
+    });
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "快速输入" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const rows = document.querySelectorAll(".qi-snippet-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("第一条");
+    expect(rows[1]).toHaveTextContent("第二条");
+
+    await act(async () => {
+      // 把「第一条」拖到「第二条」行后半区，应插入到其后
+      dispatchDrag(rows[0], "dragstart", 0);
+      dispatchDrag(rows[1], "dragover", 100);
+      dispatchDrag(rows[0], "dragend", 0);
+      await Promise.resolve();
+    });
+
+    const reordered = document.querySelectorAll(".qi-snippet-row");
+    expect(reordered[0]).toHaveTextContent("第二条");
+    expect(reordered[1]).toHaveTextContent("第一条");
+    expect(mockInvoke).toHaveBeenCalledWith("set_quick_input_snippets", {
+      snippets: JSON.stringify([
+        { label: "第二条", text: "second" },
+        { label: "第一条", text: "first" },
+      ]),
+    });
+  });
+
+  it("拖到行上半区时插入到该行之前；未移动时不落库", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_history_limit") return Promise.resolve(5);
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_snippets_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_snippets")
+        return Promise.resolve(
+          JSON.stringify([
+            { label: "第一条", text: "first" },
+            { label: "第二条", text: "second" },
+          ]),
+        );
+      return Promise.resolve("");
+    });
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "快速输入" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // 按下即松开（无 dragover）：不应调用保存
+    const row = document.querySelectorAll(".qi-snippet-row")[0];
+    await act(async () => {
+      dispatchDrag(row, "dragstart", 0);
+      dispatchDrag(row, "dragend", 0);
+      await Promise.resolve();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("set_quick_input_snippets", expect.anything());
+
+    // 把「第二条」拖到「第一条」行上半区，应插入到其前
+    const firstRow = document.querySelectorAll(".qi-snippet-row")[0];
+    const secondRow = document.querySelectorAll(".qi-snippet-row")[1];
+    await act(async () => {
+      dispatchDrag(secondRow, "dragstart", 0);
+      dispatchDrag(firstRow, "dragover", -100);
+      dispatchDrag(secondRow, "dragend", 0);
+      await Promise.resolve();
+    });
+
+    const reordered = document.querySelectorAll(".qi-snippet-row");
+    expect(reordered[0]).toHaveTextContent("第二条");
+    expect(reordered[1]).toHaveTextContent("第一条");
+    expect(mockInvoke).toHaveBeenCalledWith("set_quick_input_snippets", {
+      snippets: JSON.stringify([
+        { label: "第二条", text: "second" },
+        { label: "第一条", text: "first" },
+      ]),
+    });
   });
 
   it("点击全部恢复按钮时逐个恢复所有悬浮窗", async () => {
@@ -85,6 +192,7 @@ describe("Settings 悬浮窗位置恢复", () => {
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "monitor-overlay" });
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "pomodoro-overlay" });
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "time-overlay" });
+    expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "todo-overlay" });
   });
 
   it("恢复失败时按钮显示失败反馈", async () => {
@@ -205,5 +313,76 @@ describe("Settings 悬浮窗位置恢复", () => {
       await colorRead;
     });
     expect(color.value).toBe("#123456");
+  });
+
+  it("主题下拉框提供浅色、深色与跟随系统选项", async () => {
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const select = screen.getByLabelText("主题") as HTMLSelectElement;
+    expect(select).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "浅色" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "深色" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "跟随系统" })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.change(select, { target: { value: "system" } });
+    });
+    expect(select).toHaveValue("system");
+  });
+});
+
+describe("Settings 窗口重新聚焦时同步工具启停状态", () => {
+  it("悬浮球面板禁用系统监控后，重新聚焦设置页使「启动时自动打开」勾选框随之后置为禁用", async () => {
+    let systemMonitorEnabled = true;
+    mockInvoke.mockImplementation((command) => {
+      switch (command) {
+        case "get_system_monitor_enabled":
+          return Promise.resolve(systemMonitorEnabled);
+        case "get_pomodoro_enabled":
+          return Promise.resolve(true);
+        case "get_todo_enabled":
+          return Promise.resolve(true);
+        case "get_timer_enabled":
+          return Promise.resolve(true);
+        case "get_tools_autostart":
+          return Promise.resolve(["system-monitor"]);
+        default:
+          return Promise.resolve("");
+      }
+    });
+
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统监控" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const checkbox = () =>
+      screen.getByRole("checkbox", {
+        name: "启动时自动打开",
+      }) as HTMLInputElement;
+    // 挂载快照为“已启用 + 已在自动打开列表” → 勾选框可用且勾选
+    expect(checkbox()).toBeEnabled();
+    expect(checkbox()).toBeChecked();
+
+    // 模拟在悬浮球面板中禁用该系统监控工具
+    systemMonitorEnabled = false;
+    await act(async () => {
+      emitMockFocus(false);
+      emitMockFocus(true);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 重新聚焦后应读取到最新启停状态：勾选框被禁用并提示先启用工具
+    expect(checkbox()).toBeDisabled();
+    expect(checkbox()).toBeChecked();
+    expect(screen.getByText("该工具未启用，需先在悬浮球面板中启用")).toBeInTheDocument();
   });
 });

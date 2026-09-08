@@ -34,12 +34,22 @@ interface QuickInputState {
   x: number;
   y: number;
   generation: number;
+  holdConfirmPending?: boolean;
+  holdConfirmX?: number;
+  holdConfirmY?: number;
 }
 
 /** 后端 quick-input-confirm 事件 payload */
 interface ConfirmPayload {
   selectedIndex: number | null;
   generation?: number;
+}
+
+/** 后端收到按住模式 keyup 后，请求前端按该瞬间鼠标位置结算扇区。 */
+interface HoldConfirmRequestPayload {
+  x: number;
+  y: number;
+  generation: number;
 }
 
 /** 窗口逻辑尺寸（CSS px，与后端 ensure_quick_input_window 的 inner_size 一致；物理尺寸 = 值 × scale） */
@@ -197,6 +207,22 @@ export function clampWheelCenter(
   };
 }
 
+/** 根据物理鼠标坐标计算高亮扇区；中心死区与鼠标移动逻辑保持一致。 */
+export function getHighlightedSector(
+  x: number,
+  y: number,
+  center: { x: number; y: number },
+  scale: number,
+  count: number,
+): number {
+  if (count <= 0) return -1;
+  const dx = x - center.x;
+  const dy = y - center.y;
+  if (Math.hypot(dx, dy) < DEAD_ZONE * scale) return -1;
+  const angle = (Math.atan2(dy, dx) * (180 / Math.PI) + 450) % 360;
+  return Math.floor(angle / (360 / count)) % count;
+}
+
 function QuickInputTool() {
   const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [visible, setVisible] = useState(false);
@@ -214,6 +240,8 @@ function QuickInputTool() {
   const generationRef = useRef(0);
   /** 使尚未完成定位的旧 start 请求失效，避免关闭后异步回调重新显示转盘 */
   const startRequestRef = useRef(0);
+  /** keyup 可能先于异步 start 定位完成；保留请求并在就绪后结算。 */
+  const pendingHoldConfirmRef = useRef<HoldConfirmRequestPayload | null>(null);
   /** 当前显示器缩放比例：move 坐标为物理像素，死区/半径需按此换算成视觉（逻辑）像素 */
   const scaleRef = useRef(1);
 
@@ -236,13 +264,14 @@ function QuickInputTool() {
 
   // 加载预设词 + 剪贴板历史，合并为转盘条目
   const refreshItems = async () => {
-    const [snippetsJson, history] = await Promise.all([
+    const [snippetsJson, history, snippetsEnabled] = await Promise.all([
       invoke<string>("get_quick_input_snippets").catch(() => ""),
       invoke<Array<{ preview: string; text: string }>>("get_quick_input_history").catch(() => []),
+      invoke<boolean>("get_quick_input_snippets_enabled").catch(() => true),
     ]);
     const next: WheelItem[] = [];
-    // 预设词
-    if (snippetsJson) {
+    // 预设词（关闭时仅展示剪贴板历史）
+    if (snippetsEnabled && snippetsJson) {
       try {
         const parsed = JSON.parse(snippetsJson) as Array<{ label: string; text: string }>;
         for (const s of parsed) {
@@ -278,6 +307,33 @@ function QuickInputTool() {
     const invalidatePendingStart = () => {
       startRequestRef.current += 1;
       readyRef.current = false;
+      pendingHoldConfirmRef.current = null;
+    };
+
+    const syncHighlightedAt = (x: number, y: number) => {
+      const idx = getHighlightedSector(
+        x,
+        y,
+        centerRef.current,
+        scaleRef.current,
+        itemsRef.current.length,
+      );
+      if (highlightedRef.current !== idx) setHighlightedAndSync(idx);
+      return idx;
+    };
+
+    const confirmPendingHold = () => {
+      const pending = pendingHoldConfirmRef.current;
+      if (!pending || !readyRef.current) return;
+      pendingHoldConfirmRef.current = null;
+      const selectedIndex = syncHighlightedAt(pending.x, pending.y);
+      invoke("confirm_quick_input_hold", {
+        generation: pending.generation,
+        selectedIndex: selectedIndex >= 0 ? selectedIndex : null,
+      }).catch((err) => {
+        console.error("quick input hold confirmation failed:", err);
+        void invoke("cancel_quick_input_wheel", { generation: pending.generation });
+      });
     };
 
     const handleStart = async ({ x, y, generation = 0 }: CoordPayload) => {
@@ -331,15 +387,36 @@ function QuickInputTool() {
       if (state !== null && !state.active) {
         if (requestId === startRequestRef.current) {
           readyRef.current = false;
+          pendingHoldConfirmRef.current = null;
           setVisible(false);
           await win.hide().catch(() => {});
         }
         return;
       }
+      if (
+        state !== null &&
+        pendingHoldConfirmRef.current &&
+        pendingHoldConfirmRef.current.generation !== state.generation
+      ) {
+        pendingHoldConfirmRef.current = null;
+      }
+      if (
+        state?.holdConfirmPending &&
+        state.holdConfirmX !== undefined &&
+        state.holdConfirmY !== undefined
+      ) {
+        pendingHoldConfirmRef.current = {
+          x: state.holdConfirmX,
+          y: state.holdConfirmY,
+          generation: state.generation,
+        };
+      }
+      // 先完成条目加载，再允许 move/confirm 参与结算，确保索引对应已渲染扇区。
+      await refreshItems();
+      if (requestId !== startRequestRef.current) return;
       // 就绪标志置 true：此后 move 事件才参与角度计算
       readyRef.current = true;
-      // 异步加载条目（预设词 + 剪贴板历史）
-      void refreshItems();
+      confirmPendingHold();
     };
 
     const unlistenStart = listen<CoordPayload>("quick-input-start", (event) =>
@@ -349,30 +426,23 @@ function QuickInputTool() {
     const unlistenMove = listen<CoordPayload>("quick-input-mouse-move", (event) => {
       // 转盘尚未就绪（start 还在定位中）时忽略，避免用陈旧 centerRef 算错角度
       if (!readyRef.current) return;
-      const { x, y } = event.payload;
-      const center = centerRef.current;
-      const dx = x - center.x;
-      const dy = y - center.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      // 中心死区：不选中。dist 为物理像素，视觉中心圆半径按 DEAD_ZONE × scale 放大，
-      // 高 DPI 下若不乘 scale 会因阈值偏小而误选中扇区
-      if (dist < DEAD_ZONE * scaleRef.current) {
-        if (highlightedRef.current !== -1) {
-          setHighlightedAndSync(-1);
-        }
-        return;
-      }
-      // 计算角度：0° 指向正上方（-y），顺时针递增
-      let angle = Math.atan2(dy, dx) * (180 / Math.PI); // -180..180，0=正东
-      angle = (angle + 90 + 360) % 360; // 转为 0=正上方，顺时针
-      const count = itemsRef.current.length;
-      if (count === 0) return;
-      const sector = 360 / count;
-      const idx = Math.floor(angle / sector) % count;
-      if (highlightedRef.current !== idx) {
-        setHighlightedAndSync(idx);
-      }
+      syncHighlightedAt(event.payload.x, event.payload.y);
     });
+
+    const unlistenHoldConfirm = listen<HoldConfirmRequestPayload>(
+      "quick-input-confirm-request",
+      (event) => {
+        if (
+          event.payload.generation !== undefined &&
+          generationRef.current !== 0 &&
+          event.payload.generation !== generationRef.current
+        ) {
+          return;
+        }
+        pendingHoldConfirmRef.current = event.payload;
+        confirmPendingHold();
+      },
+    );
 
     // quick-input-confirm：后端「结束转盘」时触发。selectedIndex 携带本次选中的扇区
     // （null=未选中/取消）。此事件用于触发键再次点击关闭、以及取消输入的场景。
@@ -422,7 +492,20 @@ function QuickInputTool() {
     // 监听器注册后主动查询一次，补偿 start 事件在 React/WebView 初始化期间丢失的情况。
     void invoke<QuickInputState>("get_quick_input_state")
       .then((state) => {
-        if (state.active) void handleStart(state);
+        if (state.active) {
+          if (
+            state.holdConfirmPending &&
+            state.holdConfirmX !== undefined &&
+            state.holdConfirmY !== undefined
+          ) {
+            pendingHoldConfirmRef.current = {
+              x: state.holdConfirmX,
+              y: state.holdConfirmY,
+              generation: state.generation,
+            };
+          }
+          void handleStart(state);
+        }
       })
       .catch(() => {});
 
@@ -430,6 +513,7 @@ function QuickInputTool() {
       invalidatePendingStart();
       unlistenStart.then((fn) => fn());
       unlistenMove.then((fn) => fn());
+      unlistenHoldConfirm.then((fn) => fn());
       unlistenConfirm.then((fn) => fn());
       unlistenClick.then((fn) => fn());
     };

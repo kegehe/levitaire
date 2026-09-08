@@ -118,6 +118,10 @@ function FloatingToolbar() {
   // 朗读进度（毫秒）；ttsDurationMs 为 0 表示总时长未知
   const [ttsPositionMs, setTtsPositionMs] = useState(0);
   const [ttsDurationMs, setTtsDurationMs] = useState(0);
+  // Distinguishes a speak continuation from a finished/stopped request that
+  // may win while the native IPC call is still resolving.
+  const ttsEpochRef = useRef(0);
+  const ttsRequestIdRef = useRef<number | null>(null);
 
   // 清除功能启用的清除项 ID 列表（默认全量，挂载后从后端异步加载；监听设置窗口的变更事件）
   const [enabledClearIds, setEnabledClearIds] = useState<string[]>(DEFAULT_CLEAR_IDS);
@@ -204,25 +208,33 @@ function FloatingToolbar() {
     checkAiConfig,
   } = useAiOptimize();
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
+  // 图片是否已加载完成并完成精确校准；用于避免 onLoad 先于扩窗 effect 触发时的尺寸竞态
+  const qrImageLoadedRef = useRef(false);
 
-  // 进入二维码预览时，先用已知最大尺寸扩窗，防止内容被裁切
-  // 图片 onLoad 后再精确校准（见 handleQrImageLoad）
+  // 进入二维码预览时，先用足够容纳内容的尺寸扩窗，防止图片渲染瞬间被裁切
+  // （body.toolbar-window 顶部预留了 24px tooltip 空间，需计入高度）；
+  // 图片 onLoad 后再精确校准（见 handleQrImageLoad）。
+  // 若图片已加载（onLoad 先于本 effect 触发），说明精确尺寸已设置，跳过扩窗避免反向放大。
   useEffect(() => {
-    if (state !== "qrcode-preview" || !qrCodeDataUrl) return;
+    if (state !== "qrcode-preview" || !qrCodeDataUrl || qrImageLoadedRef.current) return;
     const win = getCurrentWebviewWindow();
-    win.setSize(new LogicalSize(300, 300)).catch(() => {});
+    win.setSize(new LogicalSize(460, 560)).catch(() => {});
   }, [state, qrCodeDataUrl]);
 
   /** 图片加载完成后精确校准窗口尺寸（仅在二维码预览状态下有效） */
   const handleQrImageLoad = useCallback(() => {
     if (stateRef.current !== "qrcode-preview") return;
+    qrImageLoadedRef.current = true;
     const el = containerRef.current;
     if (!el) return;
     const PAD_BORDER_X = 18;
     const PAD_BORDER_Y = 14;
     const rect = el.getBoundingClientRect();
+    // body.toolbar-window 在容器上方预留 tooltip 空间，窗口高度必须一并计入，
+    // 否则容器下半部分（含底部圆角）会被窗口下缘裁成直角
+    const bodyPt = parseInt(getComputedStyle(document.body).paddingTop) || 0;
     const w = Math.ceil(rect.width + PAD_BORDER_X);
-    const h = Math.ceil(rect.height + PAD_BORDER_Y);
+    const h = Math.ceil(rect.height + PAD_BORDER_Y + bodyPt);
     if (w > 0 && h > 0) {
       getCurrentWebviewWindow()
         .setSize(new LogicalSize(w, h))
@@ -405,13 +417,44 @@ function FloatingToolbar() {
     });
 
     // 朗读自然结束（MediaEnded）→ 退出 speaking 态（幂等：停止/手动结束都会触发）
-    const unlistenTtsFinished = win.listen("tts-finished", () => {
+    const unlistenTtsFinished = win.listen<{ requestId?: number }>("tts-finished", (event) => {
+      const activeRequestId = ttsRequestIdRef.current;
+      const finishedRequestId = event.payload?.requestId;
+      if (
+        activeRequestId !== null &&
+        finishedRequestId !== undefined &&
+        finishedRequestId !== activeRequestId
+      ) {
+        return;
+      }
+      ttsEpochRef.current += 1;
+      ttsRequestIdRef.current = null;
       setTtsPlaying(false);
       setTtsPaused(false);
       if (stateRef.current === "speaking") {
         resetToDefault();
       }
     });
+
+    const unlistenTtsError = win.listen<{ requestId?: number; source?: string; error?: string }>(
+      "tts-error",
+      (event) => {
+        if (event.payload.source !== "text-toolbar") return;
+        const activeRequestId = ttsRequestIdRef.current;
+        if (
+          activeRequestId !== null &&
+          event.payload.requestId !== undefined &&
+          event.payload.requestId !== activeRequestId
+        ) {
+          return;
+        }
+        ttsEpochRef.current += 1;
+        setTtsPlaying(false);
+        setTtsPaused(false);
+        ttsRequestIdRef.current = null;
+        showError(event.payload.error || "朗读失败");
+      },
+    );
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -427,10 +470,11 @@ function FloatingToolbar() {
       unlistenSelection.then((fn) => fn());
       unlistenHidden.then((fn) => fn());
       unlistenTtsFinished.then((fn) => fn());
+      unlistenTtsError.then((fn) => fn());
       unlistenEsc.then((fn) => fn());
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [cancel, hideToolbar, resetToDefault, handleEscape]);
+  }, [cancel, hideToolbar, resetToDefault, handleEscape, showError]);
 
   useEffect(() => {
     if (!isLoading && state === "loading") {
@@ -572,8 +616,11 @@ function FloatingToolbar() {
   const handleDedup = async () => {
     if (!selection) return;
     const result = dedup(selection.text, dedupMode);
-    // 后端 replace_selection 拒绝空字符串，去重结果为空时直接返回
-    if (!result) return;
+    // 后端 replace_selection 拒绝空字符串，去重结果为空时提示用户而非静默返回
+    if (!result) {
+      showError("去重结果为空，文本未修改");
+      return;
+    }
     await replaceSelectionText(result);
   };
 
@@ -581,21 +628,30 @@ function FloatingToolbar() {
   const handleNumbering = async () => {
     if (!selection) return;
     const result = numbering(selection.text, numberingStyle);
-    // 后端 replace_selection 拒绝空字符串，结果为空时直接返回
-    if (!result) return;
+    // 后端 replace_selection 拒绝空字符串，编号结果为空时提示用户而非静默返回
+    if (!result) {
+      showError("编号结果为空，文本未修改");
+      return;
+    }
     await replaceSelectionText(result);
   };
 
   // 朗读选中文本：合成在后端 MTA 子线程执行，成功后切 speaking 态
   const handleSpeak = async () => {
     if (!selection?.text?.trim()) return;
+    const speakEpoch = ++ttsEpochRef.current;
+    ttsRequestIdRef.current = null;
     try {
-      await invoke("tts_speak", {
+      const requestId = await invoke<number>("tts_speak", {
         text: selection.text,
         rate: rateToSpeakingRate(ttsConfig.rate),
         voiceId: ttsConfig.voiceId,
         volume: ttsConfig.volume,
       });
+      // A very short utterance can finish before tts_speak resolves. In that
+      // case the finish event has already invalidated this continuation.
+      if (ttsEpochRef.current !== speakEpoch) return;
+      ttsRequestIdRef.current = typeof requestId === "number" ? requestId : null;
       setTtsPlaying(true);
       setTtsPaused(false);
       setTtsPositionMs(0);
@@ -607,8 +663,10 @@ function FloatingToolbar() {
   };
 
   const handleTtsPause = async () => {
+    const controlEpoch = ++ttsEpochRef.current;
     try {
       await invoke("tts_pause");
+      if (ttsEpochRef.current !== controlEpoch) return;
       setTtsPaused(true);
     } catch (err) {
       console.error("Failed to pause tts:", err);
@@ -616,8 +674,10 @@ function FloatingToolbar() {
   };
 
   const handleTtsResume = async () => {
+    const controlEpoch = ++ttsEpochRef.current;
     try {
       await invoke("tts_resume");
+      if (ttsEpochRef.current !== controlEpoch) return;
       setTtsPaused(false);
     } catch (err) {
       console.error("Failed to resume tts:", err);
@@ -626,6 +686,8 @@ function FloatingToolbar() {
 
   // 停止朗读：后端 Close 销毁 player，前端退出 speaking 态
   const handleTtsStop = async () => {
+    ttsEpochRef.current += 1;
+    ttsRequestIdRef.current = null;
     try {
       await invoke("tts_stop");
     } catch (err) {
@@ -691,30 +753,40 @@ function FloatingToolbar() {
     if (!selection?.text) return;
     const text = selection.text.trim();
     if (!text) return;
-    // QR 码 UTF-8 字节上限约 2953，超出时截断
-    const MAX_BYTES = 2900;
+    // Keep the symbol below Version 26 at M correction. Larger symbols have
+    // modules smaller than two physical pixels in the toolbar and phone
+    // cameras cannot scan them reliably, even though qrcode can generate one.
+    const MAX_BYTES = 1000;
     const encoder = new TextEncoder();
     const bytes = encoder.encode(text);
     let content = text;
     if (bytes.length > MAX_BYTES) {
-      // 回退到有效 UTF-8 边界：跳过尾部不完整的多字节序列
+      // 回退到有效 UTF-8 边界。检查完整解码结果比只看 continuation
+      // byte 更可靠，因为截断点可能落在多字节字符的首字节之后。
       let end = MAX_BYTES;
-      while (end > 0 && (bytes[end] & 0xc0) === 0x80) {
-        end--;
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      while (end > 0) {
+        try {
+          content = decoder.decode(bytes.slice(0, end));
+          break;
+        } catch {
+          end--;
+        }
       }
-      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(0, end));
     }
     try {
       const { toDataURL } = await import("qrcode");
       const dataUrl = await toDataURL(content, {
-        width: 256,
-        margin: 2,
+        width: 384,
+        margin: 4,
         errorCorrectionLevel: "M",
         color: {
           dark: "#000000",
           light: "#ffffff",
         },
       });
+      // 新一轮二维码生成，重置图片加载标志，允许再次扩窗/精确校准
+      qrImageLoadedRef.current = false;
       setQrCodeDataUrl(dataUrl);
       setState("qrcode-preview");
       invoke("set_qrcode_preview", { active: true }).catch(() => {});
@@ -931,30 +1003,37 @@ function FloatingToolbar() {
 
       {state === "qrcode-preview" && qrCodeDataUrl && (
         <div className="toolbar-qrcode">
-          <img
-            src={qrCodeDataUrl}
-            alt="二维码"
-            className="toolbar-qrcode-image"
-            onLoad={handleQrImageLoad}
-          />
-          <div className="toolbar-preview-actions">
-            <ToolbarButton
-              icon="Download"
-              label="下载"
+          <div className="toolbar-qrcode-card">
+            <img
+              src={qrCodeDataUrl}
+              alt="二维码"
+              className="toolbar-qrcode-image"
+              onLoad={handleQrImageLoad}
+            />
+          </div>
+          <div className="toolbar-qrcode-actions" role="group" aria-label="二维码操作">
+            <button
+              type="button"
+              className="toolbar-qrcode-action"
+              aria-label="下载"
               onClick={async () => {
                 try {
                   await invoke<boolean>("save_image", {
                     base64Data: qrCodeDataUrl,
                     filename: "qrcode.png",
                   });
-                } catch (_err) {
+                } catch {
                   showError("下载二维码失败");
                 }
               }}
-            />
-            <ToolbarButton
-              icon="Copy"
-              label="复制"
+            >
+              <Icon name="Download" size={14} />
+              <span>下载</span>
+            </button>
+            <button
+              type="button"
+              className="toolbar-qrcode-action toolbar-qrcode-action--primary"
+              aria-label="复制"
               onClick={async () => {
                 try {
                   const resp = await fetch(qrCodeDataUrl);
@@ -970,17 +1049,21 @@ function FloatingToolbar() {
                   showError("复制二维码失败");
                 }
               }}
-              variant="primary"
-            />
-            <ToolbarButton
-              icon="X"
-              label="关闭"
+            >
+              <Icon name="Copy" size={14} />
+              <span>复制</span>
+            </button>
+            <button
+              type="button"
+              className="toolbar-qrcode-action toolbar-qrcode-action--danger"
+              aria-label="关闭"
               onClick={() => {
-                invoke("set_qrcode_preview", { active: false }).catch(() => {});
                 hideToolbar();
               }}
-              variant="danger"
-            />
+            >
+              <Icon name="X" size={14} />
+              <span>关闭</span>
+            </button>
           </div>
         </div>
       )}

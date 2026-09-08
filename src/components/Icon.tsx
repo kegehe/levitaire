@@ -37,6 +37,7 @@ import {
   Grid3x3,
   Hash,
   Palette,
+  Pipette,
   RemoveFormatting,
   Trash2,
   Calculator,
@@ -71,6 +72,14 @@ import {
   Minus,
   Plus,
   Circle,
+  Calendar,
+  ChevronLeft,
+  ChevronRight,
+  Flag,
+  ChevronsUp,
+  ChevronsDown,
+  ArrowUpToLine,
+  ArrowDownToLine,
 } from "lucide-react";
 import type { LucideProps } from "lucide-react";
 
@@ -113,6 +122,7 @@ const ICON_MAP = {
   Grid3x3,
   Hash,
   Palette,
+  Pipette,
   RemoveFormatting,
   Trash2,
   Calculator,
@@ -147,6 +157,14 @@ const ICON_MAP = {
   Minus,
   Plus,
   Circle,
+  Calendar,
+  ChevronLeft,
+  ChevronRight,
+  Flag,
+  ChevronsUp,
+  ChevronsDown,
+  ArrowUpToLine,
+  ArrowDownToLine,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;

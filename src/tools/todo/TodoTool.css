@@ -45,7 +45,11 @@
 .priority-urgent { color: var(--color-danger-fg); }.priority-high { color: var(--color-accent); }.priority-low { color: var(--color-fg-subtle); }
 .todo-edit, .todo-delete { width: 24px; height: 24px; flex-shrink: 0; border-radius: 5px; }
 .todo-edit.is-active-focus { color: var(--color-fg-on-accent); background: var(--color-accent); }
-.todo-reorder-actions { display: flex; flex-direction: column; gap: 1px; }
+.todo-item-row.is-draggable { cursor: grab; }
+.todo-item-row.is-draggable:active { cursor: grabbing; }
+.todo-item.is-dragging { opacity: 0.45; }
+.todo-item.is-drag-over-before > .todo-item-row { box-shadow: inset 0 2px 0 var(--color-accent); }
+.todo-item.is-drag-over-after > .todo-item-row { box-shadow: inset 0 -2px 0 var(--color-accent); }
 .todo-item-details { width: auto; min-width: 0; box-sizing: border-box; margin: 0 var(--todo-row-inset) 7px calc(var(--todo-row-inset) + var(--todo-check-size) + var(--todo-item-gap)); padding: 7px; border: 1px solid var(--color-border); border-radius: 6px; color: var(--color-fg-muted); background: var(--color-bg-sunken); font-size: 10px; line-height: 1.45; animation: todo-details-enter 150ms ease-out both; }
 .todo-edit-fields { display: grid; gap: 5px; padding: 7px; }
 .todo-edit-fields input, .todo-edit-fields select { min-width: 0; box-sizing: border-box; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg); background: var(--color-bg-sunken); font: inherit; }
@@ -57,13 +61,17 @@
 .todo-undo-toast button:hover { background: var(--button-hover-bg); }
 .todo-io-toast { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; border: 1px solid var(--color-border); border-radius: 7px; color: var(--color-fg-muted); background: var(--color-bg-sunken); }
 .todo-io-toast button { display: inline-flex; padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; }
-.todo-reminder-toast { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid var(--color-accent); border-radius: 7px; color: var(--color-fg); background: var(--color-bg-sunken); box-shadow: 0 4px 12px rgb(0 0 0 / 15%); }
-.todo-reminder-toast > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.todo-reminder-toast { display: flex; flex-direction: column; gap: 5px; padding: 7px 9px; border: 1px solid var(--color-accent); border-radius: 7px; color: var(--color-fg); background: var(--color-bg-sunken); box-shadow: 0 4px 12px rgb(0 0 0 / 15%); }
+.todo-reminder-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .todo-reminder-focus { min-width: 0; overflow: hidden; padding: 0; border: 0; color: var(--color-fg); background: transparent; cursor: pointer; font: inherit; font-weight: 600; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .todo-reminder-focus:hover { color: var(--color-accent); text-decoration: underline; }
-.todo-reminder-toast > div { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
-.todo-reminder-toast button { padding: 3px 5px; border: 0; border-radius: 4px; color: var(--color-accent); background: transparent; cursor: pointer; font: inherit; }
-.todo-reminder-toast button:hover { background: var(--button-hover-bg); }
+.todo-reminder-close { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 2px; border: 0; border-radius: 4px; color: var(--color-fg-muted); background: transparent; cursor: pointer; font: inherit; }
+.todo-reminder-close:hover { color: var(--color-fg); background: var(--button-hover-bg); }
+.todo-reminder-snooze, .todo-reminder-custom { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; }
+.todo-reminder-snooze > span { margin-right: 2px; color: var(--color-fg-muted); font-size: 10px; }
+.todo-reminder-snooze button, .todo-reminder-custom button { padding: 3px 6px; border: 0; border-radius: 4px; color: var(--color-accent); background: transparent; cursor: pointer; font: inherit; }
+.todo-reminder-snooze button:hover, .todo-reminder-custom button:hover { background: var(--button-hover-bg); }
+.todo-reminder-custom input { min-width: 0; flex: 1 1 120px; height: 24px; box-sizing: border-box; padding: 0 4px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg); background: var(--color-bg-sunken); font: inherit; font-size: 10px; }
 
 /* Compact floating layout: advanced controls are revealed only when needed. */
 .todo-icon-btn.is-active, .todo-option-btn.is-active, .todo-list-manage-btn.is-active { color: var(--color-fg); background: var(--button-hover-bg); }
@@ -92,6 +100,7 @@
 .todo-item:hover .todo-item-actions, .todo-item:focus-within .todo-item-actions { opacity: 1; }
 .todo-item-main { justify-content: center; }
 .todo-item-summary { display: flex; align-items: center; gap: 6px; min-height: 12px; color: var(--color-fg-subtle); font-size: 10px; }
+.todo-item-summary:empty { display: none; }
 .todo-edit-fields { display: grid; gap: 6px; }
 .todo-edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; min-width: 0; }
 .todo-edit-buttons { display: flex; justify-content: flex-end; gap: 5px; }
@@ -114,6 +123,25 @@
 .todo-date-shortcuts button:hover { color: var(--color-fg); background: var(--button-hover-bg); }
 .todo-date-shortcuts .todo-date-clear { color: var(--color-danger-fg); }
 .todo-date-field input { height: 26px; box-sizing: border-box; font-size: 10px; }
+
+/* 编辑态：整行收拢为一张卡片，编辑区与行首勾选同宽对齐，避免“内容下方另起一块缩进框”的割裂感 */
+.todo-item.is-editing { margin: 4px 0 6px; padding: 0; border: 1px solid var(--color-border); border-radius: 9px; background: var(--color-bg-elevated); box-shadow: 0 1px 4px rgb(0 0 0 / 7%); overflow: hidden; }
+.todo-item.is-editing > .todo-item-row { min-height: 40px; padding: 4px 9px; border-bottom: 1px solid var(--color-border); }
+.todo-item.is-editing .todo-item-main { padding: 4px 0; cursor: default; }
+.todo-item.is-editing .todo-item-details { margin: 0; padding: 9px; border: 0; border-radius: 0; background: transparent; }
+.todo-item.is-editing .todo-item-actions { opacity: 1; }
+/* 编辑字段精致化：统一圆角/尺寸/聚焦态 */
+.todo-edit-fields { gap: 7px; }
+.todo-edit-fields > input, .todo-edit-fields textarea, .todo-edit-fields select, .todo-edit-grid input, .todo-edit-grid select { border-radius: 6px; font-size: 11px; }
+.todo-edit-fields > input { height: 30px; padding: 0 8px; }
+.todo-edit-fields > input:first-child { font-size: 12px; font-weight: 600; }
+.todo-edit-fields textarea { min-height: 46px; padding: 6px 8px; line-height: 1.5; }
+.todo-edit-fields .todo-edit-grid select, .todo-edit-fields .todo-edit-grid input { height: 26px; padding: 0 6px; }
+.todo-edit-fields > input:focus, .todo-edit-fields textarea:focus, .todo-edit-fields select:focus, .todo-edit-grid input:focus, .todo-edit-grid select:focus { border-color: var(--color-accent); outline: 0; box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 18%, transparent); }
+.todo-edit-buttons { gap: 6px; padding-top: 2px; }
+.todo-edit-buttons button { padding: 5px 13px; border-radius: 6px; font-size: 11px; }
+.todo-edit-buttons button:first-child { border-color: var(--color-accent); }
+.todo-edit-buttons button:not(:first-child):hover { background: var(--button-hover-bg); }
 
 .todo-undo-toast, .todo-io-toast, .todo-reminder-toast { animation: todo-toast-enter 180ms ease-out both; }
 

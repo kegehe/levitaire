@@ -94,6 +94,7 @@ pub struct RecordResult {
 
 #[derive(Default)]
 pub struct RecordingState {
+    lifecycle: Mutex<()>,
     /// 录制是否进行中
     running: AtomicBool,
     /// Recording has stopped, but its encoder is still producing output.
@@ -134,6 +135,7 @@ impl RecordingState {
         fps: u32,
         max_duration_sec: u32,
     ) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().map_err(|e| e.to_string())?;
         if self.finishing.load(Ordering::SeqCst)
             || self
                 .running
@@ -182,6 +184,7 @@ impl RecordingState {
 
     /// 暂停录制
     pub fn pause(&self) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().map_err(|e| e.to_string())?;
         if !self.running.load(Ordering::SeqCst) {
             return Err("未在录制中".into());
         }
@@ -194,6 +197,7 @@ impl RecordingState {
 
     /// 恢复录制
     pub fn resume(&self) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().map_err(|e| e.to_string())?;
         if !self.running.load(Ordering::SeqCst) {
             return Err("未在录制中".into());
         }
@@ -209,6 +213,7 @@ impl RecordingState {
 
     /// 停止录制（编码完成后产生结果）
     pub fn stop(&self) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().map_err(|e| e.to_string())?;
         if !self.running.load(Ordering::SeqCst) {
             return Err("未在录制中".into());
         }
@@ -227,9 +232,23 @@ impl RecordingState {
 
     /// 取消录制（直接丢弃，不编码）
     pub fn cancel(&self) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().map_err(|e| e.to_string())?;
         self.cancel_requested.store(true, Ordering::SeqCst);
         if self.running.load(Ordering::SeqCst) {
-            self.stop()?;
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.running.store(false, Ordering::SeqCst);
+            self.finishing.store(true, Ordering::SeqCst);
+            if self.paused.swap(false, Ordering::SeqCst) {
+                if let Some(pause_start) = self
+                    .pause_start
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .take()
+                {
+                    *self.paused_duration.lock().map_err(|e| e.to_string())? +=
+                        pause_start.elapsed();
+                }
+            }
         } else {
             self.generation.fetch_add(1, Ordering::SeqCst);
             self.paused.store(false, Ordering::SeqCst);
@@ -297,15 +316,58 @@ impl RecordingState {
         self.finishing.store(false, Ordering::SeqCst);
     }
 
+    /// Claim encoder finalization for this worker. A user stop advances the
+    /// generation before the worker observes it; automatic completion does not.
+    fn claim_finalization(&self, gen: u64) -> bool {
+        let _lifecycle = match self.lifecycle.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        if self.cancel_requested() {
+            return false;
+        }
+
+        let current = self.generation.load(Ordering::SeqCst);
+        if current == gen {
+            if self
+                .generation
+                .compare_exchange(
+                    gen,
+                    gen.wrapping_add(1),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_err()
+            {
+                return false;
+            }
+        } else if current != gen.wrapping_add(1) || self.running.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        self.running.store(false, Ordering::SeqCst);
+        self.finishing.store(true, Ordering::SeqCst);
+        true
+    }
+
     /// 计算已录制时长（毫秒），扣除暂停时间
     pub fn elapsed_ms(&self) -> u64 {
-        let start_opt = self.start_time.lock().ok();
-        let Some(start_guard) = start_opt else {
+        // Copy each value before taking the next mutex. Mutating paths acquire
+        // pause_start before paused_duration; keeping either guard alive here
+        // would create the reverse order.
+        let Some(start) = self.start_time.lock().ok().and_then(|g| *g) else {
             return 0;
         };
-        let Some(start) = start_guard.as_ref() else {
-            return 0;
-        };
+
+        let mut elapsed = start.elapsed();
+
+        // 如果当前处于暂停状态，减去本次暂停已经过的时间
+        if self.paused.load(Ordering::SeqCst) {
+            let pause_start = self.pause_start.lock().ok().and_then(|g| *g);
+            if let Some(ps) = pause_start {
+                elapsed = elapsed.saturating_sub(ps.elapsed());
+            }
+        }
 
         let paused_dur = self
             .paused_duration
@@ -313,18 +375,6 @@ impl RecordingState {
             .ok()
             .map(|g| *g)
             .unwrap_or(Duration::ZERO);
-
-        let mut elapsed = start.elapsed();
-
-        // 如果当前处于暂停状态，减去本次暂停已经过的时间
-        if self.paused.load(Ordering::SeqCst) {
-            if let Ok(ps_guard) = self.pause_start.lock() {
-                if let Some(ps) = *ps_guard {
-                    elapsed = elapsed.saturating_sub(ps.elapsed());
-                }
-            }
-        }
-
         elapsed.saturating_sub(paused_dur).as_millis() as u64
     }
 
@@ -553,13 +603,8 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
 
     // 仅在 generation 未被 stop/cancel 修改时递增并清除 running
     // 防止覆盖新录制的 running=true
-    if state
-        .generation
-        .compare_exchange(gen, gen.wrapping_add(1), Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        state.running.store(false, Ordering::SeqCst);
-        state.finishing.store(true, Ordering::SeqCst);
+    if !state.claim_finalization(gen) {
+        return;
     }
 
     if frame_count == 0 {
@@ -586,6 +631,10 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
     // drop encoder 刷新缓冲区
     drop(encoder);
 
+    if state.cancel_requested() || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1) {
+        state.finish_encoding();
+        return;
+    }
     let gif_bytes = gif_buf.into_inner();
 
     crate::utils::logger::log(
@@ -595,6 +644,17 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&gif_bytes);
     let gif_bytes_len = gif_bytes.len();
+    let _lifecycle = match state.lifecycle.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            state.finish_encoding();
+            return;
+        }
+    };
+    if state.cancel_requested() || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1) {
+        state.finish_encoding();
+        return;
+    }
     if let Ok(mut guard) = state.result.lock() {
         *guard = Some(RecordResult {
             data: gif_bytes,
@@ -767,6 +827,9 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
         let _ = ffmpeg.finish(Duration::from_secs(5));
         let _ = std::fs::remove_file(&output_path);
         if !state.fail_generation(gen) {
+            // A concurrent stop/cancel already changed the generation. The
+            // worker still owns no result, so release the finishing gate.
+            state.finish_encoding();
             return;
         }
         let _ = app.emit(
@@ -777,13 +840,10 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
     }
 
     // 仅在 generation 未被 stop/cancel 修改时递增并清除 running
-    if state
-        .generation
-        .compare_exchange(gen, gen.wrapping_add(1), Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        state.running.store(false, Ordering::SeqCst);
-        state.finishing.store(true, Ordering::SeqCst);
+    if !state.claim_finalization(gen) {
+        let _ = ffmpeg.finish(Duration::from_secs(5));
+        let _ = std::fs::remove_file(&output_path);
+        return;
     }
 
     if frame_count == 0 {
@@ -797,7 +857,7 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
         return;
     }
 
-    if state.cancel_requested() || state.generation.load(Ordering::SeqCst) > gen.wrapping_add(1) {
+    if state.cancel_requested() || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1) {
         let _ = ffmpeg.finish(Duration::from_secs(5));
         let _ = std::fs::remove_file(&output_path);
         return;
@@ -810,10 +870,10 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
 
     // 关闭 ffmpeg 并等待编码完成
     if let Err(e) = ffmpeg.finish_with_cancel(Duration::from_secs(30), || {
-        state.cancel_requested() || state.generation.load(Ordering::SeqCst) > gen.wrapping_add(1)
+        state.cancel_requested() || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1)
     }) {
         let _ = std::fs::remove_file(&output_path);
-        if state.cancel_requested() || state.generation.load(Ordering::SeqCst) > gen.wrapping_add(1)
+        if state.cancel_requested() || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1)
         {
             return;
         }
@@ -825,8 +885,17 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
         return;
     }
 
-    if state.cancel_requested() || state.generation.load(Ordering::SeqCst) > gen.wrapping_add(1) {
+    let _lifecycle = match state.lifecycle.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            let _ = std::fs::remove_file(&output_path);
+            state.finish_encoding();
+            return;
+        }
+    };
+    if state.cancel_requested() || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1) {
         let _ = std::fs::remove_file(&output_path);
+        state.finish_encoding();
         return;
     }
 
@@ -900,6 +969,24 @@ mod tests {
         assert!(!state.is_running());
         assert!(!state.is_finishing());
         assert!(!state.fail_generation(0));
+    }
+
+    #[test]
+    fn finalization_claim_accepts_automatic_and_user_stop_generations() {
+        let automatic = RecordingState::default();
+        automatic.running.store(true, Ordering::SeqCst);
+        automatic.generation.store(7, Ordering::SeqCst);
+        assert!(automatic.claim_finalization(7));
+        assert_eq!(automatic.generation.load(Ordering::SeqCst), 8);
+        assert!(automatic.is_finishing());
+
+        let stopped = RecordingState::default();
+        stopped.running.store(true, Ordering::SeqCst);
+        stopped.generation.store(7, Ordering::SeqCst);
+        stopped.stop().unwrap();
+        assert!(stopped.claim_finalization(7));
+        assert_eq!(stopped.generation.load(Ordering::SeqCst), 8);
+        assert!(stopped.is_finishing());
     }
 
     #[test]

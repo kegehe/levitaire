@@ -24,7 +24,10 @@ type ToolWindowLabel =
   | "pomodoro-overlay"
   | "time-overlay"
   | "todo-overlay"
-  | "sketch-overlay";
+  | "sketch-overlay"
+  | "scroll-navigator-overlay"
+  | "utility-hub-overlay"
+  | "sticky-notes-manager";
 
 const pendingWindows = new Map<ToolWindowLabel, Promise<WebviewWindowInstance>>();
 let screenshotOverlayReady = false;
@@ -62,6 +65,7 @@ let sketchReady = false;
 let sketchReadyListener: Promise<UnlistenFn> | undefined;
 const sketchReadyWaiters = new Set<() => void>();
 let sketchCloseHandlerReady = false;
+let sketchCloseHandlerPromise: Promise<void> | undefined;
 
 function startReadyRequestRetry(target: ToolWindowLabel, requestEvent: string): number {
   const request = () => {
@@ -73,11 +77,20 @@ function startReadyRequestRetry(target: ToolWindowLabel, requestEvent: string): 
 
 async function ensureSketchCloseHandler(window: WebviewWindowInstance): Promise<void> {
   if (sketchCloseHandlerReady) return;
-  await window.onCloseRequested(async (event) => {
-    event.preventDefault();
-    await window.hide().catch(() => {});
-  });
-  sketchCloseHandlerReady = true;
+  if (!sketchCloseHandlerPromise) {
+    sketchCloseHandlerPromise = window
+      .onCloseRequested(async (event) => {
+        event.preventDefault();
+        await window.hide().catch(() => {});
+      })
+      .then(() => {
+        sketchCloseHandlerReady = true;
+      })
+      .finally(() => {
+        sketchCloseHandlerPromise = undefined;
+      });
+  }
+  await sketchCloseHandlerPromise;
 }
 
 async function prepareScreenshotOverlayReadyListener(): Promise<void> {
@@ -96,7 +109,10 @@ async function waitForScreenshotOverlayReady(): Promise<void> {
   if (screenshotOverlayReady) return;
 
   await new Promise<void>((resolve, reject) => {
-    const retryTimer = startReadyRequestRetry("screenshot-overlay", "screenshot-overlay-ready-request");
+    const retryTimer = startReadyRequestRetry(
+      "screenshot-overlay",
+      "screenshot-overlay-ready-request",
+    );
     const onReady = () => {
       window.clearInterval(retryTimer);
       window.clearTimeout(timeout);
@@ -179,7 +195,10 @@ async function waitForLongCaptureFrameReady(): Promise<void> {
   await prepareLongCaptureFrameReadyListener();
   if (longCaptureFrameReady) return;
   await new Promise<void>((resolve, reject) => {
-    const retryTimer = startReadyRequestRetry("long-capture-frame", "long-capture-frame-ready-request");
+    const retryTimer = startReadyRequestRetry(
+      "long-capture-frame",
+      "long-capture-frame-ready-request",
+    );
     const onReady = () => {
       window.clearInterval(retryTimer);
       window.clearTimeout(timeout);
@@ -228,7 +247,10 @@ async function waitForLongCaptureControlsWindowReady(): Promise<void> {
   await prepareLongCaptureControlsReadyListener();
   if (longCaptureControlsReady) return;
   await new Promise<void>((resolve, reject) => {
-    const retryTimer = startReadyRequestRetry("long-capture-controls", "long-capture-controls-ready-request");
+    const retryTimer = startReadyRequestRetry(
+      "long-capture-controls",
+      "long-capture-controls-ready-request",
+    );
     const onReady = () => {
       window.clearInterval(retryTimer);
       window.clearTimeout(timeout);
@@ -248,7 +270,10 @@ async function waitForRecordingControlsWindowReady(): Promise<void> {
   if (recordingControlsReady) return;
 
   await new Promise<void>((resolve, reject) => {
-    const retryTimer = startReadyRequestRetry("recording-controls", "recording-controls-ready-request");
+    const retryTimer = startReadyRequestRetry(
+      "recording-controls",
+      "recording-controls-ready-request",
+    );
     const onReady = () => {
       window.clearInterval(retryTimer);
       window.clearTimeout(timeout);
@@ -813,7 +838,7 @@ export async function ensureTimerWindow(): Promise<WebviewWindowInstance> {
   timerReady = false;
   const window = await createToolWindow("time-overlay", {
     title: "Levitaire Timer",
-    width: 360,
+    width: 380,
     height: 220,
     resizable: false,
     transparent: true,
@@ -865,6 +890,70 @@ export async function ensureTodoWindow(): Promise<WebviewWindowInstance> {
   }
 }
 
+export async function ensureScrollNavigatorWindow(): Promise<WebviewWindowInstance> {
+  const existing = await WebviewWindow.getByLabel("scroll-navigator-overlay");
+  if (existing) return existing;
+  return createToolWindow("scroll-navigator-overlay", {
+    title: "Levitaire Scroll Navigator",
+    width: 260,
+    height: 190,
+    resizable: false,
+    transparent: true,
+    decorations: false,
+    shadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    x: 120,
+    y: 120,
+    backgroundColor: [0, 0, 0, 0],
+  });
+}
+
+export async function ensureUtilityHubWindow(): Promise<WebviewWindowInstance> {
+  const existing = await WebviewWindow.getByLabel("utility-hub-overlay");
+  if (existing) return existing;
+  return createToolWindow("utility-hub-overlay", {
+    title: "Levitaire 通用工具",
+    // The frontend resizes to its active tool's measured content height plus
+    // a transparent 26px gutter for upward tooltips.
+    width: 120,
+    height: 62,
+    resizable: false,
+    transparent: true,
+    decorations: false,
+    shadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    x: 120,
+    y: 120,
+    backgroundColor: [0, 0, 0, 0],
+  });
+}
+
+/** 创建或复用便利贴管理窗（隐藏，待 show_sticky_notes_manager 命令显示）。
+ * 管理窗统筹所有便签的新建/删除/收起/唤出。 */
+export async function ensureStickyNotesManagerWindow(): Promise<WebviewWindowInstance> {
+  const existing = await WebviewWindow.getByLabel("sticky-notes-manager");
+  if (existing) return existing;
+  return createToolWindow("sticky-notes-manager", {
+    title: "Levitaire 便利贴",
+    width: 360,
+    height: 560,
+    resizable: false,
+    transparent: true,
+    decorations: false,
+    shadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    x: 100,
+    y: 100,
+    backgroundColor: [0, 0, 0, 0],
+  });
+}
+
 /**
  * 根据工具 ID 打开对应的工具窗口。
  * 用于 ToolPalette 激活和 FloatingOrb 自启动两种场景。
@@ -886,9 +975,7 @@ export async function preloadEnabledToolWindows(): Promise<void> {
       }
     }),
   );
-  const enabledIds = new Set(
-    enabledResults.filter(({ enabled }) => enabled).map(({ id }) => id),
-  );
+  const enabledIds = new Set(enabledResults.filter(({ enabled }) => enabled).map(({ id }) => id));
   const tasks: Array<{ label: string; promise: Promise<unknown> }> = [];
 
   for (const tool of FLOATING_TOOLS) {
@@ -935,6 +1022,13 @@ export async function preloadEnabledToolWindows(): Promise<void> {
   if (enabledIds.has("quick-input")) {
     tasks.push({ label: "quick input", promise: invoke("ensure_quick_input_window") });
   }
+  if (enabledIds.has("utility-hub")) {
+    tasks.push({ label: "utility hub", promise: ensureUtilityHubWindow() });
+  }
+  if (enabledIds.has("sticky-notes")) {
+    // 恢复启动前已钉在桌面的便签（后端按 visible 重建窗口），不打开管理窗。
+    tasks.push({ label: "sticky notes", promise: invoke("restore_pinned_notes") });
+  }
 
   const results = await Promise.allSettled(tasks.map(({ promise }) => promise));
   results.forEach((result, index) => {
@@ -946,6 +1040,11 @@ export async function preloadEnabledToolWindows(): Promise<void> {
 
 export async function openToolWindow(toolId: string): Promise<boolean> {
   try {
+    if (toolId === "utility-hub") {
+      await ensureUtilityHubWindow();
+      await invoke("start_utility_hub");
+      return true;
+    }
     if (toolId === "system-monitor") {
       const monitorWindow = await ensureMonitorWindow();
       if (monitorWindow.created) {
@@ -967,6 +1066,11 @@ export async function openToolWindow(toolId: string): Promise<boolean> {
     if (toolId === "todo") {
       await ensureTodoWindow();
       await invoke("show_todo_window");
+      return true;
+    }
+    if (toolId === "sticky-notes") {
+      await ensureStickyNotesManagerWindow();
+      await invoke("show_sticky_notes_manager");
       return true;
     }
     // 其他工具（screenshot、recording、text-toolbar）是按需触发的，

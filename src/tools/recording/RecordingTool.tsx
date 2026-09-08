@@ -386,6 +386,10 @@ function RecordingTool() {
       // 避免第二次调用把正在录制的 UI 切到错误面板。
       if (phaseRef.current !== "area_select") return;
 
+      const startGeneration = genRef.current;
+      const startStillCurrent = () =>
+        genRef.current === startGeneration && !cancellingRef.current && mountedRef.current;
+
       let recordingStarted = false;
 
       try {
@@ -428,7 +432,7 @@ function RecordingTool() {
             setPhase("recording");
           });
           // 用户可能已按 Esc/取消（组件卸载或 cancellingRef 置位），此时不应再启动录制。
-          if (cancellingRef.current || !mountedRef.current) return;
+          if (!startStillCurrent()) return;
           await invoke("start_recording", {
             left: selectedRegion.left,
             top: selectedRegion.top,
@@ -441,7 +445,7 @@ function RecordingTool() {
           recordingStarted = true;
           // start_recording 的 IPC 期间用户仍可能取消（Esc），此时后端已启动录制，
           // 必须停掉，避免后台静默录满整段时长。
-          if (cancellingRef.current || !mountedRef.current) {
+          if (!startStillCurrent()) {
             await invoke("cancel_recording").catch(console.error);
             return;
           }
@@ -463,6 +467,8 @@ function RecordingTool() {
 
         setRegion(regionToRecord);
 
+        if (!startStillCurrent()) return;
+
         await invoke("start_recording", {
           left: regionToRecord.left,
           top: regionToRecord.top,
@@ -473,6 +479,13 @@ function RecordingTool() {
           maxDurationSec,
         });
         recordingStarted = true;
+        // Esc/cancel may arrive while the native start command is in flight.
+        // Do not continue with controls or switch back to recording UI after
+        // that cancellation has already invalidated this start attempt.
+        if (!startStillCurrent()) {
+          await invoke("cancel_recording").catch(console.error);
+          return;
+        }
         const controls = await ensureRecordingControlsWindow();
         await controls.setPosition(
           new PhysicalPosition(
@@ -481,6 +494,10 @@ function RecordingTool() {
           ),
         );
         await controls.show();
+        if (!startStillCurrent()) {
+          await invoke("cancel_recording").catch(console.error);
+          return;
+        }
         await invoke("show_recording_controls");
         setPhase("recording");
         // overlay 保持显示，展示选区框 + 录制控制面板
@@ -488,6 +505,7 @@ function RecordingTool() {
         if (recordingStarted) {
           await invoke("cancel_recording").catch(console.error);
         }
+        if (!startStillCurrent()) return;
         console.error("start_recording failed:", err);
         setError(typeof err === "string" ? err : String(err));
         setPhase("error");

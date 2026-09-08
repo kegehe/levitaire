@@ -20,6 +20,18 @@ static SCREENSHOT_STARTING: AtomicBool = AtomicBool::new(false);
 static SKETCH_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static SKETCH_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
 static SCREENSHOT_START_PENDING: AtomicBool = AtomicBool::new(false);
+static SCREENSHOT_OVERLAY_HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
+static SCREENSHOT_OVERLAY_HEARTBEAT_SEEN: AtomicBool = AtomicBool::new(false);
+const SCREENSHOT_OVERLAY_HEARTBEAT_TIMEOUT_MS: u64 = 10_000;
+const SCREENSHOT_OVERLAY_READY_TIMEOUT_MS: u64 = 3_000;
+static RECORDING_SELECT_START_PENDING: AtomicBool = AtomicBool::new(false);
+static SKETCH_START_PENDING: AtomicBool = AtomicBool::new(false);
+// Invalidates an in-flight recording selection startup when cancellation or
+// a newer startup wins the lifecycle race.
+static RECORDING_SELECT_SESSION: AtomicU64 = AtomicU64::new(0);
+static TODO_QUICK_ADD_PENDING: AtomicBool = AtomicBool::new(false);
+static ORB_READY: AtomicBool = AtomicBool::new(false);
+static STICKY_MANAGER_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 const MAX_IPC_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 // GIF keeps each captured frame as an RGBA bitmap before palette encoding.
@@ -69,8 +81,42 @@ fn screenshot_monitor_bounds() -> &'static Mutex<Option<ScreenshotMonitorBounds>
 pub fn queue_screenshot_start_pending() {
     SCREENSHOT_START_PENDING.store(true, Ordering::SeqCst);
 }
+
+/// Called periodically by the screenshot overlay renderer. The native
+/// watchdog uses this to hide and clean up a crashed or reloading WebView.
+#[tauri::command]
+pub fn mark_screenshot_overlay_heartbeat() {
+    if CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst) {
+        SCREENSHOT_OVERLAY_HEARTBEAT_SEEN.store(true, Ordering::SeqCst);
+        SCREENSHOT_OVERLAY_HEARTBEAT_MS.store(now_ms(), Ordering::SeqCst);
+    }
+}
+
+/// Show a native error when the screenshot overlay cannot be created or loaded
+/// and there is no screenshot frontend available to render an inline message.
+#[tauri::command]
+pub fn show_screenshot_error(message: String) {
+    show_screenshot_native_error(message);
+}
+
+pub fn queue_recording_select_start_pending() {
+    RECORDING_SELECT_START_PENDING.store(true, Ordering::SeqCst);
+}
+
+pub fn queue_sketch_start_pending() {
+    SKETCH_START_PENDING.store(true, Ordering::SeqCst);
+}
+
+pub fn queue_todo_quick_add_pending() {
+    TODO_QUICK_ADD_PENDING.store(true, Ordering::SeqCst);
+}
+
+pub fn is_orb_ready() -> bool {
+    ORB_READY.load(Ordering::SeqCst)
+}
 static SCREENSHOT_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static SCREENSHOT_SESSION: AtomicU64 = AtomicU64::new(0);
+static UTILITY_HUB_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static MONITOR_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static POMODORO_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static TIMER_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -81,6 +127,11 @@ static TODO_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 /// 否则用户通过托盘「显示/隐藏浮球」已隐藏的 orb 会被强制弹出，
 /// 与托盘开关相互矛盾。仅在真正进入会话时写入，会话结束后由下个会话覆盖。
 static ORB_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(true);
+/// 截图/录屏会话开始前时钟、待办悬浮窗的可见状态。
+/// 与 orb 同理：缓存截取期间会临时隐藏它们，会话清理时按此状态恢复，
+/// 而不是无条件 show。仅在真正进入会话时写入，会话结束后由下个会话覆盖。
+static TIMER_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
+static TODO_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
 
 /// 截图/录屏会话是否活跃。进入 start_screenshot / start_recording_select 时置 true，
 /// 会话清理（cleanup_screenshot_session_inner / cancel_recording_select）时置 false。
@@ -93,6 +144,16 @@ static TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE: AtomicBool = AtomicBool::new(false);
 // Serializes session teardown with long-capture registration. Without this,
 // Esc can clean up between the session check and worker registration.
 static CAPTURE_SESSION_LOCK: Mutex<()> = Mutex::new(());
+// Serializes recording-selection startup with cancellation. The startup path
+// performs several window operations and must not be interleaved with teardown.
+static RECORDING_SELECT_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
+// Couples the recording-running check with overlay click-through changes so a
+// delayed controls startup cannot re-arm an overlay after stop/cancel cleanup.
+static RECORDING_CONTROLS_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
+// Target detection and live capture both temporarily change the screenshot
+// overlay's visibility/click-through state. Keep those transitions atomic so
+// concurrent hover/click requests cannot restore the wrong state.
+static SMART_SCREENSHOT_OVERLAY_LOCK: Mutex<()> = Mutex::new(());
 /// 前台目标窗口快照。截图 Overlay 显示后前台窗口会变成 Levitaire，
 /// 长截图开始时用此句柄把交互权交还给用户刚才操作的应用。
 static SCREENSHOT_TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -112,6 +173,68 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn show_screenshot_native_error(message: impl Into<String>) {
+    let message = message.into();
+    std::thread::spawn(move || {
+        let _ = rfd::MessageDialog::new()
+            .set_title("Levitaire")
+            .set_description(message)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    });
+}
+
+fn start_screenshot_overlay_watchdog(app: tauri::AppHandle, session: u64) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(1_000));
+        if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
+            || current_screenshot_session() != session
+        {
+            break;
+        }
+        let heartbeat = SCREENSHOT_OVERLAY_HEARTBEAT_MS.load(Ordering::SeqCst);
+        if heartbeat != 0
+            && now_ms().saturating_sub(heartbeat) <= SCREENSHOT_OVERLAY_HEARTBEAT_TIMEOUT_MS
+        {
+            continue;
+        }
+
+        crate::utils::logger::log(
+            "screenshot",
+            "截图 overlay 心跳超时，自动隐藏并清理截图会话",
+        );
+        // Only the watchdog that still owns this session may tear it down;
+        // this avoids showing a false error after the user already cancelled.
+        if cleanup_screenshot_session_if_current(&app, session) {
+            // The renderer may be unavailable, so use a native dialog as the
+            // guaranteed error surface instead of relying on the WebView UI.
+            show_screenshot_native_error("截图工具页面加载失败，截图会话已退出。");
+        }
+        break;
+    });
+}
+
+/// Wait for JavaScript to prove that the overlay renderer is alive before the
+/// native window is made visible. This prevents WebView2's own load-error page
+/// from ever becoming the user-facing screenshot surface.
+fn wait_for_screenshot_overlay_ready(app: &tauri::AppHandle, session: u64) -> Result<(), String> {
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(SCREENSHOT_OVERLAY_READY_TIMEOUT_MS);
+    while std::time::Instant::now() < deadline {
+        if current_screenshot_session() != session
+            || !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
+        {
+            return Err("截图会话已结束".to_string());
+        }
+        if SCREENSHOT_OVERLAY_HEARTBEAT_SEEN.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    cleanup_screenshot_session_if_current(app, session);
+    Err("截图工具页面加载失败，请重试".to_string())
 }
 
 /// 保护 settings 窗口"检查+创建+注册关闭拦截"的异步互斥锁，防止快速双击导致竞态
@@ -176,6 +299,11 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
         let _ = finish_recording_controls(app.clone());
     }
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
+        // Wait for any in-flight target detection/live capture to finish its
+        // temporary overlay transition before hiding it for cancellation.
+        let _overlay_guard = SMART_SCREENSHOT_OVERLAY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _ = overlay.hide();
     }
     if let Some(cache) = app.try_state::<crate::screenshot::ScreenCache>() {
@@ -190,6 +318,20 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
             let _ = orb.set_always_on_top(true);
         }
     }
+    // 恢复会话前可见的时钟/待办悬浮窗：缓存截取期间被临时隐藏，
+    // 若会话在恢复步骤前被取消（如截屏期间按 Esc），此处兜底恢复。
+    if session_active {
+        if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+            if let Some(timer) = app.get_webview_window("time-overlay") {
+                let _ = timer.show();
+            }
+        }
+        if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+            if let Some(todo) = app.get_webview_window("todo-overlay") {
+                let _ = todo.show();
+            }
+        }
+    }
     if TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.swap(false, Ordering::SeqCst) {
         if let Some(toolbar) = app.get_webview_window("toolbar") {
             let _ = toolbar.show();
@@ -202,6 +344,8 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
         }
     }
     SCREENSHOT_TARGET_HWND.store(0, Ordering::SeqCst);
+    SCREENSHOT_OVERLAY_HEARTBEAT_MS.store(0, Ordering::SeqCst);
+    SCREENSHOT_OVERLAY_HEARTBEAT_SEEN.store(false, Ordering::SeqCst);
     // 会话结束，复位活跃标记，避免泄漏到后续空闲清理误判
     CAPTURE_SESSION_ACTIVE.store(false, Ordering::SeqCst);
 }
@@ -229,6 +373,9 @@ fn is_levitaire_window(app: &tauri::AppHandle, hwnd: HWND) -> bool {
         "palette",
         "settings",
         "tool-config",
+        "context-menu",
+        "pin-ocr",
+        "update-prompt",
         "screenshot-overlay",
         "recording-controls",
         "long-capture-controls",
@@ -236,7 +383,10 @@ fn is_levitaire_window(app: &tauri::AppHandle, hwnd: HWND) -> bool {
         "monitor-overlay",
         "pomodoro-overlay",
         "quick-input-overlay",
+        "time-overlay",
+        "todo-overlay",
         "sketch-overlay",
+        "utility-hub-overlay",
     ]
     .iter()
     .filter_map(|label| app.get_webview_window(label))
@@ -345,6 +495,9 @@ pub fn hide_toolbar(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn show_orb(app: tauri::AppHandle) -> Result<(), String> {
+    if !is_orb_ready() {
+        return Ok(());
+    }
     if let Some(window) = app.get_webview_window("orb") {
         window.show().map_err(|e| e.to_string())?;
     }
@@ -361,6 +514,9 @@ pub fn hide_orb(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn toggle_orb(app: tauri::AppHandle) -> Result<(), String> {
+    if !is_orb_ready() {
+        return Ok(());
+    }
     if let Some(window) = app.get_webview_window("orb") {
         if window.is_visible().unwrap_or(false) {
             window.hide().map_err(|e| e.to_string())?;
@@ -507,6 +663,7 @@ pub async fn call_ai(
 #[tauri::command]
 pub async fn call_ai_stream(
     app: tauri::AppHandle,
+    request_id: Option<u64>,
     prompt: String,
     system_prompt: Option<String>,
     ai_service: State<'_, crate::ai::AiService>,
@@ -518,8 +675,9 @@ pub async fn call_ai_stream(
             prompt.len()
         ),
     );
+    let request_id = request_id.unwrap_or_else(|| ai_service.next_stream_id());
     if prompt.len() > MAX_PROMPT_LENGTH {
-        let _ = app.emit("ai-stream", serde_json::json!({ "type": "error", "data": format!("prompt 长度超过限制（最大 {} 字节）", MAX_PROMPT_LENGTH) }));
+        let _ = app.emit("ai-stream", serde_json::json!({ "type": "error", "data": format!("prompt 长度超过限制（最大 {} 字节）", MAX_PROMPT_LENGTH), "requestId": request_id }));
         return Err(format!(
             "prompt 长度超过限制（最大 {} 字节）",
             MAX_PROMPT_LENGTH
@@ -528,7 +686,7 @@ pub async fn call_ai_stream(
     if prompt.is_empty() {
         let _ = app.emit(
             "ai-stream",
-            serde_json::json!({ "type": "error", "data": "prompt 不能为空" }),
+            serde_json::json!({ "type": "error", "data": "prompt 不能为空", "requestId": request_id }),
         );
         return Err("prompt 不能为空".to_string());
     }
@@ -536,19 +694,18 @@ pub async fn call_ai_stream(
     let app_handle = app.clone();
     // 发起新流式调用前重置取消标志（防止上一次取消影响本次请求），
     // 前端「取消」通过 cancel_ai_stream 命令置位，call_stream 每帧检测后提前终止。
-    ai_service.reset_cancel();
     let result = ai_service
-        .call_stream(&prompt, system_prompt.as_deref(), move |chunk| {
+        .call_stream(request_id, &prompt, system_prompt.as_deref(), move |chunk| {
             let _ = app_handle.emit(
                 "ai-stream",
-                serde_json::json!({ "type": "chunk", "data": chunk }),
+                serde_json::json!({ "type": "chunk", "data": chunk, "requestId": request_id }),
             );
         })
         .await;
 
     match result {
         Ok(_) => {
-            let _ = app.emit("ai-stream", serde_json::json!({ "type": "done" }));
+            let _ = app.emit("ai-stream", serde_json::json!({ "type": "done", "requestId": request_id }));
             Ok(())
         }
         Err(e) => {
@@ -556,7 +713,7 @@ pub async fn call_ai_stream(
             // 若取消后重新发起了新请求，则该 error 事件被新请求的监听器屏蔽（requestId 校验）。
             let _ = app.emit(
                 "ai-stream",
-                serde_json::json!({ "type": "error", "data": &e }),
+                serde_json::json!({ "type": "error", "data": &e, "requestId": request_id }),
             );
             Err(e)
         }
@@ -565,8 +722,11 @@ pub async fn call_ai_stream(
 
 /// 请求取消当前流式 AI 调用（前端点取消时调用）
 #[tauri::command]
-pub fn cancel_ai_stream(ai_service: State<'_, crate::ai::AiService>) {
-    ai_service.request_cancel();
+pub fn cancel_ai_stream(
+    request_id: Option<u64>,
+    ai_service: State<'_, crate::ai::AiService>,
+) {
+    ai_service.request_cancel(request_id);
 }
 
 /// 获取当前 AI 配置
@@ -1091,6 +1251,7 @@ pub fn set_clear_options(
 /// 显示卡片工具选择器面板，定位到悬浮球附近
 #[tauri::command]
 pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
+    crate::scroll_navigation::capture_current_target(&app);
     // 用 tokio Mutex 保护"检查+创建+注册关闭拦截"整个流程，防止快速双击竞态
     let _init_guard = PALETTE_INIT_LOCK.lock().await;
 
@@ -1141,9 +1302,8 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
         });
     }
 
-    // 注册完成后释放初始化锁，后续定位和 show 不需要在锁内执行
-    drop(_init_guard);
-
+    // Keep the initialization lock through positioning and show so rapid orb
+    // clicks cannot interleave their focus and placement operations.
     // Only the first opening is anchored beside the orb. Subsequent openings retain the
     // position selected by dragging the palette window.
     if should_anchor_to_orb {
@@ -1264,6 +1424,135 @@ pub fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn start_scroll_navigation(
+    app: tauri::AppHandle,
+) -> Result<crate::scroll_navigation::ScrollNavigationState, String> {
+    // The palette owns focus while its tool button is being activated. Hide it
+    // before capturing the target so the previous application becomes the
+    // foreground window again instead of Levitaire's own palette HWND.
+    if let Some(palette) = app.get_webview_window("palette") {
+        if palette.is_visible().unwrap_or(false) {
+            palette.hide().map_err(|error| error.to_string())?;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    crate::scroll_navigation::capture_current_target(&app);
+    let window = app
+        .get_webview_window("scroll-navigator-overlay")
+        .ok_or_else(|| "滚动导航窗口尚未创建".to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    Ok(crate::scroll_navigation::state())
+}
+
+#[tauri::command]
+pub fn hide_scroll_navigation(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("scroll-navigator-overlay") {
+        window.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
+    // Capture the user's application before showing the always-on-top hub.
+    // When launched from the palette, hiding it first restores the original
+    // foreground window and gives the scroll sub-tool a valid target.
+    if let Some(palette) = app.get_webview_window("palette") {
+        if palette.is_visible().unwrap_or(false) {
+            palette.hide().map_err(|error| error.to_string())?;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    crate::scroll_navigation::capture_current_target(&app);
+    let window = app
+        .get_webview_window("utility-hub-overlay")
+        .ok_or_else(|| "通用工具窗口尚未创建".to_string())?;
+    if let Ok(hwnd) = window.hwnd() {
+        crate::hooks::mouse::set_utility_hub_hwnd(hwnd.0);
+    }
+    // A native close (such as Alt+F4) bypasses the frontend close button.
+    // The color picker owns a global mouse hook and replaces the system
+    // cursor, so it must use the same cleanup path before hiding the window.
+    if UTILITY_HUB_CLOSE_HANDLER_REGISTERED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let app_on_close = app.clone();
+        window.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                let _ = hide_utility_hub(app_on_close.clone());
+            }
+            // Keep cleanup correct even if a platform or renderer failure
+            // destroys the window without a CloseRequested event.
+            tauri::WindowEvent::Destroyed => {
+                crate::hooks::mouse::stop_color_pick();
+                crate::hooks::mouse::set_utility_hub_hwnd(std::ptr::null_mut());
+                UTILITY_HUB_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
+        });
+    }
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn show_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("utility-hub-overlay")
+        .ok_or_else(|| "通用工具窗口尚未创建".to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn stop_utility_color_pick() {
+    crate::hooks::mouse::stop_color_pick();
+}
+
+#[tauri::command]
+pub fn hide_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
+    crate::hooks::mouse::stop_color_pick();
+    if let Some(window) = app.get_webview_window("utility-hub-overlay") {
+        window.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_utility_color_pick(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("utility-hub-overlay")
+        .ok_or_else(|| "通用工具窗口尚未创建".to_string())?;
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("无法获取通用工具窗口句柄: {}", error))?;
+    crate::hooks::mouse::set_utility_hub_hwnd(hwnd.0);
+    crate::hooks::mouse::start_color_pick()
+}
+
+#[tauri::command]
+pub fn get_scroll_navigation_state() -> crate::scroll_navigation::ScrollNavigationState {
+    crate::scroll_navigation::state()
+}
+
+#[tauri::command]
+pub fn set_scroll_navigation_percent(
+    percent: f64,
+) -> Result<crate::scroll_navigation::ScrollNavigationState, String> {
+    crate::scroll_navigation::set_percent(percent)
+}
+
+#[tauri::command]
+pub fn navigate_scroll(
+    action: String,
+) -> Result<crate::scroll_navigation::ScrollNavigationState, String> {
+    crate::scroll_navigation::navigate(&action)
+}
+
+#[tauri::command]
 pub fn show_sketch_window(app: tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("sketch-overlay")
@@ -1369,6 +1658,7 @@ pub fn capture_sketch_background(
 /// 退出应用（悬浮球右键菜单「退出」入口，与托盘菜单 quit 等价）
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
+    crate::hooks::mouse::stop_color_pick();
     app.exit(0);
     Ok(())
 }
@@ -1415,9 +1705,22 @@ fn monitor_work_area_for_cursor() -> Option<ScreenshotMonitorBounds> {
 }
 
 #[tauri::command]
-pub fn start_screenshot(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn start_screenshot(app: tauri::AppHandle) -> Result<(), String> {
     // 命令入口：Tauri 注入 app，缓存 State 在内部用 app.state() 获取
-    start_screenshot_inner(app)
+    let result = tokio::task::spawn_blocking(move || start_screenshot_inner(app))
+        .await
+        .map_err(|error| format!("screenshot startup worker failed: {error}"))?;
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // The caller may be a global hotkey with no visible frontend from
+            // which to render an error. Always provide a native error surface.
+            if error != "截图会话已结束" {
+                show_screenshot_native_error(format!("截图启动失败：{}", error));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// start_screenshot 的核心逻辑，独立出来供热键等非命令入口复用。
@@ -1429,6 +1732,13 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         crate::utils::logger::log("screenshot", "screenshot start already in progress");
         return Ok(());
     };
+    // Serialize startup with cancellation/cleanup until the active-session
+    // flags and visibility snapshots have been committed. Otherwise Esc can
+    // clean up before activation and the old startup sequence can resurrect a
+    // screenshot overlay afterwards.
+    let session_lock = CAPTURE_SESSION_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Capture the initiating monitor before any asynchronous/frontend work can
     // move the cursor or allow the overlay to take focus.
     if let Ok(mut stored) = screenshot_monitor_bounds().lock() {
@@ -1526,6 +1836,14 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(state) = app.try_state::<crate::scroll_capture::LongCaptureState>() {
         state.discard_all();
     }
+    // A previous renderer crash may have left a stale WebView surface visible
+    // while the native screenshot mode flag was already reset. Hide it before
+    // touching the desktop or starting a new session.
+    if let Some(existing_overlay) = app.get_webview_window("screenshot-overlay") {
+        if let Err(error) = existing_overlay.hide() {
+            return Err(format!("隐藏截图蒙层失败: {}", error));
+        }
+    }
     let session = SCREENSHOT_SESSION
         .fetch_add(1, Ordering::SeqCst)
         .wrapping_add(1);
@@ -1580,7 +1898,8 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
             "screenshot",
             "ERROR: overlay hwnd 2秒内未就绪，遮罩可能无法显示",
         );
-        cleanup_screenshot_session(&app);
+        SCREENSHOT_SESSION.fetch_add(1, Ordering::SeqCst);
+        cleanup_screenshot_session_inner(&app);
         return Err("screenshot overlay HWND did not become ready".to_string());
     }
     if current_screenshot_session() != session {
@@ -1612,12 +1931,29 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         .get_webview_window("orb")
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false);
-    // 记录会话前 orb 可见性 + 会话活跃标记，供会话清理（取消截图）时按原状态恢复，
+    // 时钟/待办悬浮窗常驻桌面，同样记录可见性并在缓存截取期间隐藏，
+    // 避免被截入全屏缓存或成为智能截屏的目标。
+    let timer_was_visible = app
+        .get_webview_window("time-overlay")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    let todo_was_visible = app
+        .get_webview_window("todo-overlay")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    // 记录会话前 orb/时钟/待办可见性 + 会话活跃标记，供会话清理（取消截图）时按原状态恢复，
     // 不强制弹出用户经托盘已隐藏的 orb。先记录再置 screenshot_mode，
     // 避免并发清理读到「模式已置但标记未更新」的半状态。
     ORB_VISIBLE_BEFORE_SESSION.store(orb_was_visible, Ordering::SeqCst);
+    TIMER_VISIBLE_BEFORE_SESSION.store(timer_was_visible, Ordering::SeqCst);
+    TODO_VISIBLE_BEFORE_SESSION.store(todo_was_visible, Ordering::SeqCst);
     CAPTURE_SESSION_ACTIVE.store(true, Ordering::SeqCst);
+    SCREENSHOT_OVERLAY_HEARTBEAT_SEEN.store(false, Ordering::SeqCst);
+    SCREENSHOT_OVERLAY_HEARTBEAT_MS.store(now_ms(), Ordering::SeqCst);
+    start_screenshot_overlay_watchdog(app.clone(), session);
     crate::hooks::mouse::set_screenshot_mode(true);
+    // Cleanup may proceed once the session state is fully published.
+    drop(session_lock);
     let toolbar_was_visible = app
         .get_webview_window("toolbar")
         .map(|w| w.is_visible().unwrap_or(false))
@@ -1632,11 +1968,21 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
             let _ = w.hide();
         }
     }
+    if timer_was_visible {
+        if let Some(w) = app.get_webview_window("time-overlay") {
+            let _ = w.hide();
+        }
+    }
+    if todo_was_visible {
+        if let Some(w) = app.get_webview_window("todo-overlay") {
+            let _ = w.hide();
+        }
+    }
     if let Some(win) = app.get_webview_window("palette") {
         let _ = win.hide();
     }
 
-    // 等 DWM 合成一帧，确保 orb/toolbar/palette 已从屏幕消失再截屏缓存，
+    // 等 DWM 合成一帧，确保 orb/toolbar/palette/时钟/待办已从屏幕消失再截屏缓存，
     // 否则缓存里会残留它们的像素
     std::thread::sleep(std::time::Duration::from_millis(20));
     if current_screenshot_session() != session {
@@ -1727,7 +2073,12 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    // 恢复 orb/toolbar 可见性状态：截图前为截纯净画面临时 hide 了它们，
+    // Keep the native window hidden until the renderer has mounted and sent a
+    // heartbeat. A failed WebView load therefore ends in a native error dialog
+    // instead of exposing the browser's generic "page failed to load" page.
+    wait_for_screenshot_overlay_ready(&app, session)?;
+
+    // 恢复 orb/toolbar/时钟/待办可见性状态：截图前为截纯净画面临时 hide 了它们，
     // 此处按原状态恢复。随后 overlay 全屏置顶会盖住它们，但退出截图（overlay.hide）后
     // 它们会按原状态正常显现，不会因截图模式而意外消失。
     if orb_was_visible {
@@ -1737,6 +2088,16 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     }
     if toolbar_was_visible {
         if let Some(w) = app.get_webview_window("toolbar") {
+            let _ = w.show();
+        }
+    }
+    if timer_was_visible {
+        if let Some(w) = app.get_webview_window("time-overlay") {
+            let _ = w.show();
+        }
+    }
+    if todo_was_visible {
+        if let Some(w) = app.get_webview_window("todo-overlay") {
             let _ = w.show();
         }
     }
@@ -1896,28 +2257,83 @@ pub fn cancel_screenshot(app: tauri::AppHandle) -> Result<(), String> {
 /// 不含任何截图 UI，故选区框不会被截入；且无需 hide/show overlay，无闪烁。
 /// 缓存不可用时回退到实时截屏（罕见，仅在 start_screenshot 截屏失败时）。
 fn capture_from_cache(
+    app: &tauri::AppHandle,
     cache: &crate::screenshot::ScreenCache,
     left: i32,
     top: i32,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
-    let guard = cache.pixels.lock().map_err(|e| e.to_string())?;
-    if let Some(c) = guard.as_ref() {
-        c.crop(left, top, width, height)
+    let cached = {
+        let guard = cache.pixels.lock().map_err(|e| e.to_string())?;
+        guard.as_ref().map(|c| c.crop(left, top, width, height))
+    };
+    if let Some(result) = cached {
+        result
     } else {
         crate::utils::logger::log(
             "screenshot",
-            "全屏缓存为空，回退实时截屏（可能含 overlay UI）",
+            "全屏缓存为空，回退实时截屏",
         );
-        crate::screenshot::capture_screen_region(left, top, width, height)
+        capture_region_without_overlay(app, left, top, width, height)
     }
 }
 
-/// 截取屏幕指定区域（物理坐标），返回 PNG base64 与尺寸
+/// Capture a selected region while keeping the screenshot UI out of the frame.
+/// This is the fallback used when the full-desktop cache was rejected or could
+/// not be allocated. The overlay is restored on every path, including errors.
+fn capture_region_without_overlay(
+    app: &tauri::AppHandle,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst) {
+        return Err("截图会话已结束".to_string());
+    }
+    let _overlay_guard = SMART_SCREENSHOT_OVERLAY_LOCK
+        .lock()
+        .map_err(|_| "截图蒙层状态锁已损坏".to_string())?;
+    // The session may have been cancelled while this request waited for the
+    // overlay lock. Re-check after acquiring it so a stale live capture cannot
+    // hide and then resurrect the overlay after cleanup has completed.
+    if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst) {
+        return Err("截图会话已结束".to_string());
+    }
+    let overlay = app.get_webview_window("screenshot-overlay");
+    if let Some(window) = &overlay {
+        window
+            .hide()
+            .map_err(|e| format!("隐藏截图蒙层失败: {e}"))?;
+        std::thread::sleep(std::time::Duration::from_millis(12));
+    }
+    let capture_result = crate::screenshot::capture_screen_region(left, top, width, height);
+    let restore_result = overlay.as_ref().map(|window| window.show());
+    let restore_error = restore_result.and_then(Result::err);
+    let result = match (capture_result, restore_error.as_ref()) {
+        (Ok(_pixels), Some(error)) => Err(format!("恢复截图蒙层失败: {error}")),
+        (Err(error), Some(restore_error)) => Err(format!(
+            "实时截图失败: {error}; 恢复截图蒙层也失败: {restore_error}"
+        )),
+        (Err(error), None) => Err(error),
+        (Ok(pixels), None) => Ok(pixels),
+    };
+    if let Some(error) = restore_error {
+        drop(_overlay_guard);
+        cleanup_screenshot_session(app);
+        show_screenshot_native_error(format!("截图蒙层恢复失败，截图会话已退出: {error}"));
+    }
+    result
+}
+
+/// 截取屏幕指定区域（物理坐标），返回 PNG base64 与尺寸。
+/// 优先从 start_screenshot 截取的全屏缓存裁剪选区（不含截图 UI，无需 hide/show overlay，不闪屏）；
+/// 缓存缺失时回退到 hide/show 实时截屏。async + spawn_blocking 把 PNG 编码移出主线程，
+/// 避免大区域编码时阻塞窗口事件循环造成卡顿。
 #[tauri::command]
-pub fn capture_region(
-    cache: tauri::State<'_, crate::screenshot::ScreenCache>,
+pub async fn capture_region(
+    app: tauri::AppHandle,
     left: i32,
     top: i32,
     width: i32,
@@ -1932,13 +2348,114 @@ pub fn capture_region(
     }
     let w = width as u32;
     let h = height as u32;
-    let bgra = capture_from_cache(&cache, left, top, w, h)?;
-    let b64 = crate::screenshot::encode_png_base64(&bgra, w, h)?;
+    let cache = app.state::<crate::screenshot::ScreenCache>();
+    let bgra = capture_from_cache(&app, &cache, left, top, w, h)?;
+    let b64 =
+        tokio::task::spawn_blocking(move || crate::screenshot::encode_png_base64(&bgra, w, h))
+            .await
+            .map_err(|error| format!("截图编码任务失败: {error}"))??;
     Ok(serde_json::json!({
         "pngBase64": b64,
         "width": w,
         "height": h,
     }))
+}
+
+/// Detect the element or top-level window under a physical cursor position.
+#[tauri::command]
+pub fn detect_screenshot_target(
+    app: tauri::AppHandle,
+    x: i32,
+    y: i32,
+    scope: String,
+) -> Result<Option<crate::screenshot::target::ScreenshotTarget>, String> {
+    let _overlay_guard = SMART_SCREENSHOT_OVERLAY_LOCK
+        .lock()
+        .map_err(|_| "智能截图蒙层状态锁已损坏".to_string())?;
+    if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let overlay = app.get_webview_window("screenshot-overlay");
+    // The overlay is interactive so its mode bar can receive clicks. Temporarily
+    // make it click-through while resolving the underlying native target.
+    if let Some(window) = &overlay {
+        let _ = window.set_ignore_cursor_events(true);
+    }
+    let scope = if scope == "window" {
+        crate::screenshot::target::TargetScope::Window
+    } else {
+        crate::screenshot::target::TargetScope::Element
+    };
+    let target =
+        crate::screenshot::target::detect(windows::Win32::Foundation::POINT { x, y }, scope);
+    if let Some(window) = &overlay {
+        let _ = window.set_ignore_cursor_events(false);
+    }
+    if let Some(target) = &target {
+        if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
+            if let Ok(hwnd) = overlay.hwnd() {
+                if target.hwnd == hwnd.0 as isize {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    Ok(target)
+}
+
+/// 智能（窗口）截图取图：与区域截图一致，从会话全屏缓存裁剪选区。
+/// 历史实现直接 hide/show 整个透明 overlay 再实时截屏，每次点击都会让整屏
+/// 明暗闪一次；改为缓存裁剪后与区域截图口径统一，且不会把 overlay 上的
+/// 目标高亮框截入底图，仅在缓存缺失时回退到 hide/show 实时截屏。
+/// PNG 编码同样在阻塞线程池执行。
+#[tauri::command]
+pub async fn capture_region_live(
+    app: tauri::AppHandle,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+) -> Result<serde_json::Value, String> {
+    if width <= 0 || height <= 0 {
+        return Err("截图区域尺寸无效".into());
+    }
+    let w = width as u32;
+    let h = height as u32;
+    let cache = app.state::<crate::screenshot::ScreenCache>();
+    let bgra = capture_from_cache(&app, &cache, left, top, w, h)?;
+    let b64 =
+        tokio::task::spawn_blocking(move || crate::screenshot::encode_png_base64(&bgra, w, h))
+            .await
+            .map_err(|error| format!("截图编码任务失败: {error}"))??;
+    Ok(serde_json::json!({ "pngBase64": b64, "width": w, "height": h }))
+}
+
+#[tauri::command]
+pub fn set_smart_screenshot_mode(app: tauri::AppHandle, active: bool) -> Result<(), String> {
+    let _overlay_guard = SMART_SCREENSHOT_OVERLAY_LOCK
+        .lock()
+        .map_err(|_| "智能截图蒙层状态锁已损坏".to_string())?;
+    // Ignore a stale renderer command that arrives after session cleanup. It
+    // must not re-arm the global mouse hook for a hidden/finished overlay.
+    let effective_active = active && CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst);
+    crate::hooks::mouse::set_smart_screenshot_mode(effective_active);
+    if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
+        overlay
+            .set_ignore_cursor_events(false)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_smart_screenshot_controls_bounds(
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), String> {
+    crate::hooks::mouse::set_smart_screenshot_controls_bounds(Some((left, top, width, height)));
+    Ok(())
 }
 
 /// 将 base64 PNG 写入剪贴板
@@ -1955,6 +2472,7 @@ pub fn clipboard_set_image(
 /// async：模型懒加载与识别在 spawn_blocking 阻塞池执行，避免首次使用时阻塞 UI 主线程
 #[tauri::command]
 pub async fn ocr_region(
+    app: tauri::AppHandle,
     cache: tauri::State<'_, crate::screenshot::ScreenCache>,
     left: i32,
     top: i32,
@@ -1970,7 +2488,7 @@ pub async fn ocr_region(
         "ocr",
         &format!("ocr_region: ({},{}) {}x{}", left, top, w, h),
     );
-    let bgra = capture_from_cache(&cache, left, top, w, h)?;
+    let bgra = capture_from_cache(&app, &cache, left, top, w, h)?;
     tokio::task::spawn_blocking(move || {
         let result = crate::ocr::ensure_ocr_service()
             .ok_or_else(|| "OCR 服务初始化失败".to_string())?
@@ -2000,9 +2518,11 @@ pub async fn ocr_region(
     .map_err(|e| format!("OCR 任务执行失败: {}", e))?
 }
 
-/// 将截图钉在桌面（创建贴图窗口），返回 pin id
+/// 将截图钉在桌面（创建贴图窗口），返回 pin id。
+/// async + spawn_blocking：base64/PNG 解码与建窗参数准备移出主线程，避免大图解码
+/// 阻塞窗口事件循环；窗口本身仍在独立线程创建并跑消息循环（见 pin::create_pin）。
 #[tauri::command]
-pub fn pin_image(
+pub async fn pin_image(
     app: tauri::AppHandle,
     config_manager: State<'_, ConfigManager>,
     base64_data: String,
@@ -2020,16 +2540,21 @@ pub fn pin_image(
     }
     let border_color = config_manager.get_pin_border_color()?;
     let border_width = config_manager.get_pin_border_width()?;
-    let id = crate::screenshot::pin::create_pin(
-        &app,
-        &base64_data,
-        x,
-        y,
-        width as u32,
-        height as u32,
-        &border_color,
-        border_width,
-    )?;
+    let app_for_blocking = app.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        crate::screenshot::pin::create_pin(
+            &app_for_blocking,
+            &base64_data,
+            x,
+            y,
+            width as u32,
+            height as u32,
+            &border_color,
+            border_width,
+        )
+    })
+    .await
+    .map_err(|error| format!("贴图创建任务失败: {error}"))??;
     crate::utils::logger::log("screenshot", &format!("pin_image created id={}", id));
     Ok(id)
 }
@@ -2123,7 +2648,7 @@ const MAX_TTS_CHARS: usize = 5000;
 
 /// 朗读文本。参数：text/rate(字/秒)/voice_id(空=默认)/volume(0~1)。
 /// 合成在 MTA 子线程执行（同 OCR 模板），MediaPlayer 非阻塞由 TtsState 持有。
-/// 同步命令：合成 .get() 阻塞，由 speak 内部 thread::spawn 隔离，Tauri 命令线程等待 join。
+/// 异步提交命令：合成在独立 worker 中执行，调用方通过 tts-started/tts-error 事件获知结果。
 #[tauri::command]
 pub fn tts_speak(
     app: tauri::AppHandle,
@@ -2131,7 +2656,7 @@ pub fn tts_speak(
     rate: f64,
     voice_id: String,
     volume: f64,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     crate::utils::logger::log("tts", &format!("tts_speak: {} chars", text.chars().count()));
     if text.trim().is_empty() {
         return Err("朗读文本不能为空".to_string());
@@ -2142,7 +2667,33 @@ pub fn tts_speak(
             MAX_TTS_CHARS
         ));
     }
-    crate::tts::speak(app, text, rate, voice_id, volume)
+    let state = app.state::<crate::tts::TtsState>();
+    let request_id = crate::tts::reserve_request(&state)?;
+    let worker_app = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = crate::tts::speak(
+            worker_app.clone(),
+            request_id,
+            text,
+            rate,
+            voice_id,
+            volume,
+        ) {
+            crate::utils::logger::log("tts", &format!("tts_speak failed: {}", error));
+            let state = worker_app.state::<crate::tts::TtsState>();
+            if crate::tts::is_current_request(&state, request_id) {
+                let _ = worker_app.emit(
+                    "tts-error",
+                    serde_json::json!({
+                        "requestId": request_id,
+                        "source": "text-toolbar",
+                        "error": error,
+                    }),
+                );
+            }
+        }
+    });
+    Ok(request_id)
 }
 
 /// 停止朗读（Close 销毁 player；stop 内部在 MTA 线程执行 COM 调用）
@@ -2294,6 +2845,7 @@ fn default_orb_position(win_w: i32, win_h: i32) -> Option<(i32, i32)> {
 /// - orb：主屏工作区右下角
 /// - monitor-overlay：跟随鼠标（偏移 8px，多显示器边界钳制）
 /// - pomodoro-overlay：创建时默认的左上角 (100, 100)
+/// - time-overlay / todo-overlay：创建时默认的左上角 (100, 100)
 ///
 /// 其余未知窗口一律回退 (100, 100)。
 fn default_window_position(window_id: &str, win_w: i32, win_h: i32) -> (i32, i32) {
@@ -2332,7 +2884,7 @@ pub fn set_window_position(
 }
 
 /// 恢复悬浮窗默认位置：清除记忆位置，并将窗口移动到默认定位。
-/// window_id 如 "orb"、"monitor-overlay"、"pomodoro-overlay"
+/// window_id 如 "orb"、"monitor-overlay"、"pomodoro-overlay"、"time-overlay"、"todo-overlay"
 #[tauri::command]
 pub fn reset_window_position(
     id: String,
@@ -2345,6 +2897,8 @@ pub fn reset_window_position(
         "orb" => app.get_webview_window("orb"),
         "monitor-overlay" => app.get_webview_window("monitor-overlay"),
         "pomodoro-overlay" => app.get_webview_window("pomodoro-overlay"),
+        "time-overlay" => app.get_webview_window("time-overlay"),
+        "todo-overlay" => app.get_webview_window("todo-overlay"),
         _ => None,
     };
     // 对已存在窗口统一移动到默认定位（隐藏窗口 set_position 同样生效，下次显示即默认位置）。
@@ -2581,6 +3135,18 @@ pub fn reorder_todos(
     state: State<'_, crate::todo::TodoStore>,
 ) -> Result<crate::todo::TodoItem, String> {
     let item = state.reorder(&id, direction)?;
+    let _ = app.emit("todo-changed", &item);
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn move_todo(
+    id: String,
+    before_id: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<crate::todo::TodoItem, String> {
+    let item = state.move_to(&id, before_id.as_deref())?;
     let _ = app.emit("todo-changed", &item);
     Ok(item)
 }
@@ -2869,6 +3435,249 @@ pub fn show_todo_window(
 #[tauri::command]
 pub fn hide_todo_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("todo-overlay") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ─── 便利贴 ────────────────────────────────────────────────────
+
+/// 通知管理窗刷新列表（便签窗口不订阅，避免自己打字被刷新打断）。
+fn notify_sticky_notes_changed(app: &tauri::AppHandle) {
+    let _ = app.emit_to(
+        "sticky-notes-manager",
+        "sticky-notes-changed",
+        serde_json::json!({}),
+    );
+}
+
+/// 新建便签默认落点：主屏工作区左上偏内的级联位置，避免多张完全重叠。
+/// 传入 x/y 时由调用方决定，show 阶段还会统一裁剪到工作区内。
+fn default_sticky_note_position(count: usize) -> (i32, i32) {
+    let col = (count % 12) as i32;
+    let row = (count / 12) as i32;
+    (140 + col * 30, 120 + row * 34)
+}
+
+#[tauri::command]
+pub fn get_sticky_notes_enabled(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<bool, String> {
+    config_manager.get_sticky_notes_enabled()
+}
+
+#[tauri::command]
+pub fn set_sticky_notes_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    if !enabled {
+        // 关闭工具：隐藏管理窗，销毁所有便签窗（数据与 visible 保留，重新启用时恢复）
+        if let Some(manager) = app.get_webview_window("sticky-notes-manager") {
+            let _ = manager.hide();
+        }
+        if let Some(store) = app.try_state::<crate::sticky_note::NoteStore>() {
+            if let Ok(notes) = store.list() {
+                for note in notes {
+                    crate::sticky_note::destroy_note_window(&app, &note.id);
+                }
+            }
+        }
+    }
+    config_manager.update_sticky_notes_enabled(enabled)
+}
+
+#[tauri::command]
+pub fn get_sticky_notes(
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<Vec<crate::sticky_note::StickyNote>, String> {
+    store.list()
+}
+
+#[tauri::command]
+pub fn get_sticky_note(
+    id: String,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<crate::sticky_note::StickyNote, String> {
+    store.get(&id)
+}
+
+/// 新建一张便签并立即在桌面显示聚焦（方便直接输入）。
+#[tauri::command]
+pub fn create_sticky_note(
+    app: tauri::AppHandle,
+    color_id: Option<String>,
+    x: Option<i32>,
+    y: Option<i32>,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<crate::sticky_note::StickyNote, String> {
+    let (dx, dy) = default_sticky_note_position(store.list()?.len());
+    let color = color_id.unwrap_or_else(|| crate::sticky_note::DEFAULT_COLOR_ID.to_string());
+    let note = store.create(&color, x.unwrap_or(dx), y.unwrap_or(dy))?;
+    crate::sticky_note::show_note_window(&app, &note, true)?;
+    notify_sticky_notes_changed(&app);
+    Ok(note)
+}
+
+#[tauri::command]
+pub fn update_sticky_note_content(
+    app: tauri::AppHandle,
+    id: String,
+    content: String,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<crate::sticky_note::StickyNote, String> {
+    let note = store.update_content(&id, &content)?;
+    notify_sticky_notes_changed(&app);
+    Ok(note)
+}
+
+#[tauri::command]
+pub fn update_sticky_note_color(
+    app: tauri::AppHandle,
+    id: String,
+    color_id: String,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<crate::sticky_note::StickyNote, String> {
+    let note = store.update_color(&id, &color_id)?;
+    notify_sticky_notes_changed(&app);
+    Ok(note)
+}
+
+/// 拖拽过程中回写窗口位置（物理像素）。调用频繁，不触发列表刷新事件。
+#[tauri::command]
+pub fn set_sticky_note_position(
+    id: String,
+    x: i32,
+    y: i32,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<(), String> {
+    store.update_position(&id, x, y)?;
+    Ok(())
+}
+
+/// 唤出某张（可能已收起）便签：标记 visible=true 并重建/聚焦窗口。
+#[tauri::command]
+pub fn show_sticky_note(
+    app: tauri::AppHandle,
+    id: String,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<crate::sticky_note::StickyNote, String> {
+    let note = store.set_visible(&id, true)?;
+    crate::sticky_note::show_note_window(&app, &note, true)?;
+    notify_sticky_notes_changed(&app);
+    Ok(note)
+}
+
+/// 收起某张便签：先落盘（若携带最新正文），再标记 visible=false 并销毁窗口。
+/// content 由前端在收起瞬间主动传入，避免「防抖保存尚未触发窗口就被销毁」导致丢字。
+#[tauri::command]
+pub fn collect_sticky_note(
+    app: tauri::AppHandle,
+    id: String,
+    content: Option<String>,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<crate::sticky_note::StickyNote, String> {
+    if let Some(text) = content {
+        store.update_content(&id, &text)?;
+    }
+    let note = store.set_visible(&id, false)?;
+    crate::sticky_note::destroy_note_window(&app, &id);
+    notify_sticky_notes_changed(&app);
+    Ok(note)
+}
+
+/// 一键收起所有已钉在桌面的便签。
+#[tauri::command]
+pub fn collect_all_notes(
+    app: tauri::AppHandle,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<(), String> {
+    let notes = store.list()?;
+    for note in notes {
+        if note.visible {
+            store.set_visible(&note.id, false)?;
+            crate::sticky_note::destroy_note_window(&app, &note.id);
+        }
+    }
+    notify_sticky_notes_changed(&app);
+    Ok(())
+}
+
+/// 彻底删除一张便签（数据与窗口一并移除）。
+#[tauri::command]
+pub fn delete_sticky_note(
+    app: tauri::AppHandle,
+    id: String,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<(), String> {
+    crate::sticky_note::destroy_note_window(&app, &id);
+    store.delete(&id)?;
+    notify_sticky_notes_changed(&app);
+    Ok(())
+}
+
+/// 应用启动/管理窗挂载时调用：把所有已钉在桌面的便签窗口重建出来。
+/// 仅在工具启用时生效；不抢焦点。
+#[tauri::command]
+pub fn restore_pinned_notes(
+    app: tauri::AppHandle,
+    store: State<'_, crate::sticky_note::NoteStore>,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<usize, String> {
+    if !config_manager.get_sticky_notes_enabled()? {
+        return Ok(0);
+    }
+    let notes = store.list()?;
+    let mut count = 0;
+    for note in &notes {
+        if note.visible {
+            crate::sticky_note::show_note_window(&app, note, false)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// 显示便利贴管理窗。关闭拦截仅隐藏、不销毁，便于下次快速唤出。
+#[tauri::command]
+pub fn show_sticky_notes_manager(
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window("sticky-notes-manager")
+        .ok_or_else(|| "sticky-notes-manager 窗口未找到".to_string())?;
+    win.set_size(tauri::LogicalSize::new(360.0, 560.0))
+        .map_err(|e| e.to_string())?;
+    if !STICKY_MANAGER_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
+        let on_close = win.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = on_close.hide();
+            }
+        });
+    }
+    if !win.is_visible().unwrap_or(true) {
+        if let Ok(Some(pos)) = config_manager.get_window_position("sticky-notes-manager") {
+            let inner = win.inner_size().unwrap_or_default();
+            let (x, y) =
+                clamp_position_to_workarea(pos.x, pos.y, inner.width as i32, inner.height as i32);
+            win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, y,
+            )))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn hide_sticky_notes_manager(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("sticky-notes-manager") {
         window.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -3297,6 +4106,15 @@ pub async fn set_ocr_engine(
 /// 进入录屏选区模式：显示 overlay 并通知前端切换到录制模式
 pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String> {
     crate::utils::logger::log("recording", "start_recording_select called");
+    let _lifecycle = RECORDING_SELECT_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let recording_session = RECORDING_SELECT_SESSION.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    let startup_current = || {
+        RECORDING_SELECT_SESSION.load(Ordering::SeqCst) == recording_session
+            && CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
+            && crate::hooks::mouse::is_recording_mode()
+    };
 
     if app
         .try_state::<crate::scroll_capture::LongCaptureState>()
@@ -3359,15 +4177,37 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
                 .unwrap_or(false),
             Ordering::SeqCst,
         );
+        TIMER_VISIBLE_BEFORE_SESSION.store(
+            app.get_webview_window("time-overlay")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false),
+            Ordering::SeqCst,
+        );
+        TODO_VISIBLE_BEFORE_SESSION.store(
+            app.get_webview_window("todo-overlay")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false),
+            Ordering::SeqCst,
+        );
         CAPTURE_SESSION_ACTIVE.store(true, Ordering::SeqCst);
     }
     crate::hooks::mouse::set_recording_mode(true);
+
+    if !startup_current() {
+        return Ok(());
+    }
 
     // 隐藏浮动 UI，避免被截入
     if let Some(w) = app.get_webview_window("orb") {
         let _ = w.hide();
     }
     if let Some(w) = app.get_webview_window("toolbar") {
+        let _ = w.hide();
+    }
+    if let Some(w) = app.get_webview_window("time-overlay") {
+        let _ = w.hide();
+    }
+    if let Some(w) = app.get_webview_window("todo-overlay") {
         let _ = w.hide();
     }
     if let Some(w) = app.get_webview_window("palette") {
@@ -3377,16 +4217,24 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     // 等一帧让 UI 消失
     std::thread::sleep(std::time::Duration::from_millis(20));
 
+    if !startup_current() {
+        return Ok(());
+    }
+
     let overlay = match app.get_webview_window("screenshot-overlay") {
         Some(window) => window,
         None => {
-            let _ = cancel_recording_select(app.clone());
+            let _ = cancel_recording_select_inner(app.clone());
             return Err("recording overlay window was not found".to_string());
         }
     };
     if let Err(error) = overlay.set_ignore_cursor_events(false) {
-        let _ = cancel_recording_select(app.clone());
+        let _ = cancel_recording_select_inner(app.clone());
         return Err(error.to_string());
+    }
+
+    if !startup_current() {
+        return Ok(());
     }
 
     // 等待底层 HWND 就绪
@@ -3407,34 +4255,41 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
             "recording",
             "ERROR: overlay hwnd 5秒内未就绪，录制遮罩可能无法显示",
         );
-        let _ = cancel_recording_select(app.clone());
+        let _ = cancel_recording_select_inner(app.clone());
         return Err("recording overlay HWND did not become ready".to_string());
+    }
+    if !startup_current() {
+        return Ok(());
     }
 
     let bounds = match crate::screenshot::virtual_desktop_bounds() {
         Ok(bounds) => bounds,
         Err(error) => {
-            let _ = cancel_recording_select(app.clone());
+            let _ = cancel_recording_select_inner(app.clone());
             return Err(error);
         }
     };
     if let Err(error) = overlay.set_position(tauri::Position::Physical(
         tauri::PhysicalPosition::new(bounds.origin_x, bounds.origin_y),
     )) {
-        let _ = cancel_recording_select(app.clone());
+        let _ = cancel_recording_select_inner(app.clone());
         return Err(error.to_string());
     }
     if let Err(error) = overlay.set_size(tauri::PhysicalSize::new(bounds.width, bounds.height)) {
-        let _ = cancel_recording_select(app.clone());
+        let _ = cancel_recording_select_inner(app.clone());
         return Err(error.to_string());
     }
     if let Err(error) = overlay.show() {
-        let _ = cancel_recording_select(app.clone());
+        let _ = cancel_recording_select_inner(app.clone());
         return Err(error.to_string());
     }
     if let Err(error) = overlay.set_focus() {
-        let _ = cancel_recording_select(app.clone());
+        let _ = cancel_recording_select_inner(app.clone());
         return Err(error.to_string());
+    }
+
+    if !startup_current() {
+        return Ok(());
     }
 
     // 注册 overlay 关闭事件拦截（防止用户 Alt+F4 关闭 overlay 导致状态残留）
@@ -3473,13 +4328,24 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     //    避免截图模式下 ScreenshotTool 仍能响应用户交互（Esc、失焦等）导致竞态
     // 2. 延迟发出 recording-select-start 事件，等前端 React 组件加载完毕后开始交互
     let app_switch = app.clone();
+    if !startup_current() {
+        return Ok(());
+    }
     let _ = app_switch.emit_to("screenshot-overlay", "recording-select-switch", ());
 
     let app_emit = app.clone();
     std::thread::spawn(move || {
         // 等待前端加载完毕
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let _ = app_emit.emit_to("screenshot-overlay", "recording-select-start", ());
+        let _lifecycle = RECORDING_SELECT_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if RECORDING_SELECT_SESSION.load(Ordering::SeqCst) == recording_session
+            && CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
+            && crate::hooks::mouse::is_recording_mode()
+        {
+            let _ = app_emit.emit_to("screenshot-overlay", "recording-select-start", ());
+        }
     });
 
     Ok(())
@@ -3583,6 +4449,16 @@ fn set_recording_capture_protection(app: &tauri::AppHandle) {
 /// only makes the full-screen selection overlay click-through.
 #[tauri::command]
 pub fn show_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
+    let _lifecycle = RECORDING_CONTROLS_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Do not let a delayed startup continuation re-arm the overlay after the
+    // recording was cancelled or finished while controls were being created.
+    if let Some(state) = app.try_state::<crate::recording::RecordingState>() {
+        if !state.is_running() {
+            return Err("录制已结束".to_string());
+        }
+    }
     set_recording_capture_protection(&app);
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
         overlay
@@ -3596,6 +4472,9 @@ pub fn show_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
 /// Destroy recording controls and restore interaction with the main overlay.
 #[tauri::command]
 pub fn finish_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
+    let _lifecycle = RECORDING_CONTROLS_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     destroy_recording_controls_window(&app);
     set_recording_capture_protection(&app);
     crate::hooks::mouse::set_recording_mode(false);
@@ -3853,7 +4732,7 @@ pub fn set_recording_enabled(
         if state.is_running() {
             let _ = state.cancel();
         }
-        let _ = cancel_recording_select(app.clone());
+        let _ = cancel_recording_select_inner(app.clone());
     }
     Ok(())
 }
@@ -4005,6 +4884,14 @@ pub fn set_tools_autostart(
 /// 退出录制选区模式（前端选区取消时调用）
 #[tauri::command]
 pub fn cancel_recording_select(app: tauri::AppHandle) -> Result<(), String> {
+    let _lifecycle = RECORDING_SELECT_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cancel_recording_select_inner(app)
+}
+
+fn cancel_recording_select_inner(app: tauri::AppHandle) -> Result<(), String> {
+    RECORDING_SELECT_SESSION.fetch_add(1, Ordering::SeqCst);
     // 仅会话进行中被隐藏的 orb 才按会话前状态恢复，避免把用户经托盘已隐藏的 orb
     // 强制弹出（托盘「显示/隐藏浮球」与清理逻辑相互矛盾）。
     // 用会话活跃标记覆盖整个会话生命周期（含录制编码/预览阶段 recording_mode 已被清除
@@ -4027,6 +4914,19 @@ pub fn cancel_recording_select(app: tauri::AppHandle) -> Result<(), String> {
             let _ = orb.set_always_on_top(true);
         }
     }
+    // 恢复会话前可见的时钟/待办悬浮窗（与截图会话清理保持一致）
+    if session_active {
+        if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+            if let Some(timer) = app.get_webview_window("time-overlay") {
+                let _ = timer.show();
+            }
+        }
+        if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+            if let Some(todo) = app.get_webview_window("todo-overlay") {
+                let _ = todo.show();
+            }
+        }
+    }
     // 会话结束，复位活跃标记，避免泄漏到后续空闲清理误判
     CAPTURE_SESSION_ACTIVE.store(false, Ordering::SeqCst);
     // 通知前端恢复截图模式
@@ -4046,6 +4946,26 @@ pub fn get_quick_input_enabled(config: State<'_, ConfigManager>) -> Result<bool,
 #[tauri::command]
 pub fn consume_screenshot_start_pending() -> bool {
     SCREENSHOT_START_PENDING.swap(false, Ordering::SeqCst)
+}
+
+#[tauri::command]
+pub fn consume_recording_select_start_pending() -> bool {
+    RECORDING_SELECT_START_PENDING.swap(false, Ordering::SeqCst)
+}
+
+#[tauri::command]
+pub fn consume_sketch_start_pending() -> bool {
+    SKETCH_START_PENDING.swap(false, Ordering::SeqCst)
+}
+
+#[tauri::command]
+pub fn consume_todo_quick_add_pending() -> bool {
+    TODO_QUICK_ADD_PENDING.swap(false, Ordering::SeqCst)
+}
+
+#[tauri::command]
+pub fn mark_orb_ready() {
+    ORB_READY.store(true, Ordering::SeqCst);
 }
 
 fn configure_long_capture_frame(frame: &tauri::WebviewWindow) -> Result<(), String> {
@@ -4119,6 +5039,12 @@ pub fn start_long_capture(
         if let Some(window) = app.get_webview_window("toolbar") {
             let _ = window.hide();
         }
+        if let Some(window) = app.get_webview_window("time-overlay") {
+            let _ = window.hide();
+        }
+        if let Some(window) = app.get_webview_window("todo-overlay") {
+            let _ = window.hide();
+        }
         if let Some(window) = app.get_webview_window("palette") {
             let _ = window.hide();
         }
@@ -4176,6 +5102,18 @@ pub fn start_long_capture(
             return Err(error);
         }
     };
+    let _session_lock = CAPTURE_SESSION_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let state = app.state::<crate::scroll_capture::LongCaptureState>();
+    if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst) || !state.owns_result(summary.result_id) {
+        // Cancellation may win the race between worker registration and this
+        // second session check. Ensure no worker or hidden overlay survives
+        // the failed start transition.
+        state.cancel_active();
+        cleanup_screenshot_session_inner(&app);
+        return Err("长截图会话已取消".into());
+    }
     crate::utils::logger::log(
         "long-capture",
         &format!(
@@ -4248,6 +5186,9 @@ pub fn stop_long_capture(
     app: tauri::AppHandle,
     result_id: u64,
 ) -> Result<crate::scroll_capture::LongCaptureSummary, String> {
+    let session_lock = CAPTURE_SESSION_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     crate::utils::logger::log(
         "long-capture",
         &format!("stop_long_capture requested result_id={}", result_id),
@@ -4256,6 +5197,7 @@ pub fn stop_long_capture(
     let summary = match state.stop(result_id) {
         Ok(summary) => summary,
         Err(error) => {
+            drop(session_lock);
             cleanup_screenshot_session(&app);
             let _ = app.emit("long-capture-cancelled", ());
             let _ = app.emit_to("screenshot-overlay", "long-capture-overlay-reset", ());
@@ -4282,6 +5224,16 @@ pub fn stop_long_capture(
             let _ = toolbar.show();
         }
     }
+    if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        if let Some(timer) = app.get_webview_window("time-overlay") {
+            let _ = timer.show();
+        }
+    }
+    if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        if let Some(todo) = app.get_webview_window("todo-overlay") {
+            let _ = todo.show();
+        }
+    }
     if let Some(cache) = app.try_state::<crate::screenshot::ScreenCache>() {
         if let Ok(mut guard) = cache.pixels.lock() {
             *guard = None;
@@ -4300,9 +5252,13 @@ pub fn stop_long_capture(
 
 #[tauri::command]
 pub fn cancel_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<(), String> {
+    let _session_lock = CAPTURE_SESSION_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let state = app.state::<crate::scroll_capture::LongCaptureState>();
     state.cancel(result_id)?;
-    cleanup_screenshot_session(&app);
+    SCREENSHOT_SESSION.fetch_add(1, Ordering::SeqCst);
+    cleanup_screenshot_session_inner(&app);
     let _ = app.emit("long-capture-cancelled", ());
     let _ = app.emit_to("screenshot-overlay", "long-capture-overlay-reset", ());
     Ok(())
@@ -4524,6 +5480,18 @@ pub fn set_quick_input_highlight(index: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// 提交「按住唤起」模式在松开触发键瞬间结算出的扇区。
+/// generation 用于拒绝滞后事件，避免旧会话的确认影响下一次唤起。
+#[tauri::command]
+pub fn confirm_quick_input_hold(
+    generation: u64,
+    selected_index: Option<usize>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    crate::quick_input::confirm_hold_wheel(&app, generation, selected_index);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_quick_input_snippets(config: State<'_, ConfigManager>) -> Result<String, String> {
     config.get_quick_input_snippets()
@@ -4535,6 +5503,19 @@ pub fn set_quick_input_snippets(
     config: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     config.update_quick_input_snippets(snippets)
+}
+
+#[tauri::command]
+pub fn get_quick_input_snippets_enabled(config: State<'_, ConfigManager>) -> Result<bool, String> {
+    config.get_quick_input_snippets_enabled()
+}
+
+#[tauri::command]
+pub fn set_quick_input_snippets_enabled(
+    enabled: bool,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config.update_quick_input_snippets_enabled(enabled)
 }
 
 #[tauri::command]
@@ -4572,14 +5553,7 @@ pub fn cancel_quick_input_wheel(
     generation: Option<u64>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let current = crate::quick_input::state();
-    if current.active
-        && generation
-            .map(|value| value == current.generation)
-            .unwrap_or(true)
-    {
-        crate::quick_input::end_wheel(&app, None);
-    }
+    crate::quick_input::cancel_wheel_if_generation(&app, generation);
     Ok(())
 }
 
@@ -4614,4 +5588,23 @@ fn sync_quick_input_trigger(config: &ConfigManager) -> Result<(), String> {
     };
     crate::quick_input::set_mode(mode_code);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 「恢复默认位置」时，时钟/待办窗口与番茄钟一致回退到创建默认 (100, 100)，
+    /// 与前端 ensureTimerWindow/ensureTodoWindow 的 x/y 初始值保持一致。
+    #[test]
+    fn test_default_window_position_time_and_todo() {
+        assert_eq!(default_window_position("time-overlay", 380, 220), (100, 100));
+        assert_eq!(default_window_position("todo-overlay", 360, 560), (100, 100));
+    }
+
+    /// 未知窗口 id 一律回退 (100, 100)。
+    #[test]
+    fn test_default_window_position_unknown_fallback() {
+        assert_eq!(default_window_position("unknown-window", 100, 100), (100, 100));
+    }
 }

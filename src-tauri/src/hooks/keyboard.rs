@@ -234,6 +234,14 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 // 不吞键，继续传递，前端 keydown 也能收到
             }
 
+            // Smart screenshot uses Tab to switch between UI element and top-level window.
+            if vk_code == 0x09 && crate::hooks::mouse::is_smart_screenshot_mode() {
+                if let Some(app) = KB_STATE.app_handle.get() {
+                    let _ = app.emit_to("screenshot-overlay", "screenshot-target-scope-toggle", ());
+                }
+                return LRESULT(1);
+            }
+
             // Ctrl+C detection — only trigger outside screenshot/recording modes.
             // In those modes the overlay consumes selection; popping up the text
             // toolbar would interfere with the active tool.
@@ -249,10 +257,18 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     // 在钩子回调中立即保存剪贴板快照，
                     // 确保快照早于前台 app 处理 Ctrl+C（避免线程调度延迟导致竞态）
                     let old_clipboard = read_clipboard_snapshot();
+                    // 记录 Ctrl+C 按下瞬间工具栏是否可见：若可见而等待期间被用户关闭，
+                    // 检测结果不应再把工具栏弹回（见 handle_ctrl_c 中的抑制逻辑）。
+                    let toolbar_visible_at_ctrl_c = crate::hooks::is_toolbar_visible();
                     if let Some(app) = KB_STATE.app_handle.get() {
                         let app_clone = app.clone();
                         std::thread::spawn(move || {
-                            handle_ctrl_c(app_clone, fg_hwnd, old_clipboard);
+                            handle_ctrl_c(
+                                app_clone,
+                                fg_hwnd,
+                                old_clipboard,
+                                toolbar_visible_at_ctrl_c,
+                            );
                             KB_STATE.processing.store(false, Ordering::SeqCst);
                         });
                     } else {
@@ -295,6 +311,9 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 // 只有「新的一次按下」才处理。松开 keyup 时复位标志。
                 if !crate::quick_input::is_trigger_down() {
                     crate::quick_input::set_trigger_down(true);
+                    if crate::quick_input::is_hold_mode() {
+                        crate::quick_input::reset_hold_release_pending();
+                    }
                     if let Some(app) = KB_STATE.app_handle.get() {
                         // 重要：在独立线程执行 begin_wheel / toggle_wheel —— begin_wheel 里的 get_mouse_position/emit_to
                         // 若在设置窗口创建等场景下可能短暂阻塞，而 WH_KEYBOARD_LL 回调要求在超时内返回，
@@ -305,6 +324,13 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                                 // 按住唤起模式：按下即唤起转盘（转盘已激活时保持，松开才确认）
                                 if !crate::quick_input::is_active() {
                                     crate::quick_input::begin_wheel(&app_clone);
+                                    // keyup 可能在 begin_wheel 的窗口操作期间先到达；
+                                    // 此时补发确认，避免转盘在松开后仍保持激活。
+                                    if crate::quick_input::is_hold_release_pending()
+                                        || !crate::quick_input::is_trigger_down()
+                                    {
+                                        crate::quick_input::request_hold_confirmation(&app_clone);
+                                    }
                                 }
                             } else {
                                 // 单击切换模式：当前已激活则关闭（取消），否则打开
@@ -317,19 +343,24 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 return LRESULT(1);
             } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
                 // 松开触发器时复位按下标志，允许下一次按下再次触发。
-                if crate::quick_input::is_hold_mode()
-                    && crate::quick_input::is_active()
-                    && crate::quick_input::is_trigger_down()
-                {
-                    // 按住唤起模式：松开即结束转盘，并按当前高亮扇区确认输入。
-                    // 高亮扇区由前端在转盘中移动鼠标时经 set_quick_input_highlight 同步到后端。
-                    if let Some(app) = KB_STATE.app_handle.get() {
-                        let app_clone = app.clone();
-                        std::thread::spawn(move || {
-                            let h = crate::quick_input::highlight();
-                            let selected = if h >= 0 { Some(h as usize) } else { None };
-                            crate::quick_input::end_wheel(&app_clone, selected);
+                if crate::quick_input::is_hold_mode() && crate::quick_input::is_trigger_down() {
+                    // 按住唤起模式：请求前端按 keyup 时鼠标位置结算扇区后再确认。
+                    // 不能直接读取后端缓存的高亮：快速松开时最新异步同步可能尚未到达。
+                    // GetCursorPos 仅是一次轻量 Win32 读取，必须在 keyup 回调当下执行，
+                    // 这样 begin_wheel 延迟或前端 IPC 排队期间鼠标移动也不会改变结果。
+                    let release_pos = crate::automation::get_mouse_position()
+                        .unwrap_or(crate::automation::Point {
+                            x: crate::quick_input::state().x,
+                            y: crate::quick_input::state().y,
                         });
+                    crate::quick_input::mark_hold_release_pending(release_pos.x, release_pos.y);
+                    if crate::quick_input::is_active() {
+                        if let Some(app) = KB_STATE.app_handle.get() {
+                            let app_clone = app.clone();
+                            std::thread::spawn(move || {
+                                crate::quick_input::request_hold_confirmation(&app_clone);
+                            });
+                        }
                     }
                 }
                 // 单击切换模式：松开仅复位标志，允许下一次点击再次切换，
@@ -460,7 +491,12 @@ unsafe fn read_clipboard_snapshot() -> ClipSnapshot {
 }
 
 /// 处理 Ctrl+C：等待剪贴板更新，读取内容，触发选区事件
-fn handle_ctrl_c(app: tauri::AppHandle, foreground_hwnd: isize, old_clipboard: ClipSnapshot) {
+fn handle_ctrl_c(
+    app: tauri::AppHandle,
+    foreground_hwnd: isize,
+    old_clipboard: ClipSnapshot,
+    toolbar_visible_at_ctrl_c: bool,
+) {
     // 等待前台 app 处理 Ctrl+C（将选中文本写入剪贴板）
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -502,6 +538,17 @@ fn handle_ctrl_c(app: tauri::AppHandle, foreground_hwnd: isize, old_clipboard: C
         crate::utils::logger::log(
             "keyboard",
             "Ctrl+C detected but text toolbar disabled, skipping toolbar",
+        );
+        return;
+    }
+
+    // 抑制“刚消失又弹出”竞态：Ctrl+C 按下时工具栏本已可见（用户是在已有工具栏的
+    // 情况下复制的），但在等待剪贴板更新的这 ~500ms 内用户已点击外部/Esc 把它关闭，
+    // 说明用户此刻并不想看到工具栏，检测结果不再把它弹回。
+    if toolbar_visible_at_ctrl_c && !crate::hooks::is_toolbar_visible() {
+        crate::utils::logger::log(
+            "keyboard",
+            "Toolbar dismissed while waiting for clipboard, skipping re-show",
         );
         return;
     }

@@ -1,13 +1,13 @@
 //! Manual vertical scrolling capture. The worker owns raw frames and the final
 //! BGRA image so large captures never travel through the webview as base64.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
 
@@ -51,10 +51,72 @@ struct StoredResult {
     frame_count: u32,
     status: CaptureStatus,
     message: Option<String>,
-    bgra: Vec<u8>,
+    bgra_chunks: VecDeque<Vec<u8>>,
+    bgra_len: usize,
 }
 
 impl StoredResult {
+    fn from_initial(width: u32, height: u32, initial: Vec<u8>) -> Self {
+        let bgra_len = initial.len();
+        let mut bgra_chunks = VecDeque::new();
+        bgra_chunks.push_back(initial);
+        Self {
+            width,
+            height,
+            frame_count: 1,
+            status: CaptureStatus::Capturing,
+            message: None,
+            bgra_chunks,
+            bgra_len,
+        }
+    }
+
+    fn materialize(&self) -> Vec<u8> {
+        let mut pixels = Vec::with_capacity(self.bgra_len);
+        for chunk in &self.bgra_chunks {
+            pixels.extend_from_slice(chunk);
+        }
+        pixels
+    }
+
+    fn starts_with(&self, data: &[u8]) -> bool {
+        if data.len() > self.bgra_len {
+            return false;
+        }
+        let mut offset = 0;
+        for chunk in &self.bgra_chunks {
+            if offset == data.len() {
+                break;
+            }
+            let take = (data.len() - offset).min(chunk.len());
+            if chunk.get(..take) != data.get(offset..offset + take) {
+                return false;
+            }
+            offset += take;
+        }
+        offset == data.len()
+    }
+
+    fn ends_with(&self, data: &[u8]) -> bool {
+        if data.len() > self.bgra_len {
+            return false;
+        }
+        let mut remaining = data.len();
+        for chunk in self.bgra_chunks.iter().rev() {
+            if remaining == 0 {
+                break;
+            }
+            let take = remaining.min(chunk.len());
+            let chunk_start = chunk.len() - take;
+            let data_start = remaining - take;
+            if chunk.get(chunk_start..) != data.get(data_start..remaining) {
+                return false;
+            }
+            remaining -= take;
+        }
+        remaining == 0
+    }
+
     fn summary(&self, result_id: u64) -> LongCaptureSummary {
         LongCaptureSummary {
             result_id,
@@ -117,6 +179,13 @@ impl LongCaptureState {
             .unwrap_or(false)
     }
 
+    pub fn owns_result(&self, result_id: u64) -> bool {
+        self.active
+            .lock()
+            .map(|guard| guard.as_ref().is_some_and(|active| active.result_id == result_id))
+            .unwrap_or(false)
+    }
+
     pub fn start(
         &self,
         app: tauri::AppHandle,
@@ -141,14 +210,7 @@ impl LongCaptureState {
             region.height,
         )?;
         let result_id = self.next_id.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-        let result = StoredResult {
-            width: region.width,
-            height: region.height,
-            frame_count: 1,
-            status: CaptureStatus::Capturing,
-            message: None,
-            bgra: initial.clone(),
-        };
+        let result = StoredResult::from_initial(region.width, region.height, initial.clone());
         self.results
             .lock()
             .map_err(|e| e.to_string())?
@@ -175,6 +237,12 @@ impl LongCaptureState {
                     "long-capture",
                     &format!("worker panicked result_id={}", result_id),
                 );
+                // A panic bypasses the normal Stop/Cancel command path. Clear
+                // the active session and retained pixels so the next capture
+                // is not permanently blocked by a dead worker.
+                if let Some(state) = app.try_state::<LongCaptureState>() {
+                    state.clear_failed_worker(result_id);
+                }
             }
         });
         *active = Some(ActiveCapture {
@@ -311,7 +379,8 @@ impl LongCaptureState {
         // The capture is already bounded by MAX_LONG_CAPTURE_PIXELS. Return
         // the original pixels here so the preview never enlarges a blurry
         // thumbnail; save/copy continue to use the same raw result.
-        crate::screenshot::encode_png_base64(&result.bgra, result.width, result.height)
+        let pixels = result.materialize();
+        crate::screenshot::encode_png_base64(&pixels, result.width, result.height)
     }
 
     pub fn raw(&self, result_id: u64) -> Result<(Vec<u8>, u32, u32), String> {
@@ -319,7 +388,7 @@ impl LongCaptureState {
         let result = results
             .get(&result_id)
             .ok_or_else(|| "长截图结果不存在或已释放".to_string())?;
-        Ok((result.bgra.clone(), result.width, result.height))
+        Ok((result.materialize(), result.width, result.height))
     }
 
     pub fn dimensions(&self, result_id: u64) -> Result<(u32, u32), String> {
@@ -351,6 +420,20 @@ impl LongCaptureState {
                 Err("长截图会话已过期".into())
             }
             None => Err("没有进行中的长截图会话".into()),
+        }
+    }
+
+    fn clear_failed_worker(&self, result_id: u64) {
+        if let Ok(mut active) = self.active.lock() {
+            if active
+                .as_ref()
+                .is_some_and(|capture| capture.result_id == result_id)
+            {
+                active.take();
+            }
+        }
+        if let Ok(mut results) = self.results.lock() {
+            results.remove(&result_id);
         }
     }
 }
@@ -541,30 +624,26 @@ fn capture_and_merge(
             // corresponding edge. Do not duplicate it when the user scrolls
             // back over an area captured earlier in the same session.
             let already_present = if direction < 0 {
-                result.bgra.get(..start) == current.get(..start)
+                result.starts_with(current.get(..start).unwrap_or_default())
             } else {
-                let suffix_len = current.len().saturating_sub(start);
-                result
-                    .bgra
-                    .get(result.bgra.len().saturating_sub(suffix_len)..)
-                    == current.get(start..)
+                result.ends_with(current.get(start..).unwrap_or_default())
             };
             if already_present {
                 previous.clone_from(&current);
                 return;
             }
             if direction < 0 {
-                let mut merged = Vec::with_capacity(result.bgra.len() + unique_bytes);
                 let Some(prefix) = current.get(..start) else {
                     set_partial(result_id, results, "长截图帧数据不完整".into());
                     return;
                 };
-                merged.extend_from_slice(prefix);
-                merged.extend_from_slice(&result.bgra);
-                result.bgra = merged;
+                result.bgra_chunks.push_front(prefix.to_vec());
             } else {
-                result.bgra.extend_from_slice(&current[start..]);
+                result
+                    .bgra_chunks
+                    .push_back(current.get(start..).unwrap_or_default().to_vec());
             }
+            result.bgra_len += unique_bytes;
             result.height = new_height;
             result.frame_count += 1;
             previous.clone_from(&current);
@@ -768,5 +847,17 @@ mod tests {
             find_overlap(&previous, &current, 8, 3),
             Overlap::Found(2)
         ));
+    }
+
+    #[test]
+    fn stored_result_chunks_preserve_edges_and_materialize_order() {
+        let mut result = StoredResult::from_initial(1, 1, vec![1, 2, 3, 4]);
+        result.bgra_chunks.push_front(vec![9, 8, 7, 6]);
+        result.bgra_chunks.push_back(vec![5, 4, 3, 2]);
+        result.bgra_len += 8;
+
+        assert!(result.starts_with(&[9, 8, 7, 6]));
+        assert!(result.ends_with(&[5, 4, 3, 2]));
+        assert_eq!(result.materialize(), vec![9, 8, 7, 6, 1, 2, 3, 4, 5, 4, 3, 2]);
     }
 }

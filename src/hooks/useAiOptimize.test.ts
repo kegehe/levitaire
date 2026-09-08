@@ -253,6 +253,7 @@ describe("useAiOptimize", () => {
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("call_ai_stream", {
+      requestId: 1,
       prompt: "测试文本",
       systemPrompt: "润色提示词",
     });

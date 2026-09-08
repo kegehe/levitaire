@@ -1,3 +1,16 @@
+/* ── Inner-card shadow ──────────────────────────────
+   与 tokens 的 --toolbar-shadow 同理：不引用 var(--shadow-sm)。
+   themePreferences 运行时会把它放大成 scheme.shadow（30px+ 大浮层投影），
+   工具栏内部白/浅卡片若引用它会在容器上叠出巨大阴影。 */
+:root {
+  --toolbar-inner-shadow: 0 1px 2px oklch(0.2 0 0 / 0.06);
+}
+
+[data-theme="dark"],
+:root.dark {
+  --toolbar-inner-shadow: 0 1px 2px oklch(0 0 0 / 0.4);
+}
+
 /* ── Container ───────────────────────────────────────────── */
 .toolbar-container {
   display: flex;
@@ -157,7 +170,7 @@
   border: 1px solid var(--preview-border);
   word-break: break-word;
   white-space: pre-wrap;
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--toolbar-inner-shadow);
 }
 
 /* ── Streaming cursor ───────────────────────────────────── */
@@ -194,43 +207,126 @@
   animation: previewEnter var(--transition-normal) ease-out;
 }
 
-.toolbar-qrcode .toolbar-preview-actions {
-  justify-content: center;
-}
-
-/* 二维码预览时容器改为纵向布局，拖拽手柄和二维码各占一行 */
+/* 二维码预览时容器改为纵向布局，拖拽手柄与二维码卡片各占一行 */
 .toolbar-container:has(.toolbar-qrcode) {
   flex-direction: column;
   align-items: center;
+  gap: var(--space-1-5);
 }
 
-/* 纵向布局（二维码预览）下，手柄转为顶部横条：
-   align-self 撑满宽度作为可拖标题栏，分隔线改用 inset box-shadow 画底部，
-   避免竖条在纵向交叉轴上错位缩成一点 */
+/* 纵向布局（二维码预览）下，手柄转为顶部标题拖拽条：
+   顶部两角贴合容器圆角，底部用 inset box-shadow 画分隔线（不占布局空间），
+   四角圆角由 .toolbar-container 的 border-radius 统一呈现，不再单独设直角 */
 .toolbar-container:has(.toolbar-qrcode) .toolbar-drag-handle {
   width: 100%;
-  height: 20px;
+  height: 24px;
   align-self: stretch;
   margin-right: 0;
-  margin-bottom: var(--space-1);
+  margin-bottom: 0;
   box-shadow: inset 0 -1px 0 0 var(--color-border);
-  /* 顶部两角贴合容器圆角，底部直角与分隔线衔接 */
   border-top-left-radius: var(--toolbar-radius);
   border-top-right-radius: var(--toolbar-radius);
   border-bottom-left-radius: 0;
   border-bottom-right-radius: 0;
   background-position: center;
+  background-size: 14px;
+  opacity: 0.55;
+}
+
+.toolbar-container:has(.toolbar-qrcode) .toolbar-drag-handle:hover {
+  opacity: 1;
+  background-color: color-mix(in srgb, var(--color-fg-muted) 9%, transparent);
+}
+
+/* 二维码白色卡片：与容器底色形成反差的圆角白底，承载 384px 原生尺寸位图 */
+.toolbar-qrcode-card {
+  background: #fff;
+  border: 1px solid var(--color-border-hover);
+  border-radius: var(--radius-lg);
+  padding: var(--space-2);
+  box-shadow: var(--toolbar-inner-shadow);
+  line-height: 0;
 }
 
 .toolbar-qrcode-image {
-  width: 200px;
-  height: 200px;
-  border-radius: var(--preview-radius);
-  background: #fff;
-  padding: var(--space-1-5);
-  border: 1px solid var(--preview-border);
-  box-shadow: var(--shadow-sm);
-  object-fit: contain;
+  /* Keep the generated 384px bitmap at native size. Resampling QR modules
+     to 200px introduces blurred edges and makes phone cameras less reliable.
+     卡片自身处理白底、圆角与描边，图片不再重复绘制边框，避免白边叠加 */
+  display: block;
+  width: 384px;
+  height: 384px;
+  image-rendering: pixelated;
+}
+
+/* 操作按钮行：图标 + 文字标签，主次分明，替代纯图标按钮 */
+.toolbar-qrcode-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+}
+
+.toolbar-qrcode-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--button-radius);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--button-text);
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  white-space: nowrap;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.toolbar-qrcode-action:hover {
+  background: var(--button-ghost-hover-bg);
+}
+
+.toolbar-qrcode-action:active {
+  transform: scale(0.96);
+  background: var(--button-ghost-active-bg);
+}
+
+.toolbar-qrcode-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* 复制：主操作（品牌色） */
+.toolbar-qrcode-action--primary {
+  color: var(--button-primary-text);
+}
+
+.toolbar-qrcode-action--primary:hover {
+  background: var(--button-primary-hover-bg);
+}
+
+.toolbar-qrcode-action--primary:active {
+  background: var(--button-primary-active-bg);
+}
+
+/* 关闭：危险操作 */
+.toolbar-qrcode-action--danger {
+  color: var(--button-danger-text);
+}
+
+.toolbar-qrcode-action--danger:hover {
+  background: var(--button-danger-hover-bg);
+}
+
+.toolbar-qrcode-action--danger:active {
+  background: var(--button-danger-active-bg);
 }
 
 /* ── Char Count Preview ──────────────────────────────────── */

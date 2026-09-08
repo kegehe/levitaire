@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type ThemeMode = "light" | "dark";
+export type ThemeMode = "light" | "dark" | "system";
 export type ThemeAccentId = "blue" | "cyan" | "teal" | "green" | "indigo" | "violet";
 export type ThemeSchemeId =
   "signal" | "cloud" | "studio" | "quartz" | "moss" | "ember" | "arctic" | "mono" | "iris" | "dusk";
@@ -491,11 +491,21 @@ export const THEME_SCHEMES: readonly ThemeScheme[] = [
 const ACCENT_BY_ID = new Map(THEME_ACCENTS.map((accent) => [accent.id, accent]));
 const SCHEME_BY_ID = new Map(THEME_SCHEMES.map((scheme) => [scheme.id, scheme]));
 
+/** 将「跟随系统」解析为当前操作系统的实际浅色/深色偏好。 */
+export function resolveThemeMode(mode: ThemeMode): "light" | "dark" {
+  if (mode !== "system") return mode;
+  return typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
 export function normalizeThemePreferences(
   value?: Partial<ThemePreferences> | null,
 ): ThemePreferences {
   return {
-    theme: value?.theme === "dark" ? "dark" : "light",
+    theme:
+      value?.theme === "dark" || value?.theme === "system" ? (value.theme as ThemeMode) : "light",
     accent: ACCENT_BY_ID.has(value?.accent as ThemeAccentId)
       ? (value?.accent as ThemeAccentId)
       : DEFAULT_THEME_PREFERENCES.accent,
@@ -515,18 +525,19 @@ export function getStoredThemePreferences(): ThemePreferences {
 
 export function applyThemePreferences(preferences: ThemePreferences): ThemePreferences {
   const normalized = normalizeThemePreferences(preferences);
+  const resolved = resolveThemeMode(normalized.theme);
   const root = document.documentElement;
-  const values = ACCENT_BY_ID.get(normalized.accent)![normalized.theme];
-  const scheme = SCHEME_BY_ID.get(normalized.scheme)![normalized.theme];
-  const accentForeground = normalized.theme === "dark" ? "var(--neutral-950)" : "var(--neutral-0)";
+  const values = ACCENT_BY_ID.get(normalized.accent)![resolved];
+  const scheme = SCHEME_BY_ID.get(normalized.scheme)![resolved];
+  const accentForeground = resolved === "dark" ? "var(--neutral-950)" : "var(--neutral-0)";
 
-  root.setAttribute("data-theme", normalized.theme);
+  root.setAttribute("data-theme", resolved);
   root.setAttribute("data-theme-scheme", normalized.scheme);
   root.style.setProperty("--color-bg", scheme.bg);
   root.style.setProperty("--color-bg-elevated", scheme.elevated);
   root.style.setProperty(
     "--color-bg-overlay",
-    normalized.theme === "dark" ? "rgb(0 0 0 / .62)" : "rgb(255 255 255 / .82)",
+    resolved === "dark" ? "rgb(0 0 0 / .62)" : "rgb(255 255 255 / .82)",
   );
   root.style.setProperty("--color-bg-sunken", scheme.sunken);
   root.style.setProperty("--color-fg", scheme.fg);
@@ -541,15 +552,9 @@ export function applyThemePreferences(preferences: ThemePreferences): ThemePrefe
   root.style.setProperty("--toolbar-bg", scheme.elevated);
   root.style.setProperty("--toolbar-border", scheme.border);
   root.style.setProperty("--toolbar-radius", scheme.radius);
-  const glass = normalized.theme === "dark";
-  root.style.setProperty(
-    "--palette-bg",
-    glass ? "rgb(22 28 37 / .94)" : "rgb(246 249 252 / .94)",
-  );
-  root.style.setProperty(
-    "--palette-bg-fallback",
-    glass ? "rgb(22 28 37)" : "rgb(244 248 250)",
-  );
+  const glass = resolved === "dark";
+  root.style.setProperty("--palette-bg", glass ? "rgb(22 28 37 / .94)" : "rgb(246 249 252 / .94)");
+  root.style.setProperty("--palette-bg-fallback", glass ? "rgb(22 28 37)" : "rgb(244 248 250)");
   root.style.setProperty(
     "--palette-border",
     glass ? "1px solid rgb(255 255 255 / .16)" : "1px solid rgb(105 122 141 / .26)",
@@ -584,7 +589,7 @@ export function applyThemePreferences(preferences: ThemePreferences): ThemePrefe
   );
   root.style.setProperty(
     "--palette-icon-bg",
-    normalized.theme === "dark" ? "rgb(255 255 255 / .12)" : "rgb(31 48 64 / .08)",
+    resolved === "dark" ? "rgb(255 255 255 / .12)" : "rgb(31 48 64 / .08)",
   );
   root.style.setProperty("--palette-icon-color", scheme.muted);
   root.style.setProperty("--preview-bg", scheme.sunken);
@@ -601,9 +606,9 @@ export function applyThemePreferences(preferences: ThemePreferences): ThemePrefe
   root.style.setProperty("--button-active-bg", scheme.border);
   root.style.setProperty("--button-ghost-hover-bg", scheme.sunken);
   root.style.setProperty("--button-ghost-active-bg", scheme.border);
-  root.style.setProperty("--tooltip-bg", normalized.theme === "dark" ? "#f0f2f4" : "#24272b");
-  root.style.setProperty("--tooltip-text", normalized.theme === "dark" ? "#1d2228" : "#ffffff");
-  root.style.setProperty("--tooltip-border", normalized.theme === "dark" ? "#c8d0d6" : "#454b52");
+  root.style.setProperty("--tooltip-bg", resolved === "dark" ? "#f0f2f4" : "#24272b");
+  root.style.setProperty("--tooltip-text", resolved === "dark" ? "#1d2228" : "#ffffff");
+  root.style.setProperty("--tooltip-border", resolved === "dark" ? "#c8d0d6" : "#454b52");
   root.style.setProperty("--radius-md", scheme.radius);
   root.style.setProperty("--color-brand", values.accent);
   root.style.setProperty("--color-brand-hover", values.hover);
@@ -653,6 +658,37 @@ export async function loadThemePreferences(): Promise<ThemePreferences> {
 }
 
 /**
+ * 监听操作系统浅色/深色切换。仅在用户选择了「跟随系统」时重放最近一次主题，
+ * 使所有 webview 能随系统偏好实时切换外观。
+ */
+export function subscribeSystemTheme(
+  onChange: (preferences: ThemePreferences) => void = applyThemePreferences,
+): () => void {
+  if (typeof window.matchMedia !== "function") {
+    return () => {};
+  }
+  const query = window.matchMedia("(prefers-color-scheme: dark)");
+  const handleChange = () => {
+    if (getStoredThemePreferences().theme === "system") {
+      onChange(getStoredThemePreferences());
+    }
+  };
+  if (
+    typeof query.addEventListener === "function" &&
+    typeof query.removeEventListener === "function"
+  ) {
+    query.addEventListener("change", handleChange);
+    return () => query.removeEventListener("change", handleChange);
+  }
+  // 旧版 WebView 兼容路径（WebKit 旧实现使用 addListener）
+  if (typeof query.addListener === "function" && typeof query.removeListener === "function") {
+    query.addListener(handleChange);
+    return () => query.removeListener(handleChange);
+  }
+  return () => {};
+}
+
+/**
  * Subscribe before loading the persisted value so a newly opened webview cannot miss a change
  * emitted while it is mounting.
  */
@@ -675,5 +711,9 @@ export async function subscribeThemePreferences(
   if (!receivedEvent) {
     onChange(initialPreferences);
   }
-  return unlisten;
+  const stopSystemTheme = subscribeSystemTheme(onChange);
+  return () => {
+    unlisten();
+    stopSystemTheme();
+  };
 }

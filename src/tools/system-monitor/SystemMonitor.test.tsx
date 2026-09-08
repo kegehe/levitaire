@@ -135,11 +135,47 @@ describe("SystemMonitor theme synchronization", () => {
     expect(container.querySelectorAll(".monitor-icon-btn")).toHaveLength(2);
   });
 
+  it("only expands the title and action controls while the monitor is hovered", () => {
+    const { container } = render(<SystemMonitor />);
+    const monitor = container.querySelector<HTMLElement>(".monitor-body");
+
+    expect(monitor).not.toHaveClass("is-controls-visible");
+    expect(screen.getByLabelText("切换到迷你模式")).toHaveAttribute("tabindex", "-1");
+
+    fireEvent.mouseEnter(monitor!);
+    expect(monitor).toHaveClass("is-controls-visible");
+    expect(screen.getByLabelText("切换到迷你模式")).toHaveAttribute("tabindex", "0");
+
+    fireEvent.mouseLeave(monitor!);
+    expect(monitor).not.toHaveClass("is-controls-visible");
+  });
+
+  it("keeps hover controls available in mini mode", async () => {
+    mockInvoke.mockImplementation((command) =>
+      command === "get_system_monitor_config"
+        ? Promise.resolve(JSON.stringify({ intervalMs: 1000, displayMode: "mini" }))
+        : Promise.resolve(""),
+    );
+
+    const { container } = render(<SystemMonitor />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const monitor = container.querySelector<HTMLElement>(".monitor-body");
+
+    fireEvent.mouseEnter(monitor!);
+
+    expect(monitor).toHaveClass("is-mini", "is-controls-visible");
+    expect(screen.getByLabelText("切换到标准模式")).toHaveAttribute("tabindex", "0");
+  });
+
   it("toggles display mode when the mode button is clicked", async () => {
     const { container } = render(<SystemMonitor />);
     await act(async () => {
       await Promise.resolve();
     });
+
+    fireEvent.mouseEnter(container.querySelector<HTMLElement>(".monitor-body")!);
 
     // 默认 full 模式，按钮 aria-label 应为动作描述"切换到迷你模式"
     const toggleBtn = screen.getByLabelText("切换到迷你模式");
@@ -176,6 +212,7 @@ describe("SystemMonitor theme synchronization", () => {
       await Promise.resolve();
     });
 
+    fireEvent.mouseEnter(screen.getByText("系统监控").closest(".monitor-body")!);
     const toggleBtn = screen.getByLabelText("切换到标准模式");
     expect(toggleBtn).toBeInTheDocument();
   });

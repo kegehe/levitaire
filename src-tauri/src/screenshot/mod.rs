@@ -2,6 +2,7 @@
 //! 支持多显示器：overlay 覆盖整个虚拟桌面，capture 用 GetDC(None) 的虚拟桌面坐标系。
 
 pub mod pin;
+pub mod target;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use windows::Win32::Foundation::{LPARAM, RECT};
@@ -37,9 +38,14 @@ pub struct CachedScreen {
     pub origin_y: i32,
 }
 
-// 100 million BGRA pixels require about 381 MiB before PNG encoding. This still
-// covers large multi-monitor desktops while rejecting malformed command input.
-const MAX_SCREENSHOT_PIXELS: u64 = 100_000_000;
+// Keep the raw BGRA allocation bounded. A 100 MP capture needs about 381 MiB
+// before PNG encoding, and encoding temporarily creates another RGBA buffer,
+// the PNG output, and a base64 string. That peak can crash the WebView process
+// on machines already under memory pressure. 32 MP still covers common UHD
+// and multi-monitor desktops while keeping the raw frame below 128 MiB.
+pub const MAX_SCREENSHOT_PIXELS: u64 = 32_000_000;
+/// Keep encoded screenshot payloads below the IPC and WebView transfer limit.
+pub const MAX_SCREENSHOT_PNG_BYTES: usize = 64 * 1024 * 1024;
 
 impl CachedScreen {
     /// 从缓存裁剪选区子区域（虚拟桌面物理坐标）
@@ -207,7 +213,15 @@ unsafe fn capture_screen_region_inner(
         ..Default::default()
     };
 
-    let mut pixels: Vec<u8> = vec![0u8; (width as u64 * height as u64 * 4) as usize];
+    let byte_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "截图缓冲区大小溢出".to_string())? as usize;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(byte_len)
+        .map_err(|_| "截图内存不足，请缩小截图区域后重试".to_string())?;
+    pixels.resize(byte_len, 0);
     let scanlines = GetDIBits(
         mem_dc,
         bitmap,
@@ -250,6 +264,9 @@ pub fn crop_screen_region(
     if width == 0 || height == 0 {
         return Err("裁剪区域尺寸为 0".into());
     }
+    if u64::from(width) * u64::from(height) > MAX_SCREENSHOT_PIXELS {
+        return Err("裁剪区域像素总数过大".into());
+    }
     // 子区域左上在缓存内的像素偏移
     let off_x = left - origin_x;
     let off_y = top - origin_y;
@@ -267,9 +284,19 @@ pub fn crop_screen_region(
     if outside_bounds {
         return Err("裁剪区域超出缓存范围".into());
     }
-    let full_stride = full_w as usize * 4;
-    let sub_stride = width as usize * 4;
-    let mut out = vec![0u8; sub_stride * height as usize];
+    let full_stride = (full_w as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "缓存行大小溢出".to_string())?;
+    let sub_stride = (width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "裁剪行大小溢出".to_string())?;
+    let output_len = sub_stride
+        .checked_mul(height as usize)
+        .ok_or_else(|| "裁剪缓冲区大小溢出".to_string())?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(output_len)
+        .map_err(|_| "裁剪内存不足，请缩小截图区域后重试".to_string())?;
+    out.resize(output_len, 0);
     for row in 0..height as usize {
         let src = uy as usize * full_stride + ux as usize * 4 + row * full_stride;
         let dst = row * sub_stride;
@@ -280,11 +307,20 @@ pub fn crop_screen_region(
 
 /// 将 BGRA 像素编码为 PNG，返回 base64 字符串（不带 data: 前缀）。
 pub fn encode_png_base64(bgra: &[u8], width: u32, height: u32) -> Result<String, String> {
-    if bgra.len() != (width * height * 4) as usize {
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "截图尺寸溢出".to_string())? as usize;
+    if u64::from(width) * u64::from(height) > MAX_SCREENSHOT_PIXELS {
+        return Err("截图区域像素总数过大".into());
+    }
+    if bgra.len() != expected_len {
         return Err("像素数据长度与尺寸不匹配".into());
     }
     // BGRA -> RGBA
-    let mut rgba: Vec<u8> = Vec::with_capacity(bgra.len());
+    let mut rgba: Vec<u8> = Vec::new();
+    rgba.try_reserve_exact(bgra.len())
+        .map_err(|_| "PNG 编码内存不足，请缩小截图区域后重试".to_string())?;
     for chunk in bgra.chunks_exact(4) {
         rgba.push(chunk[2]); // R
         rgba.push(chunk[1]); // G
@@ -299,6 +335,9 @@ pub fn encode_png_base64(bgra: &[u8], width: u32, height: u32) -> Result<String,
     dyn_img
         .write_to(&mut cursor, image::ImageFormat::Png)
         .map_err(|e| format!("PNG 编码失败: {}", e))?;
+    if png_buf.len() > MAX_SCREENSHOT_PNG_BYTES {
+        return Err("PNG 图片数据过大，请缩小截图区域后重试".to_string());
+    }
     Ok(STANDARD.encode(&png_buf))
 }
 
@@ -345,6 +384,8 @@ mod tests {
         assert!(crop_screen_region(&full, 4, 2, 10, 20, 8, 20, 1, 1).is_err());
         // 零尺寸
         assert!(crop_screen_region(&full, 4, 2, 10, 20, 12, 20, 0, 1).is_err());
+        // 超过统一像素上限时应在分配输出缓冲区前拒绝
+        assert!(crop_screen_region(&[], 0, 0, 10, 20, 0, 0, 6000, 6000).is_err());
     }
 
     #[test]
@@ -358,6 +399,12 @@ mod tests {
         assert!(capture_screen_region(0, 0, 40000, 100).is_err());
         assert!(capture_screen_region(0, 0, 100, 40000).is_err());
         assert!(capture_screen_region(0, 0, 32768, 32768).is_err());
+        assert!(capture_screen_region(0, 0, 6000, 6000).is_err());
+    }
+
+    #[test]
+    fn test_encode_png_rejects_oversized_image_before_allocating() {
+        assert!(encode_png_base64(&[], 6000, 6000).is_err());
     }
 
     #[test]

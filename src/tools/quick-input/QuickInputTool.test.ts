@@ -1,5 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { clampWheelCenter, fitText, getWheelItemLayout, textWidth } from "./QuickInputTool";
+import {
+  clampWheelCenter,
+  fitText,
+  getHighlightedSector,
+  getWheelItemLayout,
+  textWidth,
+} from "./QuickInputTool";
+
+describe("getHighlightedSector", () => {
+  const center = { x: 160, y: 160 };
+
+  it("uses the keyup cursor position to select the matching sector", () => {
+    expect(getHighlightedSector(160, 40, center, 1, 4)).toBe(0);
+    expect(getHighlightedSector(280, 160, center, 1, 4)).toBe(1);
+    expect(getHighlightedSector(160, 280, center, 1, 4)).toBe(2);
+    expect(getHighlightedSector(40, 160, center, 1, 4)).toBe(3);
+  });
+
+  it("does not select an item inside the DPI-scaled center dead zone", () => {
+    expect(getHighlightedSector(190, 160, center, 2, 4)).toBe(-1);
+    expect(getHighlightedSector(197, 160, center, 2, 4)).toBe(1);
+  });
+
+  it("returns no selection when there are no wheel items", () => {
+    expect(getHighlightedSector(160, 40, center, 1, 0)).toBe(-1);
+  });
+});
 
 describe("clampWheelCenter", () => {
   // 参照场景：1080p 主屏，任务栏占底部 40px，窗口半宽高 160

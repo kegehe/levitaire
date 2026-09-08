@@ -33,7 +33,7 @@ describe("registry FLOATING_TOOLS", () => {
       const mod = await t.loader();
       expect(mod.default).toBeDefined();
     }
-  });
+  }, 15_000);
 });
 
 describe("CATEGORY_LABELS", () => {

@@ -661,7 +661,7 @@ describe("FloatingToolbar 去重功能", () => {
 
   // ── 空字符串 ──────────────────────────────────────────────
 
-  it("空字符串去重结果为空，不调用 replace_selection", async () => {
+  it("空字符串去重结果为空，提示用户且不调用 replace_selection", async () => {
     render(<FloatingToolbar />);
     await showToolbar("");
 
@@ -670,8 +670,9 @@ describe("FloatingToolbar 去重功能", () => {
       fireEvent.click(dedupBtn);
     });
 
-    // 后端 replace_selection 拒绝空字符串，前端对空结果直接 return
+    // 后端 replace_selection 拒绝空字符串：不调用后端命令，改为错误提示避免界面毫无反应
     expect(mockInvoke).not.toHaveBeenCalledWith("replace_selection", expect.anything());
+    expect(screen.getByRole("alert")).toHaveTextContent("去重结果为空，文本未修改");
   });
 
   // ── 仅空白字符 ──────────────────────────────────────────────
@@ -763,7 +764,7 @@ describe("FloatingToolbar 去重功能", () => {
 
   // ── 只有换行符 ──────────────────────────────────────────────
 
-  it("只有换行符的文本按行去重为空字符串，不调用 replace_selection", async () => {
+  it("只有换行符的文本按行去重为空字符串，提示用户且不调用 replace_selection", async () => {
     render(<FloatingToolbar />);
     await showToolbar("\n\n\n");
 
@@ -772,8 +773,9 @@ describe("FloatingToolbar 去重功能", () => {
       fireEvent.click(dedupBtn);
     });
 
-    // split → ["", "", "", ""], 只保留第一个 ""；结果为空，前端直接 return
+    // split → ["", "", "", ""], 只保留第一个 ""；结果为空，改为错误提示避免界面毫无反应
     expect(mockInvoke).not.toHaveBeenCalledWith("replace_selection", expect.anything());
+    expect(screen.getByRole("alert")).toHaveTextContent("去重结果为空，文本未修改");
   });
 
   // ── 可配置粒度：按词 / 按字符 ──────────────────────────────
@@ -852,7 +854,7 @@ describe("FloatingToolbar 去重功能", () => {
     expect(mockInvoke).toHaveBeenCalledWith("replace_selection", { text: "ab" });
   });
 
-  it("按字符逐字去重结果为空时不调用 replace_selection", async () => {
+  it("按字符逐字去重结果为空时提示用户且不调用 replace_selection", async () => {
     render(<FloatingToolbar />);
     await setDedupMode({ granularity: "char", charSubMode: "all" });
     await showToolbar("");
@@ -863,6 +865,7 @@ describe("FloatingToolbar 去重功能", () => {
     });
 
     expect(mockInvoke).not.toHaveBeenCalledWith("replace_selection", expect.anything());
+    expect(screen.getByRole("alert")).toHaveTextContent("去重结果为空，文本未修改");
   });
 });
 
@@ -1607,8 +1610,8 @@ describe("FloatingToolbar 二维码功能", () => {
     expect(mockToDataURL).toHaveBeenCalledWith(
       "hello world",
       expect.objectContaining({
-        width: 256,
-        margin: 2,
+        width: 384,
+        margin: 4,
         errorCorrectionLevel: "M",
       }),
     );
@@ -1739,7 +1742,7 @@ describe("FloatingToolbar 二维码功能", () => {
 
   // ── 超长文本截断 ──────────────────────────────────────────────
 
-  it("超长文本（>2900 字节）自动截断", async () => {
+  it("超长文本（超过二维码 M 级别容量）自动截断", async () => {
     // 构造约 3000 字节的中文文本（每中文字符 3 字节）
     const longText = "你".repeat(1000); // 3000 字节
 
@@ -1755,7 +1758,7 @@ describe("FloatingToolbar 二维码功能", () => {
     expect(mockToDataURL).toHaveBeenCalledTimes(1);
     const passedText = mockToDataURL.mock.calls[0][0] as string;
     const passedBytes = new TextEncoder().encode(passedText);
-    expect(passedBytes.length).toBeLessThanOrEqual(2900);
+    expect(passedBytes.length).toBeLessThanOrEqual(1000);
   });
 
   it("短文本不截断直接传入", async () => {
@@ -1939,7 +1942,7 @@ describe("FloatingToolbar 二维码功能", () => {
     );
   });
 
-  it("二维码宽度为 256", async () => {
+  it("二维码宽度为 384", async () => {
     render(<FloatingToolbar />);
     await showToolbar("test");
 
@@ -1951,7 +1954,7 @@ describe("FloatingToolbar 二维码功能", () => {
     expect(mockToDataURL).toHaveBeenCalledWith(
       "test",
       expect.objectContaining({
-        width: 256,
+        width: 384,
       }),
     );
   });
@@ -3202,6 +3205,20 @@ describe("FloatingToolbar 编号功能", () => {
     expect(screen.getByRole("button", { name: "编号" })).toBeInTheDocument();
   });
 
+  it("空字符串编号结果为空，提示用户且不调用 replace_selection", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("");
+
+    const btn = screen.getByRole("button", { name: "编号" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    // 后端 replace_selection 拒绝空字符串：不调用后端命令，改为错误提示避免界面毫无反应
+    expect(mockInvoke).not.toHaveBeenCalledWith("replace_selection", expect.anything());
+    expect(screen.getByRole("alert")).toHaveTextContent("编号结果为空，文本未修改");
+  });
+
   it("纯图片选区不显示编号按钮", async () => {
     render(<FloatingToolbar />);
     await act(async () => {
@@ -3446,6 +3463,37 @@ describe("FloatingToolbar 朗读进度", () => {
 
     expect(document.querySelector(".toolbar-tts-progress")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "朗读" })).toBeInTheDocument();
+  });
+
+  it("忽略另一请求的 tts-finished 事件", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "tts_get_state") {
+        return Promise.resolve({ hasPlayer: false, paused: false, playing: false });
+      }
+      if (cmd === "tts_get_progress") {
+        return Promise.resolve({ positionMs: 0, durationMs: 0, paused: false });
+      }
+      if (cmd === "tts_speak") {
+        return Promise.resolve(42);
+      }
+      return Promise.resolve();
+    });
+
+    await startSpeaking("hello");
+    await act(async () => {
+      emitMockEvent("tts-finished", { requestId: 41 });
+    });
+
+    expect(document.querySelector(".toolbar-tts-progress")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
   });
 });
 

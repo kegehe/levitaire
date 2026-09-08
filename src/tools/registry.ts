@@ -35,6 +35,16 @@ export interface FloatingTool {
  */
 export const FLOATING_TOOLS: FloatingTool[] = [
   {
+    id: "utility-hub",
+    name: "通用工具",
+    icon: "Grid3x3",
+    description: "打开取色、滚动导航等轻量小工具",
+    category: "screen",
+    defaultEnabled: true,
+    loader: () => import("./utility-hub/UtilityHub"),
+    activation: "immediate",
+  },
+  {
     id: "todo",
     name: "待办清单",
     icon: "ListTodo",
@@ -96,9 +106,9 @@ export const FLOATING_TOOLS: FloatingTool[] = [
   },
   {
     id: "timer",
-    name: "时钟与倒计时",
+    name: "时钟、倒计时、秒表与日历",
     icon: "Timer",
-    description: "桌面时钟与普通倒计时，支持数字和圆环悬浮样式",
+    description: "桌面时钟、倒计时、秒表与月历，支持农历日期、快速切换和分段计时",
     category: "system",
     defaultEnabled: false,
     loader: () => import("./timer/TimerTool"),
@@ -122,6 +132,16 @@ export const FLOATING_TOOLS: FloatingTool[] = [
     category: "text",
     defaultEnabled: false,
     loader: () => import("./quick-input/QuickInputTool"),
+    activation: "immediate",
+  },
+  {
+    id: "sticky-notes",
+    name: "便利贴",
+    icon: "StickyNote",
+    description: "在桌面各处贴便利贴：新建、换色、随手记录，收起不丢失，随时从管理窗唤出",
+    category: "system",
+    defaultEnabled: false,
+    loader: () => import("./sticky-note/StickyNoteManager"),
     activation: "immediate",
   },
 ];
@@ -154,6 +174,7 @@ export const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string }> = [
   { id: "todo", getter: "get_todo_enabled" },
   { id: "recording", getter: "get_recording_enabled" },
   { id: "quick-input", getter: "get_quick_input_enabled" },
+  { id: "sticky-notes", getter: "get_sticky_notes_enabled" },
 ];
 
 /** 获取启用的工具 ID 列表 */

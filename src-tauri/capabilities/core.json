@@ -8,6 +8,8 @@
     "tool-config",
     "orb",
     "palette",
+    "scroll-navigator-overlay",
+    "utility-hub-overlay",
     "screenshot-overlay",
     "monitor-overlay",
     "recording-controls",
@@ -20,7 +22,9 @@
     "update-prompt",
     "context-menu",
     "pin-ocr",
-    "sketch-overlay"
+    "sketch-overlay",
+    "sticky-notes-manager",
+    "sticky-note-*"
   ],
   "permissions": [
     "core:default",
@@ -43,6 +47,7 @@
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
+    "core:window:allow-is-focused",
     "core:webview:allow-set-webview-focus",
     "core:webview:allow-create-webview-window",
     "core:event:default",

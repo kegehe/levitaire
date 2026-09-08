@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -81,7 +82,7 @@ function TodoTool() {
   const [confirmDeleteListId, setConfirmDeleteListId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [filter, setFilter] = useState<"all" | "today" | "completed" | "trash">("all");
-  const [sortMode, setSortMode] = useState<"priority" | "manual">("priority");
+  const [sortMode, setSortMode] = useState<"priority" | "manual">("manual");
   const [dueAt, setDueAt] = useState("");
   const [remindAt, setRemindAt] = useState("");
   const [priority, setPriority] = useState<TodoPriority>("normal");
@@ -104,14 +105,22 @@ function TodoTool() {
   const [editRemindAt, setEditRemindAt] = useState("");
   const [undoItem, setUndoItem] = useState<TodoItem | null>(null);
   const [lastReminder, setLastReminder] = useState<TodoItem | null>(null);
+  const [showSnoozePicker, setShowSnoozePicker] = useState(false);
+  const [snoozeAt, setSnoozeAt] = useState("");
   const [activeFocusTodoId, setActiveFocusTodoId] = useState<string | null>(null);
   const [focusedTodoId, setFocusedTodoId] = useState<string | null>(null);
   const [ioMessage, setIoMessage] = useState("");
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [dragOverBefore, setDragOverBefore] = useState(false);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const itemsRef = useRef<TodoItem[]>([]);
   itemsRef.current = items;
+  // 拖拽期间标记：用于抑制 refresh 覆盖本地实时重排、判断是否产生净位移
+  const dragIdRef = useRef<string | null>(null);
+  const dragStartIndexRef = useRef(-1);
   const setExpandedId = useCallback((value: string | null) => {
     const target = value ? itemsRef.current.find((item) => item.id === value) : undefined;
     if (target && !hasItemDetails(target)) return;
@@ -120,7 +129,11 @@ function TodoTool() {
   const win = useMemo(() => getCurrentWebviewWindow(), []);
 
   const refresh = useCallback(() => {
-    void invoke<TodoItem[]>("get_todos", { includeCompleted: true, sortMode }).then((value) => setItems(Array.isArray(value) ? value : [])).catch(console.error);
+    void invoke<TodoItem[]>("get_todos", { includeCompleted: true, sortMode }).then((value) => {
+      // 拖拽期间保留本地实时重排，避免服务端顺序覆盖导致 beforeId 错位
+      if (dragIdRef.current) return;
+      setItems(Array.isArray(value) ? value : []);
+    }).catch(console.error);
     void invoke<TodoItem[]>("get_deleted_todos").then((value) => setDeletedItems(Array.isArray(value) ? value : [])).catch(console.error);
     void invoke<TodoList[]>("get_todo_lists").then((value) => {
       const next = Array.isArray(value) ? value : [];
@@ -186,6 +199,12 @@ function TodoTool() {
 
   useEffect(() => persistWindowPositionOnMove("todo-overlay"), []);
 
+  // 新提醒到来或 toast 被关闭/聚焦消失时复位自定义延后面板，避免上一轮状态残留。
+  useEffect(() => {
+    setShowSnoozePicker(false);
+    setSnoozeAt("");
+  }, [lastReminder]);
+
   useEffect(() => () => {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
   }, []);
@@ -198,7 +217,7 @@ function TodoTool() {
       if (repeatRule !== "none") input.repeatRule = repeatRule;
       if (selectedListId !== INBOX_LIST_ID) input.listId = selectedListId;
       await invoke("create_todo", { input });
-      setTitle(""); setTags(""); setPriority("normal"); setRepeatRule("none"); setDueAt(""); setRemindAt(""); setShowAddOptions(false); refresh(); inputRef.current?.focus();
+      setTitle(""); setTags(""); setPriority("normal"); setRepeatRule("none"); setDueAt(""); setRemindAt(""); setShowAddOptions(false); inputRef.current?.focus();
     } catch (error) { console.error("create todo failed", error); setIoMessage("添加任务失败"); }
   };
 
@@ -209,25 +228,24 @@ function TodoTool() {
       const list = await invoke<TodoList>("create_todo_list", { input: { name } });
       setNewListName("");
       if (list?.id) setSelectedListId(list.id);
-      refresh();
     } catch (error) { console.error("create todo list failed", error); setIoMessage("创建清单失败"); }
   };
 
   const saveListName = async (id: string) => {
     const name = editListName.trim();
     if (!name || id === INBOX_LIST_ID) return;
-    try { await invoke("update_todo_list", { id, input: { name } }); setEditingListId(null); refresh(); }
+    try { await invoke("update_todo_list", { id, input: { name } }); setEditingListId(null); }
     catch (error) { console.error("update todo list failed", error); setIoMessage("重命名清单失败"); }
   };
 
   const deleteList = async (id: string) => {
     if (id === INBOX_LIST_ID) return;
-    try { await invoke("delete_todo_list", { id }); setConfirmDeleteListId(null); setSelectedListId(INBOX_LIST_ID); refresh(); }
+    try { await invoke("delete_todo_list", { id }); setConfirmDeleteListId(null); setSelectedListId(INBOX_LIST_ID); }
     catch (error) { console.error("delete todo list failed", error); setIoMessage("删除清单失败"); }
   };
 
   const purgeDeleted = async () => {
-    try { await invoke("purge_deleted_todos"); refresh(); }
+    try { await invoke("purge_deleted_todos"); }
     catch (error) { console.error("purge deleted todos failed", error); setIoMessage("清空回收站失败"); }
   };
 
@@ -237,13 +255,79 @@ function TodoTool() {
   };
 
   const importTodos = async () => {
-    try { if (await invoke<boolean>("import_todos")) { setIoMessage("Imported"); refresh(); } }
+    try { if (await invoke<boolean>("import_todos")) { setIoMessage("Imported"); } }
     catch (error) { console.error("import todos failed", error); setIoMessage("Import failed"); }
   };
 
-  const reorderTodo = async (id: string, direction: -1 | 1) => {
-    try { await invoke("reorder_todos", { id, direction }); refresh(); }
-    catch (error) { console.error("reorder todo failed", error); setIoMessage("调整顺序失败"); }
+  // 拖拽排序依赖 items 的 sort_order 顺序（beforeId 取同组下一项），
+  // 仅手动排序模式下 items 按 sort_order 排列，故优先级排序下禁用拖拽。
+  const canDrag = filter !== "trash" && filter !== "today" && sortMode === "manual";
+
+  const getInsertion = (list: TodoItem[], fromId: string, targetId: string, clientY: number) => {
+    const from = list.findIndex((item) => item.id === fromId);
+    const to = list.findIndex((item) => item.id === targetId);
+    if (from < 0 || to < 0 || from === to) return null;
+    const targetEl = itemRefs.current[targetId];
+    const rowEl = targetEl?.querySelector<HTMLElement>(".todo-item-row");
+    if (!rowEl) return null;
+    const rect = rowEl.getBoundingClientRect();
+    // 用光标相对目标行的上下半区决定插前/插后；测试或无指针环境下退化为按拖拽方向判断。
+    const hasPointer = rect.height > 0 && Number.isFinite(clientY);
+    const before = hasPointer ? clientY < rect.top + rect.height / 2 : from > to;
+    const next = [...list];
+    const [moved] = next.splice(from, 1);
+    const targetPos = next.findIndex((item) => item.id === targetId);
+    const insertAt = before ? targetPos : targetPos + 1;
+    if (insertAt === from) return null;
+    next.splice(insertAt, 0, moved);
+    return { before, next };
+  };
+
+  const handleDragStart = (event: DragEvent, itemId: string) => {
+    if (!canDrag) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", itemId);
+    dragIdRef.current = itemId;
+    dragStartIndexRef.current = items.findIndex((item) => item.id === itemId);
+    setDragId(itemId);
+  };
+
+  const handleDragOver = (event: DragEvent, targetId: string) => {
+    if (!canDrag || !dragId || dragId === targetId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDragOverId(targetId);
+    const result = getInsertion(items, dragId, targetId, event.clientY);
+    if (!result) return;
+    setDragOverBefore(result.before);
+    setItems(result.next);
+  };
+
+  const handleDragEnd = async () => {
+    const draggedId = dragId;
+    setDragId(null);
+    setDragOverId(null);
+    dragIdRef.current = null;
+    if (!draggedId) return;
+    const finalIndex = items.findIndex((item) => item.id === draggedId);
+    const target = items.find((item) => item.id === draggedId);
+    // 无净位移（含拖回原位/未移动）不提交，避免整组 sort_order 被无意义重编号
+    if (!target || finalIndex === dragStartIndexRef.current) { refresh(); return; }
+    const targetListId = target.listId ?? INBOX_LIST_ID;
+    const targetStatus = target.status;
+    // 以本地重排后的 items 定位拖拽项后第一个同组任务作为插入锚点，
+    // 与后端 move_to 的 peers 分组保持一致（搜索过滤时不会被过滤项隔断）。
+    let beforeId: string | null = null;
+    for (let i = finalIndex + 1; i < items.length; i++) {
+      const candidate = items[i];
+      if ((candidate.listId ?? INBOX_LIST_ID) === targetListId && candidate.status === targetStatus) {
+        beforeId = candidate.id;
+        break;
+      }
+    }
+    try {
+      await invoke("move_todo", { id: draggedId, beforeId });
+    } catch (error) { console.error("move todo failed", error); setIoMessage("调整顺序失败"); refresh(); }
   };
 
   const startFocus = async (id: string) => {
@@ -256,13 +340,13 @@ function TodoTool() {
   };
 
   const toggleTodo = async (item: TodoItem) => {
-    try { await invoke("set_todo_completed", { id: item.id, completed: item.status !== "completed" }); refresh(); }
+    try { await invoke("set_todo_completed", { id: item.id, completed: item.status !== "completed" }); }
     catch (error) { console.error("update todo failed", error); setIoMessage("更新任务失败"); }
   };
 
   const removeTodo = async (id: string) => {
     const item = items.find((candidate) => candidate.id === id);
-    try { await invoke("delete_todo", { id }); refresh(); }
+    try { await invoke("delete_todo", { id }); }
     catch (error) { console.error("delete todo failed", error); setIoMessage("删除任务失败"); return; }
     if (item) {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
@@ -281,16 +365,38 @@ function TodoTool() {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
     setUndoItem(null);
     undoTimerRef.current = null;
-    try { await invoke("restore_todo", { id: item.id }); refresh(); }
+    try { await invoke("restore_todo", { id: item.id }); }
     catch (error) { console.error("restore todo failed", error); setIoMessage("恢复任务失败"); }
   };
 
+  // toast 停留期间任务可能已被标记完成：snooze_todo 后端会拒绝相对延后，
+  // 而绝对延后走 update_todo 不会校验状态，故两类延后统一前置已完成拦截。
+  const isCompletedTodo = (id: string) => itemsRef.current.find((candidate) => candidate.id === id)?.status === "completed";
+
   const snoozeTodo = async (id: string, minutes: number) => {
+    if (isCompletedTodo(id)) { setIoMessage("已完成任务不能延后提醒"); return; }
     try {
       await invoke("snooze_todo", { id, minutes });
       setLastReminder(null);
-      refresh();
     } catch (error) { console.error("snooze todo failed", error); setIoMessage("延后提醒失败"); }
+  };
+
+  // 绝对时间延后：update_todo 会把 remind_at 设为任意目标时间并重置已提醒标记，
+  // 因此可支持“明天/后天/任意具体时刻”，不受 snooze_todo 1440 分钟上限约束。
+  const snoozeTodoAt = async (id: string, local: string) => {
+    if (isCompletedTodo(id)) { setIoMessage("已完成任务不能延后提醒"); return; }
+    const iso = toIso(local);
+    if (!iso) { setIoMessage("请选择延后时间"); return; }
+    if (new Date(iso).getTime() <= Date.now()) { setIoMessage("延后时间需晚于当前时间"); return; }
+    try {
+      await invoke("update_todo", { id, input: { remindAt: iso } });
+      setLastReminder(null);
+    } catch (error) { console.error("snooze todo failed", error); setIoMessage("延后提醒失败"); }
+  };
+
+  const openSnoozePicker = () => {
+    setSnoozeAt(dateAt(1, 9));
+    setShowSnoozePicker(true);
   };
 
   const focusTodo = useCallback((id: string) => {
@@ -327,7 +433,7 @@ function TodoTool() {
         input: { title: value, notes: editNotes, priority: editPriority, repeatRule: editRepeatRule, tags: editTags.split(","), listId: editListId, dueAt: toIso(editDueAt) ?? null, remindAt: toIso(editRemindAt) ?? null },
       });
       setEditingId(null);
-      refresh();
+      setExpandedId(null);
     } catch (error) { console.error("edit todo failed", error); setIoMessage("保存任务失败"); }
   };
 
@@ -418,18 +524,28 @@ function TodoTool() {
         <div className="todo-list">
           {filter === "trash" && deletedItems.length > 0 && <button className="todo-empty-trash" onClick={() => void purgeDeleted()}>清空回收站</button>}
           {visibleItems.length === 0 ? <div className="todo-empty">没有任务</div> : visibleItems.map((item) => (
-            <div ref={(node) => { itemRefs.current[item.id] = node; }} className={`todo-item${item.status === "completed" ? " is-completed" : ""}${focusedTodoId === item.id ? " is-focused" : ""}`} key={item.id}>
-              <div className="todo-item-row"><button className="todo-check" aria-label={filter === "trash" ? "Restore task" : item.status === "completed" ? "取消完成" : "完成任务"} onClick={() => filter === "trash" ? void undoDelete(item) : void toggleTodo(item)}><Icon name="Check" size={13} /></button><button className="todo-item-main" onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}><span className="todo-item-title">{item.title}</span><span className="todo-item-summary">{item.priority && item.priority !== "normal" && <span className={`todo-priority priority-${item.priority}`}>{item.priority === "urgent" ? "紧急" : item.priority === "high" ? "高" : "低"}</span>}{item.dueAt && <span className={`todo-due${new Date(item.dueAt) < new Date() && item.status === "active" ? " is-overdue" : ""}`}>{formatDue(item.dueAt)}</span>}</span></button><div className="todo-item-actions">{filter === "trash" ? <button className="todo-edit" aria-label="Restore task" onClick={() => void undoDelete(item)}><Icon name="Undo2" size={13} /></button> : <><button className={`todo-edit${activeFocusTodoId === item.id ? " is-active-focus" : ""}`} aria-label="Start focus" onClick={() => void startFocus(item.id)}><Icon name="Timer" size={13} /></button><button className="todo-edit" aria-label="编辑任务" onClick={() => startEditing(item)}><Icon name="Pencil" size={13} /></button>{sortMode === "manual" && <div className="todo-reorder-actions"><button className="todo-edit" aria-label="Move task up" onClick={() => void reorderTodo(item.id, -1)}><Icon name="ArrowUp" size={12} /></button><button className="todo-edit" aria-label="Move task down" onClick={() => void reorderTodo(item.id, 1)}><Icon name="ArrowDown" size={12} /></button></div>}<button className="todo-delete" aria-label="删除任务" onClick={() => void removeTodo(item.id)}><Icon name="Trash2" size={14} /></button></>}</div></div>
+            <div ref={(node) => { itemRefs.current[item.id] = node; }} className={`todo-item${item.status === "completed" ? " is-completed" : ""}${editingId === item.id ? " is-editing" : ""}${focusedTodoId === item.id ? " is-focused" : ""}${dragId === item.id ? " is-dragging" : ""}${dragOverId === item.id ? (dragOverBefore ? " is-drag-over-before" : " is-drag-over-after") : ""}`} key={item.id}>
+              <div className={`todo-item-row${canDrag ? " is-draggable" : ""}`} draggable={canDrag} onDragStart={(event) => handleDragStart(event, item.id)} onDragOver={(event) => handleDragOver(event, item.id)} onDragEnd={() => void handleDragEnd()}><button className="todo-check" aria-label={filter === "trash" ? "Restore task" : item.status === "completed" ? "取消完成" : "完成任务"} onClick={() => filter === "trash" ? void undoDelete(item) : void toggleTodo(item)}><Icon name="Check" size={13} /></button><button className="todo-item-main" onClick={() => { if (editingId !== item.id) setExpandedId(expandedId === item.id ? null : item.id); }}><span className="todo-item-title">{item.title}</span><span className="todo-item-summary">{item.priority && item.priority !== "normal" && <span className={`todo-priority priority-${item.priority}`}>{item.priority === "urgent" ? "紧急" : item.priority === "high" ? "高" : "低"}</span>}{item.dueAt && <span className={`todo-due${new Date(item.dueAt) < new Date() && item.status === "active" ? " is-overdue" : ""}`}>{formatDue(item.dueAt)}</span>}</span></button><div className="todo-item-actions">{filter === "trash" ? <button className="todo-edit" aria-label="Restore task" onClick={() => void undoDelete(item)}><Icon name="Undo2" size={13} /></button> : <><button className={`todo-edit${activeFocusTodoId === item.id ? " is-active-focus" : ""}`} aria-label="Start focus" onClick={() => void startFocus(item.id)}><Icon name="Timer" size={13} /></button><button className="todo-edit" aria-label="编辑任务" onClick={() => startEditing(item)}><Icon name="Pencil" size={13} /></button><button className="todo-delete" aria-label="删除任务" onClick={() => void removeTodo(item.id)}><Icon name="Trash2" size={14} /></button></>}</div></div>
               {expandedId === item.id && (editingId === item.id ? <div className="todo-item-details todo-edit-fields"><input aria-label="编辑任务标题" value={editTitle} onChange={(event) => setEditTitle(event.target.value)} maxLength={500} /><textarea aria-label="编辑任务备注" value={editNotes} onChange={(event) => setEditNotes(event.target.value)} maxLength={2000} placeholder="备注（可选）" /><div className="todo-edit-grid"><select aria-label="编辑任务优先级" value={editPriority} onChange={(event) => setEditPriority(event.target.value as TodoPriority)}><option value="normal">普通优先级</option><option value="low">低优先级</option><option value="high">高优先级</option><option value="urgent">紧急</option></select><select aria-label="编辑任务重复" value={editRepeatRule} onChange={(event) => setEditRepeatRule(event.target.value as TodoRepeatRule)}><option value="none">不重复</option><option value="daily">每天</option><option value="weekly">每周</option><option value="workdays">工作日</option></select><input aria-label="编辑任务标签" value={editTags} onChange={(event) => setEditTags(event.target.value)} placeholder="标签，用逗号分隔" /><select aria-label="编辑任务清单" value={editListId} onChange={(event) => setEditListId(event.target.value)}>{lists.map((list) => <option key={list.id} value={list.id}>{displayListName(list)}</option>)}</select></div><div className="todo-date-row">{renderDateField("截止", editDueAt, setEditDueAt)}{renderDateField("提醒", editRemindAt, setEditRemindAt)}</div><div className="todo-edit-buttons"><button onClick={() => void saveEditing(item.id)}>保存</button><button onClick={() => { setEditingId(null); setExpandedId(null); }}>取消</button></div></div> : <div className="todo-item-details">{item.notes && <div>{item.notes}</div>}{item.remindAt ? `提醒 ${formatDue(item.remindAt)}` : "未设置提醒"}</div>)}
             </div>
           ))}
         </div>
         {lastReminder && <div className="todo-reminder-toast" role="alert">
-          <button className="todo-reminder-focus" onClick={() => focusTodo(lastReminder.id)}>{lastReminder.title}</button>
-          <div>
-            {[5, 10, 30].map((minutes) => <button key={minutes} onClick={() => void snoozeTodo(lastReminder.id, minutes)}>{minutes}分后</button>)}
-            <button aria-label="关闭提醒" onClick={() => setLastReminder(null)}><Icon name="X" size={13} /></button>
+          <div className="todo-reminder-head">
+            <button className="todo-reminder-focus" onClick={() => focusTodo(lastReminder.id)}>{lastReminder.title}</button>
+            <button className="todo-reminder-close" aria-label="关闭提醒" onClick={() => setLastReminder(null)}><Icon name="X" size={13} /></button>
           </div>
+          {showSnoozePicker ? <div className="todo-reminder-custom">
+            <input aria-label="自定义延后时间" type="datetime-local" value={snoozeAt} min={localDateTime(new Date())} onChange={(event) => setSnoozeAt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void snoozeTodoAt(lastReminder.id, snoozeAt); }} />
+            <button onClick={() => void snoozeTodoAt(lastReminder.id, snoozeAt)}>确定</button>
+            <button onClick={() => setShowSnoozePicker(false)}>取消</button>
+          </div> : <div className="todo-reminder-snooze">
+            <span>延后：</span>
+            {[5, 10, 30].map((minutes) => <button key={minutes} onClick={() => void snoozeTodo(lastReminder.id, minutes)}>{minutes}分</button>)}
+            <button onClick={() => void snoozeTodo(lastReminder.id, 60)}>1小时</button>
+            <button onClick={() => void snoozeTodoAt(lastReminder.id, dateAt(1, 9))}>明天 9:00</button>
+            <button onClick={openSnoozePicker}>自定义</button>
+          </div>}
         </div>}
         {undoItem && <div className="todo-undo-toast" role="status"><span>任务已删除</span><button onClick={() => void undoDelete()}>撤销</button></div>}
         {ioMessage && <div className="todo-io-toast" role="status">{ioMessage}<button aria-label="Dismiss message" onClick={() => setIoMessage("")}><Icon name="X" size={12} /></button></div>}

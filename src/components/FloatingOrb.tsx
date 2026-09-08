@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useCallback, useRef, useState } from "react
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
-import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
@@ -24,8 +23,10 @@ import "./FloatingOrb.css";
 
 function FloatingOrb() {
   const win = getCurrentWebviewWindow();
+  const orbRef = useRef<HTMLDivElement | null>(null);
   const windowPosOnMouseDown = useRef<PhysicalPosition | null>(null);
   const mouseUpTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const paletteOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [orbIcon, setOrbIcon] = useState<OrbIconId>(() => getOrbIcon());
 
   // Migrate an existing local preference once so the tray icon is correct even
@@ -97,29 +98,74 @@ function FloatingOrb() {
   // 监听录制全局热键触发：后端 hotkey 线程 emit recording-hotkey-triggered 或
   // ensure-overlay-and-start-recording，由常驻 orb 窗口接收并处理
   useEffect(() => {
+    let disposed = false;
+    let screenshotStartQueue = Promise.resolve();
+    let recordingStartQueue = Promise.resolve();
+
     const startScreenshot = async () => {
-      try {
-        await ensureScreenshotWindow();
-        const pending = await invoke<boolean>("consume_screenshot_start_pending");
-        if (pending) await invoke("start_screenshot");
-      } catch (err) {
-        console.error("screenshot hotkey failed:", err);
-      }
+      const task = screenshotStartQueue.then(async () => {
+        if (disposed) return;
+        let overlayReady = false;
+        try {
+          const pending = await invoke<boolean>("consume_screenshot_start_pending");
+          if (!pending || disposed) return;
+          await ensureScreenshotWindow();
+          overlayReady = true;
+          if (!disposed) await invoke("start_screenshot");
+        } catch (err) {
+          console.error("screenshot hotkey failed:", err);
+          // start_screenshot itself reports native startup failures. This
+          // catch only reports window creation/readiness failures, for which
+          // the command was never reached.
+          if (!overlayReady) {
+            const message =
+              typeof err === "string"
+                ? err
+                : ((err as { message?: string })?.message ?? "截图工具加载失败，请重试");
+            void invoke("show_screenshot_error", { message }).catch((dialogError) =>
+              console.error("failed to show screenshot error:", dialogError),
+            );
+          }
+        }
+      });
+      screenshotStartQueue = task;
+      await task;
     };
     const startRecording = async () => {
-      try {
-        await ensureScreenshotWindow();
-        // Native startup waits for the Win32 HWND. The frontend WebviewWindow
-        // API has no hwnd() method, so polling it delayed every first launch.
-        await invoke("start_recording_select");
-      } catch (err) {
-        console.error("recording hotkey failed:", err);
-      }
+      const task = recordingStartQueue.then(async () => {
+        if (disposed) return;
+        try {
+          const pending = await invoke<boolean>("consume_recording_select_start_pending");
+          if (!pending || disposed) return;
+          // Native startup waits for the Win32 HWND. The frontend WebviewWindow
+          // API has no hwnd() method, so polling it delayed every first launch.
+          // A pending hotkey is consumed after the overlay is ready, so startup
+          // events cannot be lost while the orb WebView is mounting.
+          await ensureScreenshotWindow();
+          if (!disposed) await invoke("start_recording_select");
+        } catch (err) {
+          console.error("recording hotkey failed:", err);
+        }
+      });
+      recordingStartQueue = task;
+      await task;
     };
     const un1 = listen("recording-hotkey-triggered", startRecording);
     const un2 = listen("ensure-overlay-and-start-recording", startRecording);
     const un3 = listen("ensure-overlay-and-start-screenshot", startScreenshot);
+    // Consume markers only after all event listeners are registered. This
+    // recovers hotkeys sent during startup without racing a live event.
+    void Promise.all([un1, un2, un3])
+      .then(async () => {
+        if (disposed) return;
+        await win.show();
+        if (disposed) return;
+        await invoke("mark_orb_ready");
+        await Promise.all([startScreenshot(), startRecording()]);
+      })
+      .catch((err) => console.error("hotkey startup recovery failed:", err));
     return () => {
+      disposed = true;
       un1.then((fn) => fn());
       un2.then((fn) => fn());
       un3.then((fn) => fn());
@@ -187,7 +233,7 @@ function FloatingOrb() {
   // Listen for orb-mouseup event from the Rust mouse hook
   // (startDragging() consumes the DOM mouseup, so we use the hook instead)
   // payload = 是否为点击（非拖拽），由后端基于鼠标位移判定，比前端窗口位移判定更可靠
-  useEffect(() => {
+  useLayoutEffect(() => {
     const unlistenPromise = win.listen<boolean>("orb-mouseup", async (event) => {
       // Clear the safety timeout since we received the event
       if (mouseUpTimeout.current) {
@@ -197,7 +243,14 @@ function FloatingOrb() {
       const clicked = event.payload === true;
       if (clicked) {
         // 点击悬浮球：打开卡片工具选择器面板
-        invoke("show_palette").catch(console.error);
+        // The low-level mouse hook reports button-up before Windows finishes
+        // activating the orb/drag capture. Defer the palette slightly so its
+        // focus is not immediately lost by the tail of that native event.
+        if (paletteOpenTimer.current) clearTimeout(paletteOpenTimer.current);
+        paletteOpenTimer.current = setTimeout(() => {
+          paletteOpenTimer.current = null;
+          invoke("show_palette").catch(console.error);
+        }, 80);
         windowPosOnMouseDown.current = null;
         return;
       }
@@ -211,87 +264,32 @@ function FloatingOrb() {
       if (mouseUpTimeout.current) {
         clearTimeout(mouseUpTimeout.current);
       }
+      if (paletteOpenTimer.current) {
+        clearTimeout(paletteOpenTimer.current);
+      }
     };
   }, [win]);
 
-  // 右键快捷菜单：与托盘菜单互补，提供高频操作入口（截图、录屏、设置、隐藏浮球、退出）。
-  // orb 窗口仅用于承载悬浮球，右键菜单使用独立原生窗口，
-  // 故用 Tauri 原生菜单 popup（浮于窗口之上）。菜单构建一次缓存复用：
-  // Promise 缓存保证并发右键共享同一构建，构建失败自动清除缓存以便下次重试。
-  /* legacy native-menu builder retained for compatibility with older tests */
-  const contextMenuPromiseRef = useRef<Promise<Menu> | null>(null);
-  const getContextMenu = useCallback(() => {
-    if (!contextMenuPromiseRef.current) {
-      contextMenuPromiseRef.current = (async () => {
-        const screenshotItem = await MenuItem.new({
-          id: "screenshot",
-          text: "屏幕截图",
-          action: async () => {
-            try {
-              await ensureScreenshotWindow();
-              await invoke("start_screenshot");
-            } catch (err) {
-              console.error("右键菜单截图失败:", err);
-            }
-          },
-        });
-        const recordingItem = await MenuItem.new({
-          id: "recording",
-          text: "GIF/录屏",
-          action: async () => {
-            try {
-              await ensureScreenshotWindow();
-              await invoke("start_recording_select");
-            } catch (err) {
-              console.error("右键菜单录屏失败:", err);
-            }
-          },
-        });
-        const settingsItem = await MenuItem.new({
-          id: "open-settings",
-          text: "设置",
-          action: () => {
-            invoke("show_settings").catch((err) => console.error("右键菜单打开设置失败:", err));
-          },
-        });
-        const hideOrbItem = await MenuItem.new({
-          id: "hide-orb",
-          text: "隐藏悬浮球",
-          action: () => {
-            win.hide().catch(console.error);
-          },
-        });
-        const quitItem = await MenuItem.new({
-          id: "quit-app",
-          text: "退出",
-          action: () => {
-            invoke("exit_app").catch((err) => console.error("右键菜单退出失败:", err));
-          },
-        });
-        const separator1 = await PredefinedMenuItem.new({ item: "Separator" });
-        const separator2 = await PredefinedMenuItem.new({ item: "Separator" });
-        return Menu.new({
-          items: [
-            screenshotItem,
-            recordingItem,
-            separator1,
-            settingsItem,
-            hideOrbItem,
-            separator2,
-            quitItem,
-          ],
-        });
-      })().catch((err) => {
-        // 构建失败时清除缓存，允许下次右键重新构建
-        contextMenuPromiseRef.current = null;
-        throw err;
-      });
-    }
-    return contextMenuPromiseRef.current;
-  }, [win]);
+  // 圆形热区判定：交互半径 = 视觉球容器半径 + 2px 容差，覆盖 hover 放大
+  // （scale 1.05）后的球边缘；与后端 mouse.rs ORB_HIT_RADIUS_LOGICAL(30) 保持一致，
+  // 使点击球外透明留白不会触发拖拽 / 右键菜单 / 弹面板。坐标缺失（测试环境）时按圆内处理。
+  const isPointWithinOrb = useCallback((clientX: number, clientY: number) => {
+    const el = orbRef.current;
+    if (!el) return true;
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return true;
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const radius = rect.width / 2 + 2;
+    const dx = clientX - cx;
+    const dy = clientY - cy;
+    return dx * dx + dy * dy <= radius * radius;
+  }, []);
 
   const handleContextMenu = useCallback(
     async (e: React.MouseEvent) => {
+      // 圆形热区判定：右键球外透明留白不弹出菜单
+      if (!isPointWithinOrb(e.clientX, e.clientY)) return;
       e.preventDefault();
       try {
         const [position, scaleFactor] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
@@ -300,26 +298,20 @@ function FloatingOrb() {
           x: position.x + e.clientX * scaleFactor,
           y: position.y + e.clientY * scaleFactor,
         });
-        // Keep the legacy menu mock path available to the existing unit tests;
-        // production always uses the themed context-menu window above.
-        const runtimeMode = (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE;
-        if (runtimeMode === "test") {
-          const menu = await getContextMenu();
-          await menu.popup();
-        }
       } catch (err) {
         console.error("悬浮球右键菜单打开失败:", err);
       }
     },
-    [win],
+    [isPointWithinOrb, win],
   );
-  void getContextMenu;
 
   // Handle mousedown: record window position and start dragging
   const handleMouseDown = useCallback(
     async (e: React.MouseEvent) => {
       // Only react to primary button
       if (e.button !== 0) return;
+      // 圆形热区判定：点击球外透明留白不进入拖拽，避免空白处拖走悬浮球
+      if (!isPointWithinOrb(e.clientX, e.clientY)) return;
       e.preventDefault();
       // Clear any stale state from previous interactions
       if (mouseUpTimeout.current) {
@@ -344,11 +336,12 @@ function FloatingOrb() {
         console.error("Failed to start dragging:", err);
       }
     },
-    [win],
+    [isPointWithinOrb, win],
   );
 
   return (
     <div
+      ref={orbRef}
       className={`orb-container ${isPaletteOpen ? "is-open" : ""}`}
       onMouseDown={handleMouseDown}
       onContextMenu={handleContextMenu}

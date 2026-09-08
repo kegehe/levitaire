@@ -204,6 +204,12 @@ pub struct AppConfig {
     /// 快速输入转盘预设提示词（JSON 字符串，前端解析）：[{"label":"","text":""}]。空串表示无预设
     #[serde(default)]
     pub quick_input_snippets: String,
+    /// 快速输入转盘预设提示词是否启用（关闭后转盘不再展示预设词，已保存内容保留）。默认 true
+    #[serde(default = "default_quick_input_snippets_enabled")]
+    pub quick_input_snippets_enabled: bool,
+    /// 便利贴工具是否启用（仅启用时 palette 卡片可激活）。默认 false，避免新增常驻窗口打扰现有用户。
+    #[serde(default)]
+    pub sticky_notes_enabled: bool,
 }
 
 fn default_quick_input_enabled() -> bool {
@@ -237,6 +243,10 @@ fn default_quick_input_history_limit() -> usize {
 }
 
 fn default_quick_input_history_enabled() -> bool {
+    true
+}
+
+fn default_quick_input_snippets_enabled() -> bool {
     true
 }
 
@@ -344,6 +354,8 @@ impl Default for AppConfig {
             quick_input_history_limit: default_quick_input_history_limit(),
             quick_input_history_enabled: default_quick_input_history_enabled(),
             quick_input_snippets: String::new(),
+            quick_input_snippets_enabled: default_quick_input_snippets_enabled(),
+            sticky_notes_enabled: false,
         }
     }
 }
@@ -585,8 +597,8 @@ impl ConfigManager {
     }
 
     pub fn update_theme_preferences(&self, preferences: ThemePreferences) -> Result<(), String> {
-        if preferences.theme != "light" && preferences.theme != "dark" {
-            return Err("主题必须是 light 或 dark".to_string());
+        if !matches!(preferences.theme.as_str(), "light" | "dark" | "system") {
+            return Err("主题必须是 light、dark 或 system".to_string());
         }
         if !matches!(
             preferences.accent.as_str(),
@@ -1457,6 +1469,46 @@ impl ConfigManager {
                 .lock()
                 .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.quick_input_snippets = snippets;
+        }
+        self.save_config()
+    }
+
+    /// 获取快速输入转盘预设提示词是否启用
+    pub fn get_quick_input_snippets_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_snippets_enabled)
+    }
+
+    /// 更新快速输入转盘预设提示词启用状态并持久化
+    pub fn update_quick_input_snippets_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_snippets_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    /// 获取便利贴工具启用状态
+    pub fn get_sticky_notes_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.sticky_notes_enabled)
+    }
+
+    /// 更新便利贴工具启用状态并持久化
+    pub fn update_sticky_notes_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.sticky_notes_enabled = enabled;
         }
         self.save_config()
     }

@@ -12,9 +12,13 @@ export type ToolIconName =
   | "Compass"
   | "Timer"
   | "Pencil"
+  | "Palette"
+  | "Scroll"
   | "ListTodo"
   | "Check"
-  | "GripVertical";
+  | "GripVertical"
+  | "Grid3x3"
+  | "StickyNote";
 
 interface ToolIconProps {
   name: ToolIconName;
@@ -62,6 +66,16 @@ function ToolIcon({ name, size = 20, className = "", style }: ToolIconProps) {
       return (
         <svg {...common}>
           <path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01" strokeWidth={2.8} />
+        </svg>
+      );
+
+    case "Grid3x3":
+      return (
+        <svg {...common}>
+          <rect x="4" y="4" width="6" height="6" rx="1" />
+          <rect x="14" y="4" width="6" height="6" rx="1" />
+          <rect x="4" y="14" width="6" height="6" rx="1" />
+          <rect x="14" y="14" width="6" height="6" rx="1" />
         </svg>
       );
     // 文字工具栏 — 文档 + 闪烁星标（AI 优化）
@@ -157,6 +171,34 @@ function ToolIcon({ name, size = 20, className = "", style }: ToolIconProps) {
         <svg {...common}>
           <path d="M4 20l4.2-1 9.6-9.6a2 2 0 0 0-2.8-2.8L5.4 16.2z" />
           <path d="M13.5 7.5l3 3" />
+        </svg>
+      );
+
+    case "Palette":
+      return (
+        <svg {...common}>
+          <path d="M12 3.5a8.5 8.5 0 0 0 0 17h1.8a2.2 2.2 0 0 0 0-4.4h-.9a1.9 1.9 0 0 1 0-3.8H15a5.5 5.5 0 0 0 5.5-5.5A8.5 8.5 0 0 0 12 3.5Z" />
+          <circle cx="7.5" cy="10" r=".9" fill="currentColor" stroke="none" />
+          <circle cx="9.5" cy="6.8" r=".9" fill="currentColor" stroke="none" />
+          <circle cx="14" cy="6.8" r=".9" fill="currentColor" stroke="none" />
+        </svg>
+      );
+
+    case "Scroll":
+      return (
+        <svg {...common}>
+          <path d="M6 4h12M6 20h12M8 8h8M8 12h8M8 16h8" />
+          <path d="m18.5 7 2-2 2 2M20.5 5v14M18.5 17l2 2 2-2" />
+        </svg>
+      );
+
+    // 便利贴 — 便签纸（右上折角 + 文字行）
+    case "StickyNote":
+      return (
+        <svg {...common}>
+          <path d="M6 3.5h9l4 4V20.5H6z" />
+          <path d="M15 3.5V7.5h4" />
+          <path d="M9 12h6M9 15.5h6M9 9h2.5" />
         </svg>
       );
 

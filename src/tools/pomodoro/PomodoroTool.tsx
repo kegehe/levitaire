@@ -30,6 +30,13 @@ interface PomodoroStatePayload {
   active_todo_id?: string | null;
 }
 
+/** get_todos 返回项中本组件关心的字段 */
+interface FocusTodoItem {
+  id: string;
+  title: string;
+  status: string;
+}
+
 const RING_RADIUS = 52;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
@@ -48,6 +55,7 @@ function PomodoroTool() {
   const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [state, setState] = useState<PomodoroStatePayload | null>(null);
   const [config, setConfig] = useState<PomodoroConfig>(DEFAULT_POMODORO_CONFIG);
+  const [focusTitle, setFocusTitle] = useState<string | null>(null);
   const actionPending = useRef(false);
 
   const stage: PomodoroStage = state?.stage ?? "focus";
@@ -122,6 +130,58 @@ function PomodoroTool() {
       unlisten.then((fn) => fn()).catch(console.error);
     };
   }, []);
+
+  // 专注任务标题解析：active_todo_id 只是后端给的任务 id，标题需从待办存储查询。
+  // 用 ref 保存当前关联 id，供异步返回与 todo-changed 事件回调读取最新值。
+  const activeTodoIdRef = useRef<string | null>(null);
+  activeTodoIdRef.current = state?.active_todo_id ?? null;
+
+  const refreshFocusTitle = useCallback(async () => {
+    const todoId = activeTodoIdRef.current;
+    if (!todoId) {
+      setFocusTitle(null);
+      return;
+    }
+    try {
+      const todos = await invoke<FocusTodoItem[]>("get_todos", { includeCompleted: true });
+      // 查询期间任务可能已切换/解除关联，忽略过期结果避免旧标题覆盖新任务
+      if (activeTodoIdRef.current !== todoId) return;
+      const item = todos.find((todo) => todo.id === todoId);
+      // 已完成/已删除的任务在列表中不可专注，后端也即将解除关联，故不展示标题；
+      // 查询成功但找不到/已完成的场景在这里清空，失败场景见下方 catch。
+      setFocusTitle(item && item.status !== "completed" ? item.title : null);
+    } catch (error) {
+      // 瞬时查询失败时保留上一次标题：active_todo_id 未变化不会触发重新解析，
+      // 直接清空会导致悬浮窗在下次 todo-changed 前一直缺失任务名。
+      console.error("resolve pomodoro todo title failed:", error);
+    }
+  }, []);
+
+  // 关联任务变化（新开/切换专注任务、任务完成/删除后被解除关联）时重新解析标题
+  useEffect(() => {
+    void refreshFocusTitle();
+  }, [refreshFocusTitle, state?.active_todo_id]);
+
+  // 待办数据变化（改名/完成/删除）时刷新标题；完成/删除同时会触发 pomodoro-tick 解除关联
+  useEffect(() => {
+    const unlistenTodoChanged = listen("todo-changed", () => {
+      void refreshFocusTitle();
+    });
+    return () => {
+      unlistenTodoChanged.then((fn) => fn()).catch(console.error);
+    };
+  }, [refreshFocusTitle]);
+
+  // 窗口重新获焦（重新显示/从托盘打开，show_pomodoro_window 会 set_focus）时兜底刷新，
+  // 覆盖隐藏期间可能遗漏 todo-changed 导致标题停留在旧值的场景（同 ScreenshotTool 获焦重试模式）。
+  useEffect(() => {
+    const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
+      if (focused) void refreshFocusTitle();
+    });
+    return () => {
+      unlistenFocus.then((fn) => fn()).catch(console.error);
+    };
+  }, [win, refreshFocusTitle]);
 
   // 订阅后端 tick / complete 事件刷新 UI
   useEffect(() => {
@@ -211,7 +271,11 @@ function PomodoroTool() {
       <div className={`pomo-body${running ? " is-running" : ""} pomo-stage-${stage}`}>
         <div className="pomo-titlebar" onMouseDown={onTitleBarMouseDown}>
           <span className="pomo-title">番茄钟</span>
-          {state?.active_todo_id && <span className="pomo-title-focus">Focus task</span>}
+          {state?.active_todo_id && focusTitle && (
+            <span className="pomo-title-focus" title={focusTitle}>
+              {focusTitle}
+            </span>
+          )}
           <button
             className="pomo-icon-btn"
             aria-label="关闭番茄钟"

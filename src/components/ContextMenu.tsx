@@ -15,8 +15,6 @@ import {
   Settings,
   X,
   CircleOff,
-  Video,
-  Camera,
   RefreshCw,
   ScanText,
   Wrench,
@@ -28,7 +26,6 @@ import {
   subscribeThemePreferences,
 } from "../styles/themePreferences";
 import { ensurePinOcrWindow, hideContextMenu } from "../utils/toolWindows";
-import { ensureScreenshotWindow } from "../utils/toolWindows";
 import "./ContextMenu.css";
 
 type Icon = typeof Download;
@@ -67,10 +64,6 @@ const MENUS: Record<ContextMenuSource, ContextMenuItem[][]> = {
     [{ id: "tool-config", label: "工具配置", icon: Wrench }],
   ],
   orb: [
-    [
-      { id: "screenshot", label: "屏幕截图", icon: Camera },
-      { id: "recording", label: "GIF/录屏", icon: Video },
-    ],
     [
       { id: "settings", label: "设置", icon: Settings },
       { id: "tool-config", label: "工具配置", icon: Wrench },
@@ -230,14 +223,6 @@ function ContextMenu() {
       }
       await hideContextMenu();
       switch (action) {
-        case "screenshot":
-          await ensureScreenshotWindow();
-          await invoke("start_screenshot");
-          return;
-        case "recording":
-          await ensureScreenshotWindow();
-          await invoke("start_recording_select");
-          return;
         case "settings":
           await invoke("show_settings");
           return;

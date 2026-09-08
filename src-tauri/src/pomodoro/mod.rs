@@ -113,6 +113,7 @@ pub struct PomodoroStatePayload {
 
 /// 番茄钟运行状态（Tauri managed state）
 pub struct PomodoroState {
+    transition_lock: Mutex<()>,
     running: AtomicBool,
     /// 本轮结束的绝对时刻。暂停/停止时为 None，剩余时间由 remaining_secs 保存
     end_time: Mutex<Option<Instant>>,
@@ -132,6 +133,7 @@ impl Default for PomodoroState {
         let config = PomodoroConfig::default();
         let stage = PomodoroStage::Focus;
         Self {
+            transition_lock: Mutex::new(()),
             running: AtomicBool::new(false),
             end_time: Mutex::new(None),
             stage: Mutex::new(stage),
@@ -153,6 +155,7 @@ impl PomodoroState {
     /// 更新配置。当前阶段总时长变化且未在计时时，剩余时间复位到新总长。
     /// 对越界时长做钳制，防御脏数据（如手动编辑 config.json）。
     pub fn set_config(&self, config: PomodoroConfig) {
+        let _transition = self.transition_lock.lock().unwrap();
         // 兼容旧配置：notify_sound_type 缺失（旧 JSON 仅 notify_sound）时，
         // 由布尔回退推断提醒方式，并让两者保持一致，避免字段矛盾。
         let notify_type = config.effective_notify_sound();
@@ -191,6 +194,10 @@ impl PomodoroState {
 
     /// 构造当前状态 payload
     pub fn payload(&self) -> PomodoroStatePayload {
+        // Read the whole snapshot under the same transition lock used by
+        // start/pause/skip/reset and config updates. Without this, a payload
+        // could combine a new stage with the previous stage's remaining time.
+        let _transition = self.transition_lock.lock().unwrap();
         let config = self.config();
         let stage = *self.stage.lock().unwrap();
         PomodoroStatePayload {
@@ -205,6 +212,7 @@ impl PomodoroState {
 
     /// 开始/继续计时，并确保计时线程在跑
     pub fn start(&self, app: &tauri::AppHandle) {
+        let _transition = self.transition_lock.lock().unwrap();
         // 已运行则跳过（线程已在跑）
         if self.running.swap(true, Ordering::SeqCst) {
             return;
@@ -252,14 +260,23 @@ impl PomodoroState {
                         break;
                     }
                     // 到点：完成当前阶段，切换下一阶段
-                    let completed = *st.stage.lock().unwrap();
-                    st.advance_stage();
-                    let next_stage = *st.stage.lock().unwrap();
-                    let cfg = st.config();
-                    let next_total = cfg.total_secs(next_stage);
-                    *st.remaining_secs.lock().unwrap() = next_total;
-                    *st.end_time.lock().unwrap() = None;
-                    st.running.store(false, Ordering::SeqCst);
+                    let (completed, cfg, next_total) = {
+                        let _transition = st.transition_lock.lock().unwrap();
+                        if st.generation.load(Ordering::SeqCst) != gen
+                            || !st.running.load(Ordering::SeqCst)
+                        {
+                            break;
+                        }
+                        let completed = *st.stage.lock().unwrap();
+                        st.advance_stage();
+                        let next_stage = *st.stage.lock().unwrap();
+                        let cfg = st.config();
+                        let next_total = cfg.total_secs(next_stage);
+                        *st.remaining_secs.lock().unwrap() = next_total;
+                        *st.end_time.lock().unwrap() = None;
+                        st.running.store(false, Ordering::SeqCst);
+                        (completed, cfg, next_total)
+                    };
                     let _ = app_handle.emit("pomodoro-complete", st.payload());
 
                     // 提醒音：语音播报 / 纯提示音均各自自开线程，不阻塞计时线程
@@ -269,13 +286,50 @@ impl PomodoroState {
                                 PomodoroStage::Focus => "专注结束，休息一下吧",
                                 _ => "休息结束，开始专注吧",
                             };
-                            let _ = crate::tts::speak(
-                                app_handle.clone(),
-                                text.to_string(),
-                                4.0,
-                                String::new(),
-                                1.0,
-                            );
+                            let speak_app = app_handle.clone();
+                            std::thread::spawn(move || {
+                                let state = speak_app.state::<crate::tts::TtsState>();
+                                let request_id = match crate::tts::reserve_request(&state) {
+                                    Ok(id) => id,
+                                    Err(error) => {
+                                        crate::utils::logger::log(
+                                            "tts",
+                                            &format!("pomodoro TTS reservation failed: {}", error),
+                                        );
+                                        let _ = speak_app.emit(
+                                            "tts-error",
+                                            serde_json::json!({
+                                                "source": "pomodoro",
+                                                "error": error,
+                                            }),
+                                        );
+                                        return;
+                                    }
+                                };
+                                if let Err(error) = crate::tts::speak(
+                                    speak_app.clone(),
+                                    request_id,
+                                    text.to_string(),
+                                    4.0,
+                                    String::new(),
+                                    1.0,
+                                ) {
+                                    crate::utils::logger::log(
+                                        "tts",
+                                        &format!("pomodoro TTS failed: {}", error),
+                                    );
+                                    if crate::tts::is_current_request(&state, request_id) {
+                                        let _ = speak_app.emit(
+                                            "tts-error",
+                                            serde_json::json!({
+                                                "requestId": request_id,
+                                                "source": "pomodoro",
+                                                "error": error,
+                                            }),
+                                        );
+                                    }
+                                }
+                            });
                         }
                         PomodoroNotifySound::Tone => crate::sound::play_tone(),
                         PomodoroNotifySound::None => {}
@@ -283,9 +337,14 @@ impl PomodoroState {
 
                     // 自动开始下一阶段（否则线程下轮因 running=false 退出）
                     if cfg.auto_start_next {
-                        st.running.store(true, Ordering::SeqCst);
-                        *st.end_time.lock().unwrap() =
-                            Some(Instant::now() + Duration::from_secs(next_total));
+                        let _transition = st.transition_lock.lock().unwrap();
+                        if st.generation.load(Ordering::SeqCst) == gen
+                            && !st.running.load(Ordering::SeqCst)
+                        {
+                            st.running.store(true, Ordering::SeqCst);
+                            *st.end_time.lock().unwrap() =
+                                Some(Instant::now() + Duration::from_secs(next_total));
+                        }
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -311,6 +370,7 @@ impl PomodoroState {
 
     /// 暂停计时（保留剩余时间）
     pub fn pause(&self) {
+        let _transition = self.transition_lock.lock().unwrap();
         if !self.running.load(Ordering::SeqCst) {
             return;
         }
@@ -327,6 +387,7 @@ impl PomodoroState {
 
     /// 重置当前阶段倒计时（停止，回到阶段初始时长）
     pub fn reset(&self) {
+        let _transition = self.transition_lock.lock().unwrap();
         self.running.store(false, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.end_time.lock().unwrap().take();
@@ -338,6 +399,7 @@ impl PomodoroState {
 
     /// 跳过当前阶段进入下一阶段。返回此前是否在计时（调用方据此决定是否重新 start）
     pub fn skip(&self) -> bool {
+        let _transition = self.transition_lock.lock().unwrap();
         let was_running = self.running.load(Ordering::SeqCst);
         self.running.store(false, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
@@ -355,6 +417,7 @@ impl PomodoroState {
 
     /// 停止番茄钟并重置全部进度（工具禁用时调用）
     pub fn stop(&self) {
+        let _transition = self.transition_lock.lock().unwrap();
         self.running.store(false, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.end_time.lock().unwrap().take();
@@ -371,9 +434,9 @@ impl PomodoroState {
     /// （前端在长休息期间将整除余数 0 显示为满格 N/N）；
     /// 若用 `>=`，第 4 轮起每轮专注都进长休息，短休息永不出现。
     fn advance_stage(&self) {
-        let mut stage = self.stage.lock().unwrap();
         let rounds = self.rounds_done.load(Ordering::SeqCst);
         let cfg = self.config();
+        let mut stage = self.stage.lock().unwrap();
         *stage = match *stage {
             PomodoroStage::Focus => {
                 self.rounds_done.store(rounds + 1, Ordering::SeqCst);

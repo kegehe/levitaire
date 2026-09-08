@@ -54,6 +54,12 @@ body.toolbar-window {
   padding-top: 24px;
 }
 
+/* 通用工具窗口：顶部为向上展开的 tooltip 保留透明安全区。 */
+body.utility-hub-window {
+  overflow: visible;
+  padding-top: 26px;
+}
+
 /* 设置窗口：滚动由内容面板内部处理 */
 body.settings-window {
   overflow: hidden;

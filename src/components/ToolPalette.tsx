@@ -24,11 +24,14 @@ import {
   ensurePomodoroWindow,
   ensureTimerWindow,
   ensureTodoWindow,
+  ensureUtilityHubWindow,
+  ensureStickyNotesManagerWindow,
   waitForNewMonitorWindowReady,
 } from "../utils/toolWindows";
 import "./ToolPalette.css";
 
 const TOOL_COLORS: Record<string, string> = {
+  "utility-hub": "#2f9e78",
   todo: "#1d9e75",
   sketch: "#ba7517",
   "text-toolbar": "#378add",
@@ -38,6 +41,7 @@ const TOOL_COLORS: Record<string, string> = {
   timer: "#7f77dd",
   recording: "#e24b4a",
   "quick-input": "#1d9e75",
+  "sticky-notes": "#d99a1b",
 };
 function ToolPalette() {
   const [enabledIds, setEnabledIds] = useState<string[]>(() => getEnabledTools());
@@ -47,8 +51,10 @@ function ToolPalette() {
   // 标记是否有后端 toggle 写入正在进行，syncFromBackend 在此期间跳过，
   // 避免后端 getter 读到 toggle 前旧值而覆盖乐观更新（窄窗口竞态）
   const pendingToggle = useRef(0);
+  const syncGeneration = useRef(0);
   const [activating, setActivating] = useState(false);
   const [activateError, setActivateError] = useState<string | null>(null);
+  const activationLock = useRef(false);
   const [isVisible, setIsVisible] = useState(true);
   const [toolOrder, setToolOrder] = useState<string[]>(() => {
     const ids = FLOATING_TOOLS.map((tool) => tool.id);
@@ -77,6 +83,8 @@ function ToolPalette() {
   const lastDragAt = useRef(0);
   const paletteDragActive = useRef(false);
   const paletteDragReset = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusLossTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusGeneration = useRef(0);
   const orderedTools = useMemo(
     () =>
       toolOrder
@@ -131,6 +139,7 @@ function ToolPalette() {
     // 有 toggle 写入 inflight 时跳过：此时后端 getter 可能尚未反映本次写入，
     // 用旧值覆盖会回退乐观更新。等 toggle 落定后下次获焦会重新同步。
     if (pendingToggle.current > 0) return;
+    const generation = ++syncGeneration.current;
     Promise.all(
       BACKEND_TOOLS.map((t) =>
         invoke<boolean>(t.getter)
@@ -138,6 +147,7 @@ function ToolPalette() {
           .catch(() => null),
       ),
     ).then((results) => {
+      if (generation !== syncGeneration.current || pendingToggle.current > 0) return;
       const valid = results.filter((r): r is { id: string; enabled: boolean } => r !== null);
       if (valid.length === 0) {
         console.warn("syncFromBackend: 后端命令均失败，保持 localStorage 状态");
@@ -164,6 +174,7 @@ function ToolPalette() {
   // Esc 关闭 + 失焦隐藏。win 在 effect 内获取（getCurrentWebviewWindow 每次
   // 调用返回新对象，放组件顶层会导致本 effect 每次 render 重跑、监听器反复注册）。
   useEffect(() => {
+    let disposed = false;
     const win = getCurrentWebviewWindow();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -173,14 +184,37 @@ function ToolPalette() {
     window.addEventListener("keydown", onKey);
     // 失焦自动隐藏（点击外部）；获焦时与后端真值重新同步
     const unFocus = win.onFocusChanged(({ payload: focused }) => {
+      if (disposed) return;
+      const generation = ++focusGeneration.current;
       if (!focused) {
         // Native window dragging can briefly report a focus loss. Keep the palette
         // alive during that transition; a real outside click still hides it normally.
         if (paletteDragActive.current) return;
-        setIsVisible(false);
-        void emit("levitaire-palette-visibility", false);
-        invoke("hide_palette").catch(console.error);
+        if (focusLossTimer.current) clearTimeout(focusLossTimer.current);
+        focusLossTimer.current = setTimeout(() => {
+          focusLossTimer.current = null;
+          // Focus notifications can arrive out of order while the orb click
+          // is still being released. Confirm the native state before hiding.
+          void win
+            .isFocused()
+            .then((stillFocused) => {
+              if (disposed || stillFocused || generation !== focusGeneration.current) return;
+              setIsVisible(false);
+              void emit("levitaire-palette-visibility", false);
+              invoke("hide_palette").catch(console.error);
+            })
+            .catch(() => {
+              if (disposed || generation !== focusGeneration.current) return;
+              setIsVisible(false);
+              void emit("levitaire-palette-visibility", false);
+              invoke("hide_palette").catch(console.error);
+            });
+        }, 150);
       } else {
+        if (focusLossTimer.current) {
+          clearTimeout(focusLossTimer.current);
+          focusLossTimer.current = null;
+        }
         setIsVisible(true);
         void emit("levitaire-palette-visibility", true);
         // 每次显示面板时重新与后端真值同步（覆盖常驻窗口期间外部可能的状态变更）
@@ -188,13 +222,15 @@ function ToolPalette() {
       }
     });
     return () => {
+      disposed = true;
       window.removeEventListener("keydown", onKey);
       if (paletteDragReset.current) clearTimeout(paletteDragReset.current);
+      if (focusLossTimer.current) clearTimeout(focusLossTimer.current);
       unFocus.then((fn) => fn());
     };
   }, [syncFromBackend]);
 
-  const toggleEnabled = (id: string) => {
+  const toggleEnabled = async (id: string): Promise<boolean> => {
     // 用 ref 读取当前真值而非 render 闭包中的 enabledIds：
     // 快速连续切换同一开关时，若读到陈旧快照会把「先启用后禁用」误判为
     // 「两次启用」而令开关卡死在错误状态。ref 由本函数同步推进，语义上是最新值。
@@ -209,6 +245,9 @@ function ToolPalette() {
     // screenshot：仅启用时全局热键才触发
     // text-toolbar：仅启用时拖拽选中文本才弹出工具栏
     const enabled = !wasEnabled;
+    // Invalidate any backend snapshot already in flight. It may still resolve
+    // after this optimistic toggle and must not overwrite the user's choice.
+    syncGeneration.current += 1;
     pendingToggle.current += 1;
     const rollback = () => {
       pendingToggle.current = Math.max(0, pendingToggle.current - 1);
@@ -222,100 +261,47 @@ function ToolPalette() {
       setEnabledTools(restored);
       enabledIdsRef.current = restored;
     };
-    if (id === "sketch") {
-      invoke("set_sketch_enabled", { enabled })
-        .then(() => (pendingToggle.current = Math.max(0, pendingToggle.current - 1)))
-        .catch((err) => {
-          console.error("Failed to set sketch enabled:", err);
-          rollback();
-        });
-    } else if (id === "screenshot") {
-      invoke("set_screenshot_enabled", { enabled })
-        .then(() => {
-          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
-        })
-        .catch((err) => {
-          console.error("Failed to set screenshot enabled:", err);
-          rollback();
-        });
-    } else if (id === "text-toolbar") {
-      invoke("set_text_toolbar_enabled", { enabled })
-        .then(() => {
-          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
-        })
-        .catch((err) => {
-          console.error("Failed to set text toolbar enabled:", err);
-          rollback();
-        });
-    } else if (id === "system-monitor") {
-      invoke("set_system_monitor_enabled", { enabled })
-        .then(() => {
-          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
-        })
-        .catch((err) => {
-          console.error("Failed to set system-monitor enabled:", err);
-          rollback();
-        });
-    } else if (id === "recording") {
-      invoke("set_recording_enabled", { enabled })
-        .then(() => {
-          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
-        })
-        .catch((err) => {
-          console.error("Failed to set recording enabled:", err);
-          rollback();
-        });
-    } else if (id === "pomodoro") {
-      invoke("set_pomodoro_enabled", { enabled })
-        .then(() => {
-          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
-        })
-        .catch((err) => {
-          console.error("Failed to set pomodoro enabled:", err);
-          rollback();
-        });
-    } else if (id === "quick-input") {
-      invoke("set_quick_input_enabled", { enabled })
-        .then(() => {
-          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
-          // 启用时预创建转盘窗口（隐藏），供触发键唤起时直接 show
-          if (enabled) {
-            invoke("ensure_quick_input_window").catch((err) =>
-              console.error("Failed to ensure quick input window:", err),
-            );
-          }
-        })
-        .catch((err) => {
-          console.error("Failed to set quick-input enabled:", err);
-          rollback();
-        });
-    } else if (id === "todo") {
-      invoke("set_todo_enabled", { enabled })
-        .then(() => {
-          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
-          if (enabled) ensureTodoWindow().catch(console.error);
-        })
-        .catch((err) => {
-          console.error("Failed to set todo enabled:", err);
-          rollback();
-        });
-    } else if (id === "timer") {
-      invoke("set_timer_enabled", { enabled })
-        .then(() => {
-          pendingToggle.current = Math.max(0, pendingToggle.current - 1);
-          if (enabled) ensureTimerWindow().catch(console.error);
-        })
-        .catch((err) => {
-          console.error("Failed to set timer enabled:", err);
-          rollback();
-        });
+    try {
+      const command = {
+        sketch: "set_sketch_enabled",
+        screenshot: "set_screenshot_enabled",
+        "text-toolbar": "set_text_toolbar_enabled",
+        "system-monitor": "set_system_monitor_enabled",
+        recording: "set_recording_enabled",
+        pomodoro: "set_pomodoro_enabled",
+        "quick-input": "set_quick_input_enabled",
+        todo: "set_todo_enabled",
+        timer: "set_timer_enabled",
+        "sticky-notes": "set_sticky_notes_enabled",
+      }[id as keyof Record<string, string>];
+      if (command) await invoke(command, { enabled });
+      pendingToggle.current = Math.max(0, pendingToggle.current - 1);
+      if (enabled && id === "quick-input") {
+        void invoke("ensure_quick_input_window").catch((err) =>
+          console.error("Failed to ensure quick input window:", err),
+        );
+      } else if (enabled && id === "todo") {
+        void ensureTodoWindow().catch(console.error);
+      } else if (enabled && id === "timer") {
+        void ensureTimerWindow().catch(console.error);
+      }
+      return true;
+    } catch (err) {
+      console.error(`Failed to set ${id} enabled:`, err);
+      rollback();
+      return false;
     }
   };
 
-  const toggleAll = () => {
-    const shouldEnable = enabledIdsRef.current.length !== FLOATING_TOOLS.length;
+  const enableAll = () => {
     orderedTools.forEach((tool) => {
-      if (enabledIdsRef.current.includes(tool.id) !== shouldEnable) toggleEnabled(tool.id);
+      if (!enabledIdsRef.current.includes(tool.id)) void toggleEnabled(tool.id);
+    });
+  };
+
+  const disableAll = () => {
+    orderedTools.forEach((tool) => {
+      if (enabledIdsRef.current.includes(tool.id)) void toggleEnabled(tool.id);
     });
   };
 
@@ -334,13 +320,25 @@ function ToolPalette() {
   };
 
   const handleActivate = async (tool: FloatingTool) => {
-    // 点击未启用磁贴直接启用；再次点击已启用磁贴才启动工具。
-    if (!enabledIds.includes(tool.id)) {
-      toggleEnabled(tool.id);
-      return;
+    // A card click enables a disabled tool and continues directly into activation.
+    if (activationLock.current || activating) return;
+    activationLock.current = true;
+    const wasEnabled = enabledIdsRef.current.includes(tool.id);
+    if (!wasEnabled && tool.id !== "utility-hub") {
+      const enabled = await toggleEnabled(tool.id);
+      if (!enabled) {
+        setActivateError(`${tool.name}启用失败，请重试`);
+        activationLock.current = false;
+        return;
+      }
+    }
+    if (tool.id === "utility-hub" && !wasEnabled) {
+      const next = [...enabledIdsRef.current, tool.id];
+      setEnabledIds(next);
+      setEnabledTools(next);
+      enabledIdsRef.current = next;
     }
     // 激活进行中禁止重复触发
-    if (activating) return;
     setActivateError(null);
     setActivating(true);
     try {
@@ -353,16 +351,21 @@ function ToolPalette() {
       setActivateError("工具加载失败");
       // 加载失败不隐藏面板，保持可见供用户重试或选择其他工具
       setActivating(false);
+      activationLock.current = false;
       return;
     }
     try {
+      if (tool.id === "utility-hub") {
+        await ensureUtilityHubWindow();
+        await invoke("start_utility_hub");
+        await invoke("hide_palette");
+        return;
+      }
       if (tool.activation === "immediate") {
-        if (tool.id !== "system-monitor" && tool.id !== "sketch") {
-          await invoke("hide_palette").catch(console.error);
-        }
         if (tool.id === "screenshot") {
           await ensureScreenshotWindow();
           await invoke("start_screenshot");
+          await invoke("hide_palette").catch(console.error);
         } else if (tool.id === "sketch") {
           await ensureSketchWindow();
           await invoke("show_sketch_window");
@@ -383,19 +386,28 @@ function ToolPalette() {
           await invoke("hide_palette").catch(console.error);
         } else if (tool.id === "recording") {
           await ensureScreenshotWindow();
-          await invoke("start_recording_select").catch(console.error);
+          await invoke("start_recording_select");
+          await invoke("hide_palette").catch(console.error);
         } else if (tool.id === "pomodoro") {
           await ensurePomodoroWindow();
-          await invoke("show_pomodoro_window").catch(console.error);
+          await invoke("show_pomodoro_window");
+          await invoke("hide_palette").catch(console.error);
         } else if (tool.id === "timer") {
           await ensureTimerWindow();
-          await invoke("show_timer_window").catch(console.error);
+          await invoke("show_timer_window");
+          await invoke("hide_palette").catch(console.error);
         } else if (tool.id === "todo") {
           await ensureTodoWindow();
-          await invoke("show_todo_window").catch(console.error);
+          await invoke("show_todo_window");
+          await invoke("hide_palette").catch(console.error);
+        } else if (tool.id === "sticky-notes") {
+          await ensureStickyNotesManagerWindow();
+          await invoke("show_sticky_notes_manager");
+          await invoke("hide_palette").catch(console.error);
         } else if (tool.id === "quick-input") {
           // 点击「快速输入」卡片：切换唤起/关闭转盘（语义与触发键单击一致）
-          await invoke("toggle_quick_input_wheel").catch(console.error);
+          await invoke("toggle_quick_input_wheel");
+          await invoke("hide_palette").catch(console.error);
         }
       } else {
         // selection 类：工具 chunk 已在上方 loader() 预加载，隐藏面板，等待用户选中文字时由后端 selection-found 触发显示
@@ -406,6 +418,7 @@ function ToolPalette() {
       setActivateError(`${tool.name}启动失败，请重试`);
     } finally {
       setActivating(false);
+      activationLock.current = false;
     }
   };
 
@@ -570,9 +583,24 @@ function ToolPalette() {
         <span className="palette-count">
           <strong>{enabledIds.length}</strong>/{FLOATING_TOOLS.length} 已启用
         </span>
-        <button className="palette-all" type="button" onClick={toggleAll}>
-          {enabledIds.length === FLOATING_TOOLS.length ? "全部关闭" : "全部开启"}
-        </button>
+        <div className="palette-all-group">
+          <button
+            className="palette-all"
+            type="button"
+            onClick={enableAll}
+            disabled={enabledIds.length === FLOATING_TOOLS.length}
+          >
+            全部开启
+          </button>
+          <button
+            className="palette-all palette-all-off"
+            type="button"
+            onClick={disableAll}
+            disabled={enabledIds.length === 0}
+          >
+            全部关闭
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import type { DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { emit } from "@tauri-apps/api/event";
@@ -104,7 +105,10 @@ import {
   applyThemePreferences,
   getStoredThemePreferences,
   loadThemePreferences,
+  resolveThemeMode,
+  subscribeSystemTheme,
   type ThemeAccentId,
+  type ThemeMode,
   type ThemePreferences,
   type ThemeSchemeId,
 } from "../styles/themePreferences";
@@ -138,7 +142,7 @@ const TOOL_SETTINGS_TABS = [
   { id: "quick-input", label: "快速输入", icon: "Compass" as IconName },
   { id: "monitor", label: "系统监控", icon: "Activity" as IconName },
   { id: "pomodoro", label: "番茄钟", icon: "Timer" as IconName },
-  { id: "timer", label: "时钟与倒计时", icon: "Timer" as IconName },
+  { id: "timer", label: "时钟、倒计时、秒表与日历", icon: "Timer" as IconName },
   { id: "todo", label: "待办清单", icon: "ListFilter" as IconName },
   { id: "toolbar", label: "文字工具栏", icon: "Grid3x3" as IconName },
 ] as const;
@@ -159,7 +163,7 @@ const WINDOW_POSITION_TARGETS = [
   { id: "orb", label: "悬浮球", icon: "GripVertical" as IconName },
   { id: "monitor-overlay", label: "系统监控", icon: "Activity" as IconName },
   { id: "pomodoro-overlay", label: "番茄钟", icon: "Timer" as IconName },
-  { id: "time-overlay", label: "时钟与倒计时", icon: "Timer" as IconName },
+  { id: "time-overlay", label: "时钟、倒计时、秒表与日历", icon: "Timer" as IconName },
   { id: "todo-overlay", label: "待办清单", icon: "ListFilter" as IconName },
 ] as const;
 
@@ -183,9 +187,9 @@ function Settings() {
   const themeSaveVersionRef = useRef(0);
   const themeSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const accentOptionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const [theme, setTheme] = useState<"light" | "dark">(
-    () => persistedThemePreferencesRef.current.theme,
-  );
+  const [theme, setTheme] = useState<ThemeMode>(() => persistedThemePreferencesRef.current.theme);
+  // 系统深浅色切换时触发重渲染，让 JSX 中按解析主题渲染的色板预览随之更新
+  const [, setThemeTick] = useState(0);
   const [themeAccent, setThemeAccent] = useState<ThemeAccentId>(
     () => persistedThemePreferencesRef.current.accent,
   );
@@ -338,6 +342,14 @@ function Settings() {
   const [qiMode, setQiMode] = useState("click");
   const [qiModeStatus, setQiModeStatus] = useState<"idle" | "saved" | "error">("idle");
   const [qiSnippets, setQiSnippets] = useState<QuickInputSnippet[]>([]);
+  // 拖拽排序：当前正在拖拽的行索引（null=未拖拽），用于拖动中的行高亮样式
+  const [qiDraggingIndex, setQiDraggingIndex] = useState<number | null>(null);
+  /** 拖拽源项在当前列表中的实时索引，dragover 计算插入位置用（ref 避免闭包陈旧） */
+  const qiDragIndexRef = useRef<number | null>(null);
+  /** 拖拽期间的实时列表镜像，结束时据此统一落库 */
+  const qiDragSnippetsRef = useRef<QuickInputSnippet[]>([]);
+  /** 拖拽期间是否发生过顺序变更；未变更（按下即松开）时 dragend 不落库，避免无意义保存 */
+  const qiDragDirtyRef = useRef(false);
   const [qiSnippetsStatus, setQiSnippetsStatus] = useState<"idle" | "saved" | "error">("idle");
   const [qiNewLabel, setQiNewLabel] = useState("");
   const [qiNewText, setQiNewText] = useState("");
@@ -350,6 +362,13 @@ function Settings() {
   );
   const qiHistoryEnabledRef = useRef(true);
   const qiHistoryEnabledSaveVersionRef = useRef(0);
+  // 预设提示词是否启用（关闭后转盘不再展示预设词，已保存内容保留）
+  const [qiSnippetsEnabled, setQiSnippetsEnabled] = useState(true);
+  const [qiSnippetsEnabledStatus, setQiSnippetsEnabledStatus] = useState<
+    "idle" | "saved" | "error"
+  >("idle");
+  const qiSnippetsEnabledRef = useRef(true);
+  const qiSnippetsEnabledSaveVersionRef = useRef(0);
   const [qiHistoryLimit, setQiHistoryLimit] = useState(5);
   const [qiHistoryLimitStatus, setQiHistoryLimitStatus] = useState<"idle" | "saved" | "error">(
     "idle",
@@ -750,6 +769,14 @@ function Settings() {
     return () => window.clearTimeout(timer);
   }, [theme, themeAccent, themeScheme, themePreferencesReady]);
 
+  // 主题为「跟随系统」时，随操作系统深浅色切换实时更新外观
+  useEffect(() => {
+    return subscribeSystemTheme((preferences) => {
+      applyThemePreferences(preferences);
+      setThemeTick((tick) => tick + 1);
+    });
+  }, []);
+
   useEffect(() => {
     document.body.classList.add("settings-window");
     return () => {
@@ -781,7 +808,13 @@ function Settings() {
   }, [checkHotkeyConflicts]);
 
   useEffect(() => {
-    if (activeTab === "screenshot" || activeTab === "recording" || activeTab === "sketch" || activeTab === "todo" || activeTab === "quick-input") {
+    if (
+      activeTab === "screenshot" ||
+      activeTab === "recording" ||
+      activeTab === "sketch" ||
+      activeTab === "todo" ||
+      activeTab === "quick-input"
+    ) {
       void checkHotkeyConflicts();
     }
   }, [activeTab, checkHotkeyConflicts]);
@@ -814,6 +847,7 @@ function Settings() {
       invoke<boolean>("get_timer_lunar_enabled"),
       invoke<boolean>("get_quick_input_history_enabled"),
       invoke<Array<{ preview: string; text: string }>>("get_quick_input_history"),
+      invoke<boolean>("get_quick_input_snippets_enabled"),
     ]).then(
       ([
         features,
@@ -842,6 +876,7 @@ function Settings() {
         timerLunar,
         qiHistoryEnabledResult,
         qiHist,
+        qiSnippetsEnabledResult,
       ]) => {
         if (features.status === "fulfilled") setEnabledFeaturesState(features.value);
         if (dedup.status === "fulfilled") setDedupModeState(dedup.value);
@@ -918,6 +953,10 @@ function Settings() {
           setQiHistoryEnabled(qiHistoryEnabledResult.value);
         }
         if (qiHist.status === "fulfilled") setQiHistory(qiHist.value);
+        if (qiSnippetsEnabledResult.status === "fulfilled") {
+          qiSnippetsEnabledRef.current = qiSnippetsEnabledResult.value;
+          setQiSnippetsEnabled(qiSnippetsEnabledResult.value);
+        }
       },
     );
   }, []);
@@ -934,8 +973,27 @@ function Settings() {
       .catch((err) => console.error("Failed to load quick input history limit:", err));
   }, []);
 
+  // 「启动时自动打开」勾选框依赖工具启用状态（系统监控/番茄钟/时钟与倒计时/待办）。
+  // 这些开关可在悬浮球面板等外部入口被改动，而设置窗口隐藏后组件仍挂载，
+  // 若只在首次挂载读取会导致勾选框状态滞后，这里单独抽出供重新聚焦时重新同步。
+  const refreshToolEnableSnapshot = useCallback(() => {
+    void Promise.allSettled([
+      invoke<boolean>("get_system_monitor_enabled"),
+      invoke<boolean>("get_pomodoro_enabled"),
+      invoke<boolean>("get_todo_enabled"),
+      invoke<boolean>("get_timer_enabled"),
+      invoke<string[]>("get_tools_autostart"),
+    ]).then(([monitor, pomodoro, todo, timer, autostart]) => {
+      if (monitor.status === "fulfilled") setSystemMonitorEnabled(monitor.value);
+      if (pomodoro.status === "fulfilled") setPomodoroEnabled(pomodoro.value);
+      if (todo.status === "fulfilled") setTodoEnabled(todo.value);
+      if (timer.status === "fulfilled") setTimerEnabled(timer.value);
+      if (autostart.status === "fulfilled") setAutostartIdsState(autostart.value);
+    });
+  }, []);
+
   // 处理设置窗口被隐藏后再次打开的场景：此时 Settings 组件仍然挂载，
-  // 只有重新读取后端快照才能显示最新剪贴板历史。
+  // 只有重新读取后端快照才能显示最新的剪贴板历史与工具启停/自动打开状态。
   useEffect(() => {
     const window = getCurrentWebviewWindow();
     let disposed = false;
@@ -945,6 +1003,7 @@ function Settings() {
         if (focused) {
           setIsClosing(false);
           void refreshQiHistory();
+          void refreshToolEnableSnapshot();
         }
       })
       .then((stop) => {
@@ -961,7 +1020,7 @@ function Settings() {
       if (closeTimerRef.current !== null) globalThis.clearTimeout(closeTimerRef.current);
       unlisten?.();
     };
-  }, [refreshQiHistory]);
+  }, [refreshQiHistory, refreshToolEnableSnapshot]);
 
   // 切换到快速输入页时主动刷新，保证用户看到的是当前后端历史。
   useEffect(() => {
@@ -1489,19 +1548,70 @@ function Settings() {
     void saveQiSnippets(next);
   };
 
-  /** 上移/下移预设词，调整其在转盘中的排列位置 */
-  const moveQiSnippet = (idx: number, dir: -1 | 1) => {
-    const target = idx + dir;
-    if (target < 0 || target >= qiSnippets.length) return;
-    const next = [...qiSnippets];
-    [next[idx], next[target]] = [next[target], next[idx]];
+  /** 拖拽排序：把 from 位置的项移动到 to 位置（to 为移除后新列表中的目标下标），并同步编辑行索引与实时列表 */
+  const reorderQiSnippets = (from: number, to: number) => {
+    if (from === to) return;
+    const next = [...qiDragSnippetsRef.current];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
     // 正在编辑的行若随移动变更索引，同步更新，避免编辑内容错位
-    if (qiEditingIndex === idx) {
-      setQiEditingIndex(target);
-    } else if (qiEditingIndex === target) {
-      setQiEditingIndex(idx);
+    if (qiEditingIndex !== null) {
+      if (qiEditingIndex === from) {
+        setQiEditingIndex(to);
+      } else if (from < qiEditingIndex && to >= qiEditingIndex) {
+        setQiEditingIndex(qiEditingIndex - 1);
+      } else if (from > qiEditingIndex && to <= qiEditingIndex) {
+        setQiEditingIndex(qiEditingIndex + 1);
+      }
     }
-    void saveQiSnippets(next);
+    qiDragSnippetsRef.current = next;
+    qiDragIndexRef.current = to;
+    qiDragDirtyRef.current = true;
+    setQiDraggingIndex(to);
+    setQiSnippets(next);
+  };
+
+  /** 开始拖拽：记录源索引与初始列表快照 */
+  const onQiSnippetDragStart = (e: DragEvent<HTMLDivElement>, idx: number) => {
+    qiDragIndexRef.current = idx;
+    qiDragSnippetsRef.current = qiSnippets;
+    qiDragDirtyRef.current = false;
+    setQiDraggingIndex(idx);
+    // Firefox 需要 setData 才允许开始拖拽
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(idx));
+    }
+  };
+
+  /** 拖过行时实时重排：按鼠标在行内的上下半区决定插入该行前/后 */
+  const onQiSnippetDragOver = (e: DragEvent<HTMLDivElement>, targetIdx: number) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    const from = qiDragIndexRef.current;
+    if (from === null) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2;
+    let to = before ? targetIdx : targetIdx + 1;
+    if (from < to) to -= 1;
+    if (to !== from) reorderQiSnippets(from, to);
+  };
+
+  /** 放下：仅阻止浏览器默认行为，最终顺序由 dragend 统一落库 */
+  const onQiSnippetDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+  };
+
+  /** 拖拽结束：清理状态，拖拽中若发生过顺序变更则落库 */
+  const onQiSnippetDragEnd = () => {
+    if (qiDragIndexRef.current === null) return;
+    const final = qiDragSnippetsRef.current;
+    const dirty = qiDragDirtyRef.current;
+    qiDragIndexRef.current = null;
+    qiDragSnippetsRef.current = [];
+    qiDragDirtyRef.current = false;
+    setQiDraggingIndex(null);
+    if (dirty) void saveQiSnippets(final);
   };
 
   /** 进入编辑模式，用当前值填充编辑框 */
@@ -1555,6 +1665,27 @@ function Settings() {
       setQiHistoryEnabled(previous);
       setQiHistoryEnabledStatus("error");
       setTimeout(() => setQiHistoryEnabledStatus("idle"), 3000);
+    }
+  };
+
+  const changeQiSnippetsEnabled = async (enabled: boolean) => {
+    const previous = qiSnippetsEnabledRef.current;
+    const version = ++qiSnippetsEnabledSaveVersionRef.current;
+    qiSnippetsEnabledRef.current = enabled;
+    setQiSnippetsEnabled(enabled);
+    setQiSnippetsEnabledStatus("idle");
+    try {
+      await invoke("set_quick_input_snippets_enabled", { enabled });
+      if (version !== qiSnippetsEnabledSaveVersionRef.current) return;
+      setQiSnippetsEnabledStatus("saved");
+      setTimeout(() => setQiSnippetsEnabledStatus("idle"), 2000);
+    } catch (err) {
+      if (version !== qiSnippetsEnabledSaveVersionRef.current) return;
+      console.error("Failed to save quick input snippets enabled state:", err);
+      qiSnippetsEnabledRef.current = previous;
+      setQiSnippetsEnabled(previous);
+      setQiSnippetsEnabledStatus("error");
+      setTimeout(() => setQiSnippetsEnabledStatus("idle"), 3000);
     }
   };
 
@@ -1795,31 +1926,34 @@ function Settings() {
           {activeTab === "general" && (
             <>
               <h2 className="settings-panel-title">通用设置</h2>
-              <div className="settings-item">
-                <label className="settings-checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={autoStart}
-                    onChange={(e) => {
-                      const enabled = e.target.checked;
-                      setAutoStart(enabled);
-                      setAutoStartError(false);
-                      invoke("set_auto_start", { enable: enabled }).catch((err) => {
-                        console.error("Failed to set auto start:", err);
-                        setAutoStart(!enabled);
-                        setAutoStartError(true);
-                      });
-                    }}
-                  />
-                  <span>开机自启动</span>
-                </label>
-                {autoStartError && (
-                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    设置失败
-                  </span>
-                )}
-              </div>
               <div className="settings-theme-row">
+                <div className="settings-item">
+                  <div className="settings-inline-group">
+                    <label className="settings-label" htmlFor="settings-autostart">
+                      开机自启动
+                    </label>
+                    <input
+                      id="settings-autostart"
+                      type="checkbox"
+                      checked={autoStart}
+                      onChange={(e) => {
+                        const enabled = e.target.checked;
+                        setAutoStart(enabled);
+                        setAutoStartError(false);
+                        invoke("set_auto_start", { enable: enabled }).catch((err) => {
+                          console.error("Failed to set auto start:", err);
+                          setAutoStart(!enabled);
+                          setAutoStartError(true);
+                        });
+                      }}
+                    />
+                  </div>
+                  {autoStartError && (
+                    <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                      设置失败
+                    </span>
+                  )}
+                </div>
                 <div className="settings-item">
                   <div className="settings-inline-group">
                     <label className="settings-label" htmlFor="settings-theme">
@@ -1829,13 +1963,14 @@ function Settings() {
                       id="settings-theme"
                       value={theme}
                       onChange={(e) => {
-                        setTheme(e.target.value as "light" | "dark");
+                        setTheme(e.target.value as ThemeMode);
                         setThemePreferencesError(false);
                       }}
                       className="settings-select"
                     >
                       <option value="light">浅色</option>
                       <option value="dark">深色</option>
+                      <option value="system">跟随系统</option>
                     </select>
                   </div>
                 </div>
@@ -1876,7 +2011,11 @@ function Settings() {
                       key={accent.id}
                       type="button"
                       className={`settings-color-option ${themeAccent === accent.id ? "is-selected" : ""}`}
-                      style={{ "--swatch-color": accent[theme].swatch } as React.CSSProperties}
+                      style={
+                        {
+                          "--swatch-color": accent[resolveThemeMode(theme)].swatch,
+                        } as React.CSSProperties
+                      }
                       onClick={() => {
                         setThemeAccent(accent.id);
                         setThemePreferencesError(false);
@@ -2021,8 +2160,8 @@ function Settings() {
               </div>
 
               <hr className="settings-divider" />
-              <h3 className="settings-subsection-title">在线更新</h3>
-              <div className="settings-item">
+              <div className="settings-updater-head">
+                <h3 className="settings-subsection-title">在线更新</h3>
                 <div className="settings-updater-row">
                   <span className="settings-label">版本</span>
                   <span className="settings-updater-current">{appVersion}</span>
@@ -2089,366 +2228,378 @@ function Settings() {
           {(activeTab === "screenshot" || activeTab === "recording" || activeTab === "sketch") && (
             <>
               <h2 className="settings-panel-title">
-                {activeTab === "recording" ? "GIF/录屏" : activeTab === "sketch" ? "屏幕草稿" : "屏幕截图"}
+                {activeTab === "recording"
+                  ? "GIF/录屏"
+                  : activeTab === "sketch"
+                    ? "屏幕草稿"
+                    : "屏幕截图"}
               </h2>
               {activeTab === "screenshot" && (
                 <>
-              <h3 className="settings-subsection-title">截图</h3>
-              <div className="settings-item">
-                <label className="settings-label" htmlFor="settings-hotkey">
-                  截图快捷键
-                </label>
-                <div className="settings-inline-group">
-                  <input
-                    id="settings-hotkey"
-                    type="text"
-                    value={hotkeyRecording ? "按下组合键…" : screenshotHotkey}
-                    readOnly
-                    placeholder="点击设置快捷键"
-                    onFocus={() => {
-                      setHotkeyRecording(true);
-                      setHotkeyError("");
-                    }}
-                    onBlur={() => setHotkeyRecording(false)}
-                    onKeyDown={handleHotkeyKeyDown}
-                    className="settings-input"
-                    style={{ width: 180 }}
-                  />
-                  {screenshotHotkey && (
-                    <button
-                      className="settings-toggle-btn"
-                      onClick={clearHotkey}
-                      title="清除快捷键"
-                      aria-label="清除快捷键"
-                    >
-                      <Icon name="X" size={16} />
-                    </button>
-                  )}
-                  {renderHotkeyConflict("screenshot")}
-                </div>
-                {hotkeyStatus === "saving" && <span className="settings-hint">保存中…</span>}
-                {hotkeyStatus === "saved" && <span className="settings-hint">已保存</span>}
-                {hotkeyStatus === "error" && (
-                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    保存失败
-                  </span>
-                )}
-                {hotkeyError && (
-                  <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    {hotkeyError}
-                  </p>
-                )}
-              </div>
+                  <h3 className="settings-subsection-title">截图</h3>
+                  <div className="settings-item">
+                    <label className="settings-label" htmlFor="settings-hotkey">
+                      截图快捷键
+                    </label>
+                    <div className="settings-inline-group">
+                      <input
+                        id="settings-hotkey"
+                        type="text"
+                        value={hotkeyRecording ? "按下组合键…" : screenshotHotkey}
+                        readOnly
+                        placeholder="点击设置快捷键"
+                        onFocus={() => {
+                          setHotkeyRecording(true);
+                          setHotkeyError("");
+                        }}
+                        onBlur={() => setHotkeyRecording(false)}
+                        onKeyDown={handleHotkeyKeyDown}
+                        className="settings-input"
+                        style={{ width: 180 }}
+                      />
+                      {screenshotHotkey && (
+                        <button
+                          className="settings-toggle-btn"
+                          onClick={clearHotkey}
+                          title="清除快捷键"
+                          aria-label="清除快捷键"
+                        >
+                          <Icon name="X" size={16} />
+                        </button>
+                      )}
+                      {renderHotkeyConflict("screenshot")}
+                    </div>
+                    {hotkeyStatus === "saving" && <span className="settings-hint">保存中…</span>}
+                    {hotkeyStatus === "saved" && <span className="settings-hint">已保存</span>}
+                    {hotkeyStatus === "error" && (
+                      <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        保存失败
+                      </span>
+                    )}
+                    {hotkeyError && (
+                      <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        {hotkeyError}
+                      </p>
+                    )}
+                  </div>
                 </>
               )}
               {activeTab === "sketch" && (
                 <>
-              <div className="settings-item">
-                <label className="settings-label" htmlFor="settings-sketch-hotkey">
-                  屏幕草稿快捷键
-                </label>
-                <div className="settings-inline-group">
-                  <input
-                    id="settings-sketch-hotkey"
-                    type="text"
-                    value={sketchHotkeyRecording ? "按下组合键…" : sketchHotkey}
-                    readOnly
-                    placeholder="点击设置快捷键"
-                    onFocus={() => {
-                      setSketchHotkeyRecording(true);
-                      setSketchHotkeyError("");
-                    }}
-                    onBlur={() => setSketchHotkeyRecording(false)}
-                    onKeyDown={handleSketchHotkeyKeyDown}
-                    className="settings-input"
-                    style={{ width: 180 }}
-                  />
-                  {sketchHotkey && (
-                    <button
-                      className="settings-toggle-btn"
-                      onClick={clearSketchHotkey}
-                      title="清除快捷键"
-                      aria-label="清除快捷键"
-                    >
-                      <Icon name="X" size={16} />
-                    </button>
-                  )}
-                  {renderHotkeyConflict("sketch")}
-                </div>
-                {sketchHotkeyStatus === "saving" && <span className="settings-hint">保存中…</span>}
-                {sketchHotkeyStatus === "saved" && <span className="settings-hint">已保存</span>}
-                {sketchHotkeyError && (
-                  <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    {sketchHotkeyError}
-                  </p>
-                )}
-              </div>
+                  <div className="settings-item">
+                    <label className="settings-label" htmlFor="settings-sketch-hotkey">
+                      屏幕草稿快捷键
+                    </label>
+                    <div className="settings-inline-group">
+                      <input
+                        id="settings-sketch-hotkey"
+                        type="text"
+                        value={sketchHotkeyRecording ? "按下组合键…" : sketchHotkey}
+                        readOnly
+                        placeholder="点击设置快捷键"
+                        onFocus={() => {
+                          setSketchHotkeyRecording(true);
+                          setSketchHotkeyError("");
+                        }}
+                        onBlur={() => setSketchHotkeyRecording(false)}
+                        onKeyDown={handleSketchHotkeyKeyDown}
+                        className="settings-input"
+                        style={{ width: 180 }}
+                      />
+                      {sketchHotkey && (
+                        <button
+                          className="settings-toggle-btn"
+                          onClick={clearSketchHotkey}
+                          title="清除快捷键"
+                          aria-label="清除快捷键"
+                        >
+                          <Icon name="X" size={16} />
+                        </button>
+                      )}
+                      {renderHotkeyConflict("sketch")}
+                    </div>
+                    {sketchHotkeyStatus === "saving" && (
+                      <span className="settings-hint">保存中…</span>
+                    )}
+                    {sketchHotkeyStatus === "saved" && (
+                      <span className="settings-hint">已保存</span>
+                    )}
+                    {sketchHotkeyError && (
+                      <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        {sketchHotkeyError}
+                      </p>
+                    )}
+                  </div>
+                  <div className="settings-item">
+                    <label className="settings-label" htmlFor="settings-sketch-history-limit">
+                      草稿历史保留条数
+                    </label>
+                    <div className="settings-inline-group">
+                      <input
+                        id="settings-sketch-history-limit"
+                        className="settings-input"
+                        type="number"
+                        min={1}
+                        max={MAX_SKETCH_HISTORY_LIMIT}
+                        step={1}
+                        value={sketchHistoryLimit}
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          if (Number.isFinite(value)) changeSketchHistoryLimit(value);
+                        }}
+                        style={{ width: 84 }}
+                      />
+                      <span className="settings-hint">
+                        最多 {MAX_SKETCH_HISTORY_LIMIT} 条，默认 10 条
+                      </span>
+                    </div>
+                    {sketchHistoryLimitStatus === "saved" && (
+                      <span className="settings-hint">已保存</span>
+                    )}
+                  </div>
                 </>
               )}
               {activeTab === "screenshot" && (
                 <>
-              <div className="settings-item">
-                <label className="settings-label" htmlFor="settings-sketch-history-limit">
-                  草稿历史保留条数
-                </label>
-                <div className="settings-inline-group">
-                  <input
-                    id="settings-sketch-history-limit"
-                    className="settings-input"
-                    type="number"
-                    min={1}
-                    max={MAX_SKETCH_HISTORY_LIMIT}
-                    step={1}
-                    value={sketchHistoryLimit}
-                    onChange={(event) => {
-                      const value = Number(event.target.value);
-                      if (Number.isFinite(value)) changeSketchHistoryLimit(value);
-                    }}
-                    style={{ width: 84 }}
-                  />
-                  <span className="settings-hint">
-                    最多 {MAX_SKETCH_HISTORY_LIMIT} 条，默认 10 条
-                  </span>
-                </div>
-                {sketchHistoryLimitStatus === "saved" && (
-                  <span className="settings-hint">已保存</span>
-                )}
-              </div>
-              <div className="settings-item">
-                <label className="settings-label">保存路径</label>
-                <div className="settings-inline-group settings-path-group">
-                  <input
-                    type="text"
-                    value={screenshotSavePath}
-                    readOnly
-                    placeholder="未设置，保存时将弹出对话框"
-                    className="settings-input"
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    className="settings-toggle-btn"
-                    onClick={pickScreenshotSavePath}
-                    title="选择文件夹"
-                    aria-label="选择文件夹"
-                  >
-                    <Icon name="FolderOpen" size={16} />
-                  </button>
-                  {screenshotSavePath && (
-                    <button
-                      className="settings-toggle-btn"
-                      onClick={clearScreenshotSavePath}
-                      title="清除路径"
-                      aria-label="清除路径"
-                    >
-                      <Icon name="X" size={16} />
-                    </button>
-                  )}
-                </div>
-                {screenshotSavePathStatus === "saved" && (
-                  <span className="settings-hint">已保存</span>
-                )}
-                {screenshotSavePathStatus === "error" && (
-                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    保存失败
-                  </span>
-                )}
-              </div>
-              <h3 className="settings-subsection-title">贴图边框</h3>
-              <div className="settings-item settings-row">
-                <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-pin-border-color">
-                    颜色
-                  </label>
-                  <input
-                    id="settings-pin-border-color"
-                    className="settings-color-input"
-                    type="color"
-                    value={pinBorderColor}
-                    onChange={(event) => void updatePinBorderColor(event.target.value)}
-                    aria-label="贴图边框颜色"
-                  />
-                  <span className="settings-hint settings-color-value">{pinBorderColor}</span>
-                </div>
-                <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-pin-border-width">
-                    粗细
-                  </label>
-                  <select
-                    id="settings-pin-border-width"
-                    className="settings-select"
-                    value={pinBorderWidth}
-                    onChange={(event) => void updatePinBorderWidth(Number(event.target.value))}
-                    aria-label="贴图边框粗细"
-                  >
-                    {PIN_BORDER_WIDTH_OPTIONS.map((width) => (
-                      <option key={width} value={width}>
-                        {width}px
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {pinBorderStatus === "saved" && <span className="settings-hint">已保存</span>}
-                {pinBorderStatus === "error" && (
-                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    保存失败
-                  </span>
-                )}
-              </div>
+                  <div className="settings-item">
+                    <label className="settings-label">保存路径</label>
+                    <div className="settings-inline-group settings-path-group">
+                      <input
+                        type="text"
+                        value={screenshotSavePath}
+                        readOnly
+                        placeholder="未设置，保存时将弹出对话框"
+                        className="settings-input"
+                        style={{ flex: 1 }}
+                      />
+                      <button
+                        className="settings-toggle-btn"
+                        onClick={pickScreenshotSavePath}
+                        title="选择文件夹"
+                        aria-label="选择文件夹"
+                      >
+                        <Icon name="FolderOpen" size={16} />
+                      </button>
+                      {screenshotSavePath && (
+                        <button
+                          className="settings-toggle-btn"
+                          onClick={clearScreenshotSavePath}
+                          title="清除路径"
+                          aria-label="清除路径"
+                        >
+                          <Icon name="X" size={16} />
+                        </button>
+                      )}
+                    </div>
+                    {screenshotSavePathStatus === "saved" && (
+                      <span className="settings-hint">已保存</span>
+                    )}
+                    {screenshotSavePathStatus === "error" && (
+                      <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        保存失败
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="settings-subsection-title">贴图边框</h3>
+                  <div className="settings-item settings-row">
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-pin-border-color">
+                        颜色
+                      </label>
+                      <input
+                        id="settings-pin-border-color"
+                        className="settings-color-input"
+                        type="color"
+                        value={pinBorderColor}
+                        onChange={(event) => void updatePinBorderColor(event.target.value)}
+                        aria-label="贴图边框颜色"
+                      />
+                      <span className="settings-hint settings-color-value">{pinBorderColor}</span>
+                    </div>
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-pin-border-width">
+                        粗细
+                      </label>
+                      <select
+                        id="settings-pin-border-width"
+                        className="settings-select"
+                        value={pinBorderWidth}
+                        onChange={(event) => void updatePinBorderWidth(Number(event.target.value))}
+                        aria-label="贴图边框粗细"
+                      >
+                        {PIN_BORDER_WIDTH_OPTIONS.map((width) => (
+                          <option key={width} value={width}>
+                            {width}px
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {pinBorderStatus === "saved" && <span className="settings-hint">已保存</span>}
+                    {pinBorderStatus === "error" && (
+                      <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        保存失败
+                      </span>
+                    )}
+                  </div>
                 </>
               )}
               {activeTab === "recording" && (
                 <>
-              <hr className="settings-divider" />
-              <h3 className="settings-subsection-title">录屏</h3>
-              <div className="settings-item">
-                <label className="settings-label" htmlFor="settings-recording-hotkey">
-                  录屏快捷键
-                </label>
-                <div className="settings-inline-group">
-                  <input
-                    id="settings-recording-hotkey"
-                    type="text"
-                    value={recordingHotkeyRecording ? "按下组合键…" : recordingHotkey}
-                    readOnly
-                    placeholder="点击设置快捷键"
-                    onFocus={() => {
-                      setRecordingHotkeyRecording(true);
-                      setRecordingHotkeyError("");
-                    }}
-                    onBlur={() => setRecordingHotkeyRecording(false)}
-                    onKeyDown={handleRecordingHotkeyKeyDown}
-                    className="settings-input"
-                    style={{ width: 180 }}
-                  />
-                  {recordingHotkey && (
-                    <button
-                      className="settings-toggle-btn"
-                      onClick={clearRecordingHotkey}
-                      title="清除快捷键"
-                      aria-label="清除快捷键"
-                    >
-                      <Icon name="X" size={16} />
-                    </button>
+                  <hr className="settings-divider" />
+                  <h3 className="settings-subsection-title">录屏</h3>
+                  <div className="settings-item">
+                    <label className="settings-label" htmlFor="settings-recording-hotkey">
+                      录屏快捷键
+                    </label>
+                    <div className="settings-inline-group">
+                      <input
+                        id="settings-recording-hotkey"
+                        type="text"
+                        value={recordingHotkeyRecording ? "按下组合键…" : recordingHotkey}
+                        readOnly
+                        placeholder="点击设置快捷键"
+                        onFocus={() => {
+                          setRecordingHotkeyRecording(true);
+                          setRecordingHotkeyError("");
+                        }}
+                        onBlur={() => setRecordingHotkeyRecording(false)}
+                        onKeyDown={handleRecordingHotkeyKeyDown}
+                        className="settings-input"
+                        style={{ width: 180 }}
+                      />
+                      {recordingHotkey && (
+                        <button
+                          className="settings-toggle-btn"
+                          onClick={clearRecordingHotkey}
+                          title="清除快捷键"
+                          aria-label="清除快捷键"
+                        >
+                          <Icon name="X" size={16} />
+                        </button>
+                      )}
+                      {renderHotkeyConflict("recording")}
+                    </div>
+                    {recordingHotkeyStatus === "saving" && (
+                      <span className="settings-hint">保存中…</span>
+                    )}
+                    {recordingHotkeyStatus === "saved" && (
+                      <span className="settings-hint">已保存</span>
+                    )}
+                    {recordingHotkeyStatus === "error" && (
+                      <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        保存失败
+                      </span>
+                    )}
+                    {recordingHotkeyError && (
+                      <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        {recordingHotkeyError}
+                      </p>
+                    )}
+                  </div>
+                  <div className="settings-item">
+                    <label className="settings-label">保存路径</label>
+                    <div className="settings-inline-group settings-path-group">
+                      <input
+                        type="text"
+                        value={recordingSavePath}
+                        readOnly
+                        placeholder="未设置，保存时将弹出对话框"
+                        className="settings-input"
+                        style={{ flex: 1 }}
+                      />
+                      <button
+                        className="settings-toggle-btn"
+                        onClick={pickRecordingSavePath}
+                        title="选择文件夹"
+                        aria-label="选择文件夹"
+                      >
+                        <Icon name="FolderOpen" size={16} />
+                      </button>
+                      {recordingSavePath && (
+                        <button
+                          className="settings-toggle-btn"
+                          onClick={clearRecordingSavePath}
+                          title="清除路径"
+                          aria-label="清除路径"
+                        >
+                          <Icon name="X" size={16} />
+                        </button>
+                      )}
+                    </div>
+                    {recordingSavePathStatus === "saved" && (
+                      <span className="settings-hint">已保存</span>
+                    )}
+                    {recordingSavePathStatus === "error" && (
+                      <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        保存失败
+                      </span>
+                    )}
+                  </div>
+                  <div className="settings-item settings-row">
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-recording-gif-fps">
+                        GIF 帧率
+                      </label>
+                      <select
+                        id="settings-recording-gif-fps"
+                        value={recordingConfig.gifFps}
+                        onChange={(e) => updateRecordingConfig({ gifFps: Number(e.target.value) })}
+                        className="settings-select"
+                      >
+                        {GIF_FPS_OPTION_ITEMS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-recording-video-fps">
+                        视频帧率
+                      </label>
+                      <select
+                        id="settings-recording-video-fps"
+                        value={recordingConfig.videoFps}
+                        onChange={(e) =>
+                          updateRecordingConfig({ videoFps: Number(e.target.value) })
+                        }
+                        className="settings-select"
+                      >
+                        {VIDEO_FPS_OPTION_ITEMS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="settings-item settings-row">
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-recording-max-duration">
+                        最长录制时长
+                      </label>
+                      <select
+                        id="settings-recording-max-duration"
+                        value={recordingConfig.maxDurationSec}
+                        onChange={(e) =>
+                          updateRecordingConfig({ maxDurationSec: Number(e.target.value) })
+                        }
+                        className="settings-select"
+                      >
+                        {MAX_DURATION_OPTION_ITEMS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  {recordingConfigStatus === "saved" && <p className="settings-hint">已保存</p>}
+                  {recordingConfigStatus === "error" && (
+                    <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                      保存失败，请重试
+                    </p>
                   )}
-                  {renderHotkeyConflict("recording")}
-                </div>
-                {recordingHotkeyStatus === "saving" && (
-                  <span className="settings-hint">保存中…</span>
-                )}
-                {recordingHotkeyStatus === "saved" && <span className="settings-hint">已保存</span>}
-                {recordingHotkeyStatus === "error" && (
-                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    保存失败
-                  </span>
-                )}
-                {recordingHotkeyError && (
-                  <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    {recordingHotkeyError}
-                  </p>
-                )}
-              </div>
-              <div className="settings-item">
-                <label className="settings-label">保存路径</label>
-                <div className="settings-inline-group settings-path-group">
-                  <input
-                    type="text"
-                    value={recordingSavePath}
-                    readOnly
-                    placeholder="未设置，保存时将弹出对话框"
-                    className="settings-input"
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    className="settings-toggle-btn"
-                    onClick={pickRecordingSavePath}
-                    title="选择文件夹"
-                    aria-label="选择文件夹"
-                  >
-                    <Icon name="FolderOpen" size={16} />
-                  </button>
-                  {recordingSavePath && (
-                    <button
-                      className="settings-toggle-btn"
-                      onClick={clearRecordingSavePath}
-                      title="清除路径"
-                      aria-label="清除路径"
-                    >
-                      <Icon name="X" size={16} />
-                    </button>
-                  )}
-                </div>
-                {recordingSavePathStatus === "saved" && (
-                  <span className="settings-hint">已保存</span>
-                )}
-                {recordingSavePathStatus === "error" && (
-                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    保存失败
-                  </span>
-                )}
-              </div>
-              <div className="settings-item settings-row">
-                <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-recording-gif-fps">
-                    GIF 帧率
-                  </label>
-                  <select
-                    id="settings-recording-gif-fps"
-                    value={recordingConfig.gifFps}
-                    onChange={(e) => updateRecordingConfig({ gifFps: Number(e.target.value) })}
-                    className="settings-select"
-                  >
-                    {GIF_FPS_OPTION_ITEMS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-recording-video-fps">
-                    视频帧率
-                  </label>
-                  <select
-                    id="settings-recording-video-fps"
-                    value={recordingConfig.videoFps}
-                    onChange={(e) => updateRecordingConfig({ videoFps: Number(e.target.value) })}
-                    className="settings-select"
-                  >
-                    {VIDEO_FPS_OPTION_ITEMS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="settings-item settings-row">
-                <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-recording-max-duration">
-                    最长录制时长
-                  </label>
-                  <select
-                    id="settings-recording-max-duration"
-                    value={recordingConfig.maxDurationSec}
-                    onChange={(e) =>
-                      updateRecordingConfig({ maxDurationSec: Number(e.target.value) })
-                    }
-                    className="settings-select"
-                  >
-                    {MAX_DURATION_OPTION_ITEMS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              {recordingConfigStatus === "saved" && <p className="settings-hint">已保存</p>}
-              {recordingConfigStatus === "error" && (
-                <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                  保存失败，请重试
-                </p>
-              )}
                 </>
               )}
             </>
@@ -2549,7 +2700,25 @@ function Settings() {
                   >
                     <Icon name="AlertCircle" size={14} aria-hidden="true" />
                   </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={qiSnippetsEnabled}
+                    aria-label="预设提示词"
+                    className={`qi-toggle-switch${qiSnippetsEnabled ? " is-on" : ""}`}
+                    onClick={() => void changeQiSnippetsEnabled(!qiSnippetsEnabled)}
+                  >
+                    <span className="qi-toggle-switch-thumb" />
+                  </button>
                 </div>
+                {qiSnippetsEnabledStatus === "saved" && (
+                  <span className="settings-hint">已保存</span>
+                )}
+                {qiSnippetsEnabledStatus === "error" && (
+                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    保存失败
+                  </span>
+                )}
                 <div className="qi-snippet-list">
                   {qiSnippets.length === 0 && (
                     <p className="settings-hint" style={{ opacity: 0.6 }}>
@@ -2558,7 +2727,13 @@ function Settings() {
                   )}
                   {qiSnippets.map((s, i) =>
                     qiEditingIndex === i ? (
-                      <div className="qi-snippet-row qi-snippet-editing" key={i}>
+                      <div
+                        className="qi-snippet-row qi-snippet-editing"
+                        key={i}
+                        draggable={false}
+                        onDragOver={(e) => onQiSnippetDragOver(e, i)}
+                        onDrop={onQiSnippetDrop}
+                      >
                         <input
                           type="text"
                           value={qiEditLabel}
@@ -2597,7 +2772,15 @@ function Settings() {
                         </button>
                       </div>
                     ) : (
-                      <div className="qi-snippet-row" key={i}>
+                      <div
+                        className={`qi-snippet-row${qiDraggingIndex === i ? " qi-snippet-dragging" : ""}`}
+                        key={i}
+                        draggable
+                        onDragStart={(e) => onQiSnippetDragStart(e, i)}
+                        onDragOver={(e) => onQiSnippetDragOver(e, i)}
+                        onDrop={onQiSnippetDrop}
+                        onDragEnd={onQiSnippetDragEnd}
+                      >
                         <div className="qi-snippet-label" title={s.label}>
                           {s.label}
                         </div>
@@ -2607,24 +2790,7 @@ function Settings() {
                         <div className="qi-snippet-actions">
                           <button
                             className="settings-toggle-btn settings-toggle-btn-sm"
-                            onClick={() => moveQiSnippet(i, -1)}
-                            disabled={i === 0}
-                            title="上移"
-                            aria-label="上移"
-                          >
-                            <Icon name="ArrowUp" size={14} />
-                          </button>
-                          <button
-                            className="settings-toggle-btn settings-toggle-btn-sm"
-                            onClick={() => moveQiSnippet(i, 1)}
-                            disabled={i === qiSnippets.length - 1}
-                            title="下移"
-                            aria-label="下移"
-                          >
-                            <Icon name="ArrowDown" size={14} />
-                          </button>
-                          <button
-                            className="settings-toggle-btn settings-toggle-btn-sm"
+                            draggable={false}
                             onClick={() => startEditQiSnippet(i)}
                             title="编辑"
                             aria-label="编辑"
@@ -2633,6 +2799,7 @@ function Settings() {
                           </button>
                           <button
                             className="settings-toggle-btn settings-toggle-btn-sm"
+                            draggable={false}
                             onClick={() => removeQiSnippet(i)}
                             title="删除"
                             aria-label="删除"
@@ -2684,18 +2851,15 @@ function Settings() {
                   >
                     <Icon name="AlertCircle" size={14} aria-hidden="true" />
                   </span>
-                </div>
-                <div className="qi-history-toggle-row">
-                  <span className="settings-label qi-history-toggle-label">使用剪贴板历史</span>
                   <button
                     type="button"
                     role="switch"
                     aria-checked={qiHistoryEnabled}
-                    aria-label="使用剪贴板历史"
-                    className={`qi-history-switch${qiHistoryEnabled ? " is-on" : ""}`}
+                    aria-label="剪贴板历史"
+                    className={`qi-toggle-switch${qiHistoryEnabled ? " is-on" : ""}`}
                     onClick={() => void changeQiHistoryEnabled(!qiHistoryEnabled)}
                   >
-                    <span className="qi-history-switch-thumb" />
+                    <span className="qi-toggle-switch-thumb" />
                   </button>
                 </div>
                 {qiHistoryEnabledStatus === "saved" && (
@@ -2705,11 +2869,6 @@ function Settings() {
                   <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
                     保存失败
                   </span>
-                )}
-                {!qiHistoryEnabled && (
-                  <p className="settings-hint qi-history-disabled-hint">
-                    已关闭，剪贴板历史不会记录或用于转盘；保留条数设置将在重新开启后生效。
-                  </p>
                 )}
                 <div className="qi-snippet-list">
                   {qiHistory.length === 0 && (
@@ -2995,8 +3154,8 @@ function Settings() {
           {/* ── 待办清单 ──────────────────────────────────── */}
           {activeTab === "timer" && (
             <>
-              <h2 className="settings-panel-title">时钟与倒计时</h2>
-              <p className="settings-panel-desc">管理桌面时钟、倒计时和秒表悬浮工具。</p>
+              <h2 className="settings-panel-title">时钟、倒计时、秒表与日历</h2>
+              <p className="settings-panel-desc">管理桌面时钟、倒计时、日历和秒表悬浮工具。</p>
               <div className="settings-item">
                 <label className="settings-checkbox-label">
                   <input

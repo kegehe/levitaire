@@ -55,8 +55,10 @@ mod pomodoro;
 mod quick_input;
 mod recording;
 mod screenshot;
+mod scroll_navigation;
 mod scroll_capture;
 mod sound;
+mod sticky_note;
 mod todo;
 mod tts;
 mod timer;
@@ -379,6 +381,9 @@ fn main() {
             app.manage(todo::TodoStore::new());
             todo::start_scheduler(app.handle().clone());
 
+            // 便利贴数据独立于 config.json，窗口按需创建/销毁，数据长期保留。
+            app.manage(sticky_note::NoteStore::new());
+
             // 初始化系统监控状态（采集线程随监控窗口开关启停，此处仅注册 state）
             app.manage(monitor::MonitorState::default());
 
@@ -424,12 +429,14 @@ fn main() {
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
                         "toggle_orb" => {
-                            if let Some(window) = app.get_webview_window("orb") {
-                                if window.is_visible().unwrap_or(false) {
-                                    let _ = window.hide();
-                                } else {
-                                    let _ = window.show();
-                                    // 注意：orb 窗口是 setFocusable(false)，不调用 set_focus()
+                            if crate::commands::is_orb_ready() {
+                                if let Some(window) = app.get_webview_window("orb") {
+                                    if window.is_visible().unwrap_or(false) {
+                                        let _ = window.hide();
+                                    } else {
+                                        let _ = window.show();
+                                        // 注意：orb 窗口是 setFocusable(false)，不调用 set_focus()
+                                    }
                                 }
                             }
                         }
@@ -444,6 +451,7 @@ fn main() {
                             });
                         }
                         "quit" => {
+                            crate::hooks::mouse::stop_color_pick();
                             app.exit(0);
                         }
                         _ => {}
@@ -479,12 +487,14 @@ fn main() {
                     {
                         // 左键点击托盘图标：切换浮球显示
                         let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("orb") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
-                                let _ = window.show();
-                                // 注意：orb 窗口是 setFocusable(false)，不调用 set_focus()
+                        if crate::commands::is_orb_ready() {
+                            if let Some(window) = app.get_webview_window("orb") {
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    let _ = window.show();
+                                    // 注意：orb 窗口是 setFocusable(false)，不调用 set_focus()
+                                }
                             }
                         }
                     }
@@ -653,13 +663,29 @@ fn main() {
             commands::toggle_orb,
             commands::show_palette,
             commands::hide_palette,
+            commands::start_scroll_navigation,
+            commands::hide_scroll_navigation,
+            commands::get_scroll_navigation_state,
+            commands::set_scroll_navigation_percent,
+            commands::navigate_scroll,
+            commands::start_utility_hub,
+            commands::show_utility_hub,
+            commands::stop_utility_color_pick,
+            commands::hide_utility_hub,
+            commands::start_utility_color_pick,
             commands::show_sketch_window,
             commands::hide_sketch_window,
             commands::get_sketch_enabled,
             commands::set_sketch_enabled,
             commands::capture_sketch_background,
             commands::start_screenshot,
+            commands::mark_screenshot_overlay_heartbeat,
+            commands::show_screenshot_error,
             commands::consume_screenshot_start_pending,
+            commands::consume_recording_select_start_pending,
+            commands::consume_sketch_start_pending,
+            commands::consume_todo_quick_add_pending,
+            commands::mark_orb_ready,
             commands::cancel_screenshot,
             commands::get_virtual_desktop_bounds,
             commands::get_screenshot_monitor_bounds,
@@ -774,6 +800,7 @@ fn main() {
             commands::export_todos,
             commands::import_todos,
             commands::reorder_todos,
+            commands::move_todo,
             commands::get_todo_lists,
             commands::create_todo_list,
             commands::update_todo_list,
@@ -794,6 +821,21 @@ fn main() {
             commands::set_todo_enabled,
             commands::show_todo_window,
             commands::hide_todo_window,
+            commands::get_sticky_notes_enabled,
+            commands::set_sticky_notes_enabled,
+            commands::get_sticky_notes,
+            commands::get_sticky_note,
+            commands::create_sticky_note,
+            commands::update_sticky_note_content,
+            commands::update_sticky_note_color,
+            commands::set_sticky_note_position,
+            commands::show_sticky_note,
+            commands::collect_sticky_note,
+            commands::collect_all_notes,
+            commands::delete_sticky_note,
+            commands::restore_pinned_notes,
+            commands::show_sticky_notes_manager,
+            commands::hide_sticky_notes_manager,
             commands::get_ocr_engines,
             commands::set_ocr_engine,
             commands::start_recording_select,
@@ -812,6 +854,10 @@ fn main() {
             commands::save_gif,
             commands::save_video_file,
             commands::enumerate_windows,
+            commands::detect_screenshot_target,
+            commands::capture_region_live,
+            commands::set_smart_screenshot_mode,
+            commands::set_smart_screenshot_controls_bounds,
             commands::get_recording_enabled,
             commands::set_recording_enabled,
             commands::get_recording_hotkey,
@@ -841,8 +887,11 @@ fn main() {
             commands::get_quick_input_history_enabled,
             commands::set_quick_input_history_enabled,
             commands::set_quick_input_highlight,
+            commands::confirm_quick_input_hold,
             commands::get_quick_input_snippets,
             commands::set_quick_input_snippets,
+            commands::get_quick_input_snippets_enabled,
+            commands::set_quick_input_snippets_enabled,
             commands::get_quick_input_history,
             commands::clear_quick_input_history,
             commands::quick_input_paste,

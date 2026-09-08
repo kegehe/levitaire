@@ -428,104 +428,45 @@ describe("ScreenshotTool 标注流程", () => {
     expect(document.querySelector(".ss-annotate-toolbar")).not.toBeNull();
   });
 
-  it("窗口识别模式：点击窗口后按窗口区域自动截图并进入标注态", async () => {
+  it("smart mode captures the current target and enters annotation", async () => {
     stubCanvas();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_virtual_desktop_bounds") {
         return Promise.resolve({ originX: 0, originY: 0, width: 1920, height: 1080 });
       }
-      if (cmd === "enumerate_windows") {
-        return Promise.resolve([
-          {
-            hwnd: 1,
-            title: "记事本",
-            className: "Notepad",
-            left: 100,
-            top: 50,
-            width: 800,
-            height: 600,
-          },
-          {
-            hwnd: 2,
-            title: "浏览器",
-            className: "Chrome",
-            left: 900,
-            top: 80,
-            width: 700,
-            height: 500,
-          },
-        ]);
+      if (cmd === "detect_screenshot_target") {
+        return Promise.resolve({ kind: "element", hwnd: 1, left: 120, top: 80, width: 240, height: 96 });
       }
-      if (cmd === "capture_region") {
-        return Promise.resolve({ pngBase64: "AAAA", width: 800, height: 600 });
+      if (cmd === "capture_region_live") {
+        return Promise.resolve({ pngBase64: "AAAA", width: 240, height: 96 });
       }
       return Promise.resolve();
     });
-
     render(<ScreenshotTool />);
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
-
-    // 切换到窗口模式
+    fireEvent.click(screen.getByRole("button", { name: /智能/ }));
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "窗口" }));
-    });
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
-    });
-
-    // 窗口列表加载完成
-    expect(screen.getByText("记事本")).toBeTruthy();
-    expect(screen.getByText("浏览器")).toBeTruthy();
-
-    // 点击某个窗口
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /记事本/ }));
+      emitMockEvent("screenshot-target-scope-toggle", undefined);
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
+      emitMockEvent("screenshot-target-move", { x: 150, y: 100 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
-
-    // capture_region 以窗口物理坐标调用，并进入标注态
-    expect(mockInvoke).toHaveBeenCalledWith("capture_region", {
-      left: 100,
-      top: 50,
-      width: 800,
-      height: 600,
+    expect(document.querySelector(".ss-selection-box")).not.toBeNull();
+    expect(mockInvoke).toHaveBeenCalledWith("detect_screenshot_target", expect.objectContaining({ scope: "window" }));
+    await act(async () => {
+      emitMockEvent("screenshot-target-click", { x: 150, y: 100 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    expect(mockInvoke).toHaveBeenCalledWith("capture_region_live", expect.objectContaining({
+      left: 120,
+      top: 80,
+      width: 240,
+      height: 96,
+    }));
     expect(document.querySelector(".ss-annotate-toolbar")).not.toBeNull();
-  });
-
-  it("窗口识别模式：点击取消恢复区域模式并退出截图", async () => {
-    mockInvoke.mockImplementation((cmd: string) => {
-      if (cmd === "get_virtual_desktop_bounds") {
-        return Promise.resolve({ originX: 0, originY: 0, width: 1920, height: 1080 });
-      }
-      if (cmd === "enumerate_windows") {
-        return Promise.resolve([
-          { hwnd: 1, title: "记事本", className: "", left: 0, top: 0, width: 800, height: 600 },
-        ]);
-      }
-      return Promise.resolve();
-    });
-
-    render(<ScreenshotTool />);
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "窗口" }));
-    });
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
-    });
-    expect(screen.getByText("记事本")).toBeTruthy();
-
-    // 取消后调用 cancel_screenshot
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    });
-    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "cancel_screenshot")).toBe(true);
   });
 });

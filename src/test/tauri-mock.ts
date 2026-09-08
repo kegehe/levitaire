@@ -84,6 +84,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     unmaximize: vi.fn().mockResolvedValue(undefined),
     toggleMaximize: vi.fn().mockResolvedValue(undefined),
     isMaximized: vi.fn().mockResolvedValue(false),
+    isFocused: vi.fn().mockResolvedValue(false),
     close: vi.fn().mockResolvedValue(undefined),
     onResized: vi.fn(() => Promise.resolve(() => {})),
     onMoved: vi.fn(() => Promise.resolve(() => {})),
@@ -149,4 +150,4 @@ export function clearMockListeners() {
   listeners.clear();
 }
 
-export { mockSetSize, mockHide, menuState };
+export { mockSetSize, mockHide, mockStartDragging, menuState };

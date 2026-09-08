@@ -1,4 +1,12 @@
-import { lazy, Suspense, useState, useEffect } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useEffect,
+  useState,
+  type ErrorInfo,
+  type ReactNode,
+} from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -18,15 +26,30 @@ const PomodoroTool = lazy(() => import("./tools/pomodoro/PomodoroTool"));
 const TimerTool = lazy(() => import("./tools/timer/TimerTool"));
 const TodoTool = lazy(() => import("./tools/todo/TodoTool"));
 const QuickInputTool = lazy(() => import("./tools/quick-input/QuickInputTool"));
+const StickyNoteManager = lazy(() => import("./tools/sticky-note/StickyNoteManager"));
+const StickyNote = lazy(() => import("./tools/sticky-note/StickyNote"));
 const Settings = lazy(() => import("./components/Settings"));
 const UpdatePrompt = lazy(() => import("./components/UpdatePrompt"));
 const ContextMenu = lazy(() => import("./components/ContextMenu"));
 const PinOcrResult = lazy(() => import("./tools/screenshot/PinOcrResult"));
 const SketchTool = lazy(() => import("./tools/sketch/SketchTool"));
+const ScrollNavigator = lazy(() => import("./tools/scroll-navigator/ScrollNavigator"));
+const UtilityHub = lazy(() => import("./tools/utility-hub/UtilityHub"));
 
 /** screenshot-overlay 窗口的模式切换器 */
 function OverlaySwitcher() {
   const [mode, setMode] = useState<"screenshot" | "recording">("screenshot");
+
+  // Keep a native liveness signal so a renderer crash/reload cannot leave a
+  // full-screen WebView error page visible indefinitely.
+  useEffect(() => {
+    const heartbeat = () => {
+      void invoke("mark_screenshot_overlay_heartbeat").catch(() => {});
+    };
+    heartbeat();
+    const timer = window.setInterval(heartbeat, 500);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // 挂载时查询后端当前是否处于录制选区模式。
   // 首次创建 overlay 窗口时，ensureScreenshotWindow 在 tauri://created 时 resolve，
@@ -60,7 +83,9 @@ function OverlaySwitcher() {
     const unReadyRequest = listen("screenshot-overlay-ready-request", () => {
       void emit("screenshot-overlay-ready");
     });
-    void Promise.all([un, un2, un3, un4, unReadyRequest]).then(() => emit("screenshot-overlay-ready"));
+    void Promise.all([un, un2, un3, un4, unReadyRequest]).then(() =>
+      emit("screenshot-overlay-ready"),
+    );
     return () => {
       un.then((fn) => fn());
       un2.then((fn) => fn());
@@ -73,38 +98,160 @@ function OverlaySwitcher() {
   return mode === "recording" ? <RecordingTool /> : <ScreenshotTool />;
 }
 
+interface OverlayErrorBoundaryProps {
+  children: ReactNode;
+}
+
+interface OverlayErrorBoundaryState {
+  error: Error | null;
+}
+
+/** Prevent a renderer/chunk error from leaving a full-screen screenshot overlay stuck. */
+class OverlayErrorBoundary extends Component<OverlayErrorBoundaryProps, OverlayErrorBoundaryState> {
+  state: OverlayErrorBoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error): OverlayErrorBoundaryState {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("screenshot overlay failed to render", error, info.componentStack);
+    void invoke("cancel_screenshot").catch((cleanupError) => {
+      console.error("failed to clean up after screenshot overlay error", cleanupError);
+    });
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    const hideOverlay = () => {
+      void getCurrentWebviewWindow()
+        .hide()
+        .catch((hideError) => {
+          console.error("failed to hide screenshot overlay after render error", hideError);
+        });
+    };
+    return (
+      <div
+        role="alert"
+        style={{
+          boxSizing: "border-box",
+          width: "100vw",
+          minHeight: "100vh",
+          padding: "24px",
+          display: "grid",
+          placeContent: "center",
+          gap: "12px",
+          color: "#f8fafc",
+          background: "rgba(15, 23, 42, 0.94)",
+          fontFamily: "system-ui, sans-serif",
+          textAlign: "center",
+        }}
+      >
+        <strong>截图工具加载失败</strong>
+        <span>{this.state.error.message || "截图页面加载失败"}</span>
+        <button
+          type="button"
+          onClick={() => {
+            hideOverlay();
+            void invoke("cancel_screenshot").catch((cleanupError) => {
+              console.error("failed to clean up screenshot after render error", cleanupError);
+            });
+          }}
+          style={{ justifySelf: "center", padding: "8px 16px", cursor: "pointer" }}
+        >
+          退出截图
+        </button>
+      </div>
+    );
+  }
+}
+
+function OverlayLoadFallback() {
+  return (
+    <div
+      role="status"
+      style={{
+        width: "100vw",
+        minHeight: "100vh",
+        display: "grid",
+        placeContent: "center",
+        color: "#f8fafc",
+        background: "rgba(15, 23, 42, 0.94)",
+        fontFamily: "system-ui, sans-serif",
+      }}
+    >
+      正在加载截图工具...
+    </div>
+  );
+}
+
 function App() {
   const windowLabel = getCurrentWebviewWindow().label;
 
   useEffect(() => {
     if (windowLabel !== "orb") return;
-    const un = listen("ensure-sketch-window", async () => {
+    let disposed = false;
+    const openSketch = async () => {
+      if (disposed) return;
       try {
         await ensureSketchWindow();
+        if (disposed) return;
         await invoke("show_sketch_window");
       } catch (error) {
         console.error("Failed to open sketch window", error);
       }
-    });
-    const todoQuickAdd = listen("ensure-todo-window-for-quick-add", async () => {
+    };
+    const openTodoQuickAdd = async () => {
+      if (disposed) return;
       try {
         await ensureTodoWindow();
+        if (disposed) return;
         await invoke("show_todo_window");
+        if (disposed) return;
         await emit("todo-focus-add");
       } catch (error) {
         console.error("Failed to open todo quick add", error);
       }
+    };
+    const un = listen("ensure-sketch-window", () => {
+      void invoke<boolean>("consume_sketch_start_pending")
+        .then((pending) => {
+          if (pending && !disposed) void openSketch();
+        })
+        .catch((error) => console.error("Failed to consume sketch startup request", error));
     });
-    return () => { un.then((fn) => fn()); todoQuickAdd.then((fn) => fn()); };
+    const todoQuickAdd = listen("ensure-todo-window-for-quick-add", () => {
+      void invoke<boolean>("consume_todo_quick_add_pending")
+        .then((pending) => {
+          if (pending && !disposed) void openTodoQuickAdd();
+        })
+        .catch((error) => console.error("Failed to consume todo startup request", error));
+    });
+    void Promise.all([un, todoQuickAdd])
+      .then(async () => {
+        const [sketchPending, todoPending] = await Promise.all([
+          invoke<boolean>("consume_sketch_start_pending"),
+          invoke<boolean>("consume_todo_quick_add_pending"),
+        ]);
+        if (sketchPending && !disposed) await openSketch();
+        if (todoPending && !disposed) await openTodoQuickAdd();
+      })
+      .catch((error) => console.error("Failed to recover startup tool request", error));
+    return () => {
+      disposed = true;
+      un.then((fn) => fn());
+      todoQuickAdd.then((fn) => fn());
+    };
   }, [windowLabel]);
 
   // 非 main 窗口（overlay、controls 等）始终透明背景，
-  // 防止 lazy 组件加载期间 Suspense fallback={null} 导致白色闪烁
+  // 非主窗口保持透明；截图 overlay 使用可见的加载/错误兜底，避免显示默认错误页
   useEffect(() => {
     if (
       windowLabel !== "toolbar" &&
       windowLabel !== "orb" &&
       windowLabel !== "palette" &&
+      windowLabel !== "utility-hub-overlay" &&
       windowLabel !== "settings" &&
       windowLabel !== "tool-config"
     ) {
@@ -140,6 +287,10 @@ function App() {
     content = <TodoTool />;
   } else if (windowLabel === "quick-input-overlay") {
     content = <QuickInputTool />;
+  } else if (windowLabel === "sticky-notes-manager") {
+    content = <StickyNoteManager />;
+  } else if (windowLabel.startsWith("sticky-note-")) {
+    content = <StickyNote />;
   } else if (windowLabel === "update-prompt") {
     content = <UpdatePrompt />;
   } else if (windowLabel === "context-menu") {
@@ -150,10 +301,21 @@ function App() {
     content = <PinOcrResult />;
   } else if (windowLabel === "sketch-overlay") {
     content = <SketchTool />;
+  } else if (windowLabel === "scroll-navigator-overlay") {
+    content = <ScrollNavigator />;
+  } else if (windowLabel === "utility-hub-overlay") {
+    content = <UtilityHub />;
   } else {
     content = <Settings />;
   }
 
+  if (windowLabel === "screenshot-overlay") {
+    return (
+      <OverlayErrorBoundary>
+        <Suspense fallback={<OverlayLoadFallback />}>{content}</Suspense>
+      </OverlayErrorBoundary>
+    );
+  }
   return <Suspense fallback={null}>{content}</Suspense>;
 }
 

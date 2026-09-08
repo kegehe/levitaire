@@ -1,7 +1,8 @@
 use crate::config::AiConfig;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// AI 响应结果
@@ -21,7 +22,13 @@ pub struct AiService {
     /// 流式请求取消标志：request_cancel() 置位，call_stream 每收到一帧数据时检查。
     /// 置位后立即终止当前流式请求（drop 底层连接），避免用户取消后仍把整段结果
     /// 发给前端、白耗网络/CPU 与 token（并减小文本继续外传的隐私暴露）。
-    cancel_flag: Arc<AtomicBool>,
+    stream_cancellations: Mutex<StreamCancellationState>,
+    next_stream_id: AtomicU64,
+}
+
+struct StreamCancellationState {
+    active: HashMap<u64, Arc<AtomicBool>>,
+    cancelled_before_start: HashSet<u64>,
 }
 
 /// AI 服务内部实现
@@ -30,6 +37,26 @@ struct AiServiceInner {
     /// 延迟初始化的 HTTP 客户端（首次调用时创建，避免启动时 TLS 初始化开销）
     /// 外层 Mutex<AiServiceInner> 已提供互斥保护，无需再嵌套 Mutex
     http_client: Option<reqwest::Client>,
+}
+
+struct StreamCancellationGuard<'a> {
+    service: &'a AiService,
+    request_id: u64,
+    token: Arc<AtomicBool>,
+}
+
+impl Drop for StreamCancellationGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.service.stream_cancellations.lock() {
+            if guard
+                .active
+                .get(&self.request_id)
+                .is_some_and(|token| Arc::ptr_eq(token, &self.token))
+            {
+                guard.active.remove(&self.request_id);
+            }
+        }
+    }
 }
 
 impl AiServiceInner {
@@ -231,21 +258,45 @@ impl AiService {
                 config,
                 http_client: None,
             }),
-            cancel_flag: Arc::new(AtomicBool::new(false)),
+            stream_cancellations: Mutex::new(StreamCancellationState {
+                active: HashMap::new(),
+                cancelled_before_start: HashSet::new(),
+            }),
+            next_stream_id: AtomicU64::new(1),
         }
     }
 
     /// 请求取消当前流式调用（前端点「取消」时调用）
-    pub fn request_cancel(&self) {
-        self.cancel_flag.store(true, Ordering::SeqCst);
+    pub fn next_stream_id(&self) -> u64 {
+        self.next_stream_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn request_cancel(&self, request_id: Option<u64>) {
+        if let Ok(mut guard) = self.stream_cancellations.lock() {
+            match request_id {
+                Some(id) => {
+                    if let Some(token) = guard.active.get(&id) {
+                        token.store(true, Ordering::SeqCst);
+                    } else {
+                        if guard.cancelled_before_start.len() >= 1024 {
+                            if let Some(oldest) = guard.cancelled_before_start.iter().next().copied() {
+                                guard.cancelled_before_start.remove(&oldest);
+                            }
+                        }
+                        guard.cancelled_before_start.insert(id);
+                    }
+                }
+                None => {
+                    for token in guard.active.values() {
+                        token.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
         crate::utils::logger::log("ai", "cancel requested for streaming call");
     }
 
     /// 重置取消标志（发起新的流式调用前调用，避免上一次取消影响新请求）
-    pub fn reset_cancel(&self) {
-        self.cancel_flag.store(false, Ordering::SeqCst);
-    }
-
     pub fn update_config(&self, config: AiConfig) -> Result<(), String> {
         crate::utils::logger::log("ai", "AI 服务配置已更新");
         let mut inner = self
@@ -373,6 +424,7 @@ impl AiService {
     /// 流式调用 AI 接口，通过回调逐块推送文本
     pub async fn call_stream<F>(
         &self,
+        request_id: u64,
         prompt: &str,
         system_prompt: Option<&str>,
         on_chunk: F,
@@ -380,6 +432,25 @@ impl AiService {
     where
         F: Fn(&str) + Send + 'static,
     {
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        {
+            let mut guard = self
+                .stream_cancellations
+                .lock()
+                .map_err(|_| "AI 流式请求取消状态不可用".to_string())?;
+            if guard.cancelled_before_start.remove(&request_id) {
+                return Err("已取消".to_string());
+            }
+            if guard.active.contains_key(&request_id) {
+                return Err(format!("AI 请求 id 已在使用中: {}", request_id));
+            }
+            guard.active.insert(request_id, Arc::clone(&cancel_token));
+        }
+        let _stream_guard = StreamCancellationGuard {
+            service: self,
+            request_id,
+            token: Arc::clone(&cancel_token),
+        };
         crate::utils::logger::log(
             "ai",
             &format!("流式调用 AI, prompt 长度: {} 字节", prompt.len()),
@@ -455,7 +526,7 @@ impl AiService {
         while let Some(chunk_result) = stream.next().await {
             // 用户已取消流式调用 → 立即终止并丢弃剩余数据，避免白耗网络/CPU 与 token。
             // drop response 会断开底层连接；前端取消后已移除监听器，安全性无影响。
-            if self.cancel_flag.load(Ordering::SeqCst) {
+            if cancel_token.load(Ordering::SeqCst) {
                 crate::utils::logger::log("ai", "streaming call cancelled, aborting read");
                 return Err("已取消".to_string());
             }

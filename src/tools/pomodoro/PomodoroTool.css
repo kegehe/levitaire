@@ -39,7 +39,7 @@
   font-weight: 600;
 }
 .pomo-title-focus {
-  max-width: 84px;
+  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

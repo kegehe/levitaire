@@ -1,7 +1,7 @@
 import { act, fireEvent, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { clearMockListeners, menuState, mockHide, triggerMenuAction } from "../test/tauri-mock";
+import { clearMockListeners, emitMockEvent, menuState, mockStartDragging } from "../test/tauri-mock";
 import { ensureScreenshotWindow, showContextMenu } from "../utils/toolWindows";
 import FloatingOrb from "./FloatingOrb";
 
@@ -36,7 +36,7 @@ async function flush() {
   }
 }
 
-/** 渲染浮球并触发一次右键（构建菜单） */
+/** 渲染浮球并触发一次右键。 */
 async function renderAndOpenContextMenu() {
   render(<FloatingOrb />);
   await act(flush);
@@ -54,66 +54,17 @@ describe("FloatingOrb 右键菜单", () => {
     mockInvoke.mockResolvedValue(undefined);
   });
 
-  it("右键悬浮球时弹出原生菜单", async () => {
+  it("右键悬浮球时打开自定义菜单", async () => {
     await renderAndOpenContextMenu();
     expect(mockShowContextMenu).toHaveBeenCalledWith(expect.objectContaining({ source: "orb" }));
   });
 
-  it("菜单项 id 与托盘菜单隔离，避免全局事件交叉触发", async () => {
+  it("右键不直接启动截图或录屏", async () => {
     await renderAndOpenContextMenu();
-    const ids = Array.from(menuState.items.keys());
-    expect(ids).toEqual(["screenshot", "recording", "open-settings", "hide-orb", "quit-app"]);
-    // 托盘菜单使用 quit / show_settings / toggle_orb，前端菜单不得复用
-    expect(ids).not.toContain("quit");
-    expect(ids).not.toContain("show_settings");
-    expect(ids).not.toContain("toggle_orb");
-  });
-
-  it("「屏幕截图」进入截图流程", async () => {
-    await renderAndOpenContextMenu();
-    await act(async () => {
-      triggerMenuAction("screenshot");
-      await flush();
-    });
-    expect(mockEnsureScreenshotWindow).toHaveBeenCalledTimes(1);
-    expect(mockInvoke).toHaveBeenCalledWith("start_screenshot");
-  });
-
-  it("「GIF/录屏」进入录屏流程", async () => {
-    await renderAndOpenContextMenu();
-    await act(async () => {
-      triggerMenuAction("recording");
-      await flush();
-    });
-    expect(mockEnsureScreenshotWindow).toHaveBeenCalledTimes(1);
-    expect(mockInvoke).toHaveBeenCalledWith("start_recording_select");
-  });
-
-  it("「设置」打开设置窗口", async () => {
-    await renderAndOpenContextMenu();
-    await act(async () => {
-      triggerMenuAction("open-settings");
-      await flush();
-    });
-    expect(mockInvoke).toHaveBeenCalledWith("show_settings");
-  });
-
-  it("「隐藏悬浮球」隐藏 orb 窗口", async () => {
-    await renderAndOpenContextMenu();
-    await act(async () => {
-      triggerMenuAction("hide-orb");
-      await flush();
-    });
-    expect(mockHide).toHaveBeenCalledTimes(1);
-  });
-
-  it("「退出」调用 exit_app 命令", async () => {
-    await renderAndOpenContextMenu();
-    await act(async () => {
-      triggerMenuAction("quit-app");
-      await flush();
-    });
-    expect(mockInvoke).toHaveBeenCalledWith("exit_app");
+    expect(mockEnsureScreenshotWindow).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith("start_screenshot");
+    expect(mockInvoke).not.toHaveBeenCalledWith("start_recording_select");
+    expect(menuState.items.size).toBe(0);
   });
 
   it("左键拖拽不受右键菜单影响（mousedown 仅响应左键）", async () => {
@@ -124,5 +75,57 @@ describe("FloatingOrb 右键菜单", () => {
     fireEvent.mouseDown(orb, { button: 2 });
     await act(flush);
     expect(menuState.popup).not.toHaveBeenCalled();
+  });
+
+  it("仅在圆形热区（视觉球）内按下才启动拖拽，球外留白不拖拽", async () => {
+    render(<FloatingOrb />);
+    await act(flush);
+    const orb = document.querySelector(".orb-container")!;
+    // 模拟 56×56 的球容器：中心 (28,28)，交互半径 = 56/2 + 2 = 30
+    const rectSpy = vi
+      .spyOn(orb, "getBoundingClientRect")
+      .mockReturnValue({
+        left: 0,
+        top: 0,
+        width: 56,
+        height: 56,
+        right: 56,
+        bottom: 56,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+
+    // 球内按下（距圆心约 11px）→ 启动拖拽
+    fireEvent.mouseDown(orb, { button: 0, clientX: 20, clientY: 20 });
+    await act(flush);
+    expect(mockStartDragging).toHaveBeenCalledTimes(1);
+
+    // 球外留白角落按下（距圆心约 37px，超出 30）→ 不启动拖拽
+    mockStartDragging.mockClear();
+    fireEvent.mouseDown(orb, { button: 0, clientX: 2, clientY: 2 });
+    await act(flush);
+    expect(mockStartDragging).not.toHaveBeenCalled();
+
+    rectSpy.mockRestore();
+  });
+
+  it("点击浮球后在鼠标抬起尾部事件完成后打开面板", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<FloatingOrb />);
+      await act(flush);
+      mockInvoke.mockClear();
+
+      emitMockEvent("orb-mouseup", true);
+      expect(mockInvoke).not.toHaveBeenCalledWith("show_palette");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(80);
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("show_palette");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

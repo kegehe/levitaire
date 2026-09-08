@@ -190,7 +190,11 @@
   /* Toolbar */
   --toolbar-bg: oklch(0.98 0 0);
   --toolbar-border: var(--color-border);
-  --toolbar-shadow: var(--shadow-md);
+  /* 工具栏是贴近选中内容的小型条状浮层，阴影需紧凑克制。
+     自包含字面值、不引用 --shadow-* 系：themePreferences 运行时会把
+     --shadow-md/lg 统一覆盖成 scheme.shadow 的大浮层投影，
+     若间接引用会导致工具栏被渲染出 30px+ 的巨大阴影（误伤）。 */
+  --toolbar-shadow: 0 1px 2px oklch(0.2 0 0 / 0.05), 0 3px 9px oklch(0.2 0 0 / 0.08);
   --toolbar-radius: var(--radius-md);
   --toolbar-padding-x: var(--space-2);
   --toolbar-padding-y: var(--space-1-5);
@@ -337,7 +341,8 @@
   /* Component overrides */
   --toolbar-bg: oklch(0.17 0 0);
   --toolbar-border: var(--color-border);
-  --toolbar-shadow: var(--shadow-md);
+  /* 同上：自包含紧凑阴影，避免被 themePreferences 放大成 scheme.shadow */
+  --toolbar-shadow: 0 1px 2px oklch(0 0 0 / 0.45), 0 3px 9px oklch(0 0 0 / 0.3);
 
   --button-text: var(--color-fg);
   --button-hover-bg: var(--neutral-800);

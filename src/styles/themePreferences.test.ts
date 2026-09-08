@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearMockListeners, emitMockEvent } from "../test/tauri-mock";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
   normalizeThemePreferences,
+  resolveThemeMode,
+  subscribeSystemTheme,
   subscribeThemePreferences,
   THEME_ACCENTS,
   type ThemePreferences,
@@ -19,6 +21,43 @@ beforeEach(() => {
   document.documentElement.removeAttribute("data-theme");
   document.documentElement.removeAttribute("style");
 });
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+/** 可触发 change 事件的可控 matchMedia 桩，用于模拟操作系统深浅色切换。 */
+function stubMatchMedia(matches: boolean) {
+  let current = matches;
+  const listeners = new Set<(event: { matches: boolean }) => void>();
+  const query = {
+    get matches() {
+      return current;
+    },
+    media: "(prefers-color-scheme: dark)",
+    addEventListener: vi.fn((_type: string, listener: (event: { matches: boolean }) => void) =>
+      listeners.add(listener),
+    ),
+    removeEventListener: vi.fn((_type: string, listener: (event: { matches: boolean }) => void) =>
+      listeners.delete(listener),
+    ),
+    addListener: vi.fn((listener: (event: { matches: boolean }) => void) =>
+      listeners.add(listener),
+    ),
+    removeListener: vi.fn((listener: (event: { matches: boolean }) => void) =>
+      listeners.delete(listener),
+    ),
+    trigger: () => {
+      current = !current;
+      listeners.forEach((listener) => listener({ matches: current }));
+    },
+  };
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(() => query),
+  );
+  return query;
+}
 
 describe("theme preferences", () => {
   it("uses safe defaults for missing or unsupported preferences", () => {
@@ -106,5 +145,65 @@ describe("theme preferences", () => {
     expect(document.documentElement.style.getPropertyValue("--palette-card-border-enabled")).toBe(
       values.accent,
     );
+  });
+
+  it("normalizes and preserves the 'system' theme mode", () => {
+    expect(normalizeThemePreferences({ theme: "system" as ThemePreferences["theme"] })).toEqual({
+      theme: "system",
+      accent: "blue",
+      scheme: "cloud",
+    });
+    expect(resolveThemeMode("light")).toBe("light");
+    expect(resolveThemeMode("dark")).toBe("dark");
+  });
+
+  it("resolves 'system' to the current OS preference when applying", () => {
+    stubMatchMedia(true);
+    applyThemePreferences({ theme: "system", accent: "teal", scheme: "moss" });
+
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.dataset.themeScheme).toBe("moss");
+    // localStorage 仍保存用户选择的「跟随系统」，而不是解析后的具体模式
+    expect(getStoredThemePreferences().theme).toBe("system");
+  });
+
+  it("keeps applying the resolved theme while the OS preference is 'system'", () => {
+    const query = stubMatchMedia(false);
+    applyThemePreferences({ theme: "system", accent: "blue", scheme: "cloud" });
+    expect(document.documentElement.dataset.theme).toBe("light");
+
+    const unlisten = subscribeSystemTheme();
+    try {
+      query.trigger();
+      expect(document.documentElement.dataset.theme).toBe("dark");
+
+      // 显式选择浅色后，系统偏好变化不应再影响外观
+      applyThemePreferences({ theme: "light", accent: "blue", scheme: "cloud" });
+      query.trigger();
+      expect(document.documentElement.dataset.theme).toBe("light");
+    } finally {
+      unlisten();
+    }
+  });
+
+  it("re-applies the stored theme when the system theme flips while subscribed", () => {
+    const query = stubMatchMedia(false);
+    applyThemePreferences({ theme: "system", accent: "blue", scheme: "cloud" });
+    const onChange = vi.fn();
+    const unlisten = subscribeSystemTheme(onChange);
+    try {
+      query.trigger();
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onChange).toHaveBeenCalledWith({
+        theme: "system",
+        accent: "blue",
+        scheme: "cloud",
+      });
+    } finally {
+      unlisten();
+    }
+    query.trigger();
+    // 取消订阅后不再触发
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 });

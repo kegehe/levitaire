@@ -30,19 +30,40 @@ pub struct VoiceInfo {
 /// 是否仍是当前 player（重读时旧 player 的延迟回调不会误清新 player）。
 /// MediaPlayer 无 IsPaused 查询接口，用 paused 自行标记暂停态。
 pub struct TtsState {
+    control_lock: Mutex<()>,
     player: Mutex<Option<(u64, MediaPlayer)>>,
     paused: Mutex<bool>,
     next_id: AtomicU64,
+    latest_request: AtomicU64,
 }
 
 impl Default for TtsState {
     fn default() -> Self {
         Self {
+            control_lock: Mutex::new(()),
             player: Mutex::new(None),
             paused: Mutex::new(false),
             next_id: AtomicU64::new(1),
+            latest_request: AtomicU64::new(0),
         }
     }
+}
+
+/// Reserve a request before handing synthesis to a worker. Keeping the
+/// reservation in the synchronous command path makes stop() able to cancel a
+/// request even when its worker has not started yet.
+pub fn reserve_request(state: &TtsState) -> Result<u64, String> {
+    let _control = state
+        .control_lock
+        .lock()
+        .map_err(|e| format!("TTS control lock poisoned: {}", e))?;
+    let request_id = state.next_id.fetch_add(1, Ordering::SeqCst);
+    state.latest_request.store(request_id, Ordering::SeqCst);
+    Ok(request_id)
+}
+
+pub fn is_current_request(state: &TtsState, request_id: u64) -> bool {
+    state.latest_request.load(Ordering::SeqCst) == request_id
 }
 
 /// HSTRING 转 String 的便捷封装（失败返回空串，不中断流程）
@@ -96,11 +117,13 @@ pub fn list_voices() -> Result<Vec<VoiceInfo>, String> {
 /// MediaSource 包装 → MediaPlayer + 事件 → Play → 存入 TtsState → emit tts-started。
 pub fn speak(
     app: tauri::AppHandle,
+    request_id: u64,
     text: String,
     rate: f64,
     voice_id: String,
     volume: f64,
 ) -> Result<(), String> {
+    let player_id = request_id;
     let app_handle = app.clone();
     std::thread::spawn(move || {
         unsafe {
@@ -108,19 +131,37 @@ pub fn speak(
         }
         let res: Result<(), String> = (|| {
             let state = app_handle.state::<TtsState>();
+            // Serialize player setup/control with stop/pause/resume and other
+            // speaks. The lock is released during synthesis below so control
+            // commands can invalidate a pending request promptly.
+            let _control = state
+                .control_lock
+                .lock()
+                .map_err(|e| format!("TTS control lock poisoned: {}", e))?;
+            if state.latest_request.load(Ordering::SeqCst) != player_id {
+                return Ok(());
+            }
 
-            // 1. 清旧 player（Close 释放，take 移除避免悬挂）
-            if let Ok(mut guard) = state.player.lock() {
-                if let Some((_, old)) = guard.take() {
-                    let _ = old.Close();
-                }
+            // 1. 先移除旧 player，再在锁外 Close。Close 可能同步等待
+            // MediaEnded 回调；回调本身需要获取 player 锁，不能在持锁时调用。
+            let old_player = state
+                .player
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take())
+                .map(|(_, player)| player);
+            drop(_control);
+            if let Some(old) = old_player {
+                close_player_on_mta(old);
             }
             if let Ok(mut p) = state.paused.lock() {
                 *p = false;
             }
 
             // 为本次播放分配唯一 id，供 MediaEnded 回调区分自己是否仍是当前 player
-            let player_id = state.next_id.fetch_add(1, Ordering::SeqCst);
+            if state.latest_request.load(Ordering::SeqCst) != player_id {
+                return Ok(());
+            }
 
             // 2. 创建 synthesizer 并按 voice_id 选语音
             let synth =
@@ -148,6 +189,9 @@ pub fn speak(
                 let _ = options.SetSpeakingRate(rate);
             }
 
+            // Do not hold the control lock while waiting for the WinRT future.
+            // stop() can invalidate this request immediately; the ID is
+            // checked again before the synthesized stream is installed.
             // 4. 合成（阻塞，MTA 上安全）
             let stream = synth
                 .SynthesizeTextToStreamAsync(&windows::core::HSTRING::from(text.as_str()))
@@ -156,6 +200,14 @@ pub fn speak(
                 .map_err(|e| format!("合成 .get() 失败: {:?}", e))?;
 
             // 5. 包装为 MediaSource → MediaPlayer
+            let control = state
+                .control_lock
+                .lock()
+                .map_err(|e| format!("TTS control lock poisoned: {}", e))?;
+            if state.latest_request.load(Ordering::SeqCst) != player_id {
+                return Ok(());
+            }
+
             let ct = hstr_to_string(stream.ContentType());
             let content_type = if ct.is_empty() {
                 "audio/wav".to_string()
@@ -186,6 +238,12 @@ pub fn speak(
                     // 旧 player 的延迟回调（重读时 A 已被 Close，WinRT 不保证取消已排队回调）
                     // id 不匹配 → taken=None → 不 emit，避免错误复位新 player B 的 speaking 态。
                     if let Some(state) = app_for_event.try_state::<TtsState>() {
+                        // A newer request may already be synthesizing while
+                        // this player finishes. Still release this player, but
+                        // do not send its terminal event to the newer request's
+                        // UI state.
+                        let is_latest_request =
+                            state.latest_request.load(Ordering::SeqCst) == player_id;
                         let taken = state.player.lock().ok().and_then(|mut g| {
                             if g.as_ref().map(|(id, _)| *id == player_id).unwrap_or(false) {
                                 g.take().map(|(_, p)| p)
@@ -204,13 +262,17 @@ pub fn speak(
                                     CoUninitialize();
                                 }
                             });
-                            // 仅当清理的是自己的 player 时才重置 paused，
-                            // 避免旧 player 的延迟回调错误重置新 player 的暂停态。
-                            if let Ok(mut p) = state.paused.lock() {
-                                *p = false;
+                            if is_latest_request {
+                                // 仅当清理的是当前请求的 player 时才重置 paused，
+                                // 避免旧 player 的延迟回调错误重置新请求的暂停态。
+                                if let Ok(mut p) = state.paused.lock() {
+                                    *p = false;
+                                }
+                                let _ = app_for_event.emit(
+                                    "tts-finished",
+                                    serde_json::json!({ "requestId": player_id }),
+                                );
                             }
-                            // 仅当自然结束的是当前 player 时才通知前端退出 speaking 态
-                            let _ = app_for_event.emit("tts-finished", ());
                         }
                     }
                     Ok(())
@@ -224,7 +286,14 @@ pub fn speak(
             // （否则极短音频可能在存入前结束，回调无法清理导致 player 残留）。
             // clone player 调 Play，避免持锁做 COM 调用阻塞其他等锁命令。
             // 若 Play 失败，需 take 清理已存入的 player。
+            if state.latest_request.load(Ordering::SeqCst) != player_id {
+                return Ok(());
+            }
+
             if let Ok(mut guard) = state.player.lock() {
+                if state.latest_request.load(Ordering::SeqCst) != player_id {
+                    return Ok(());
+                }
                 *guard = Some((player_id, player));
             }
             let player_clone = state.player.lock().ok().and_then(|g| {
@@ -232,20 +301,25 @@ pub fn speak(
                     .filter(|(id, _)| *id == player_id)
                     .map(|(_, p)| p.clone())
             });
+            // Play 可能等待媒体管线，不要让 stop/pause/resume 被 COM 调用阻塞。
+            drop(control);
             match player_clone {
                 Some(p) => match p.Play() {
                     Ok(()) => {}
                     Err(e) => {
-                        if let Ok(mut guard) = state.player.lock() {
+                        let failed_player = state.player.lock().ok().and_then(|mut guard| {
                             if guard
                                 .as_ref()
                                 .map(|(id, _)| *id == player_id)
                                 .unwrap_or(false)
                             {
-                                if let Some((_, old)) = guard.take() {
-                                    let _ = old.Close();
-                                }
+                                guard.take().map(|(_, player)| player)
+                            } else {
+                                None
                             }
+                        });
+                        if let Some(old) = failed_player {
+                            close_player_on_mta(old);
                         }
                         return Err(format!("Play: {:?}", e));
                     }
@@ -272,6 +346,8 @@ pub fn speak(
 
 /// 停止朗读：在 MTA 线程 Close 销毁 player，take 移除。MediaPlayer 无 Stop()，用 Close 释放。
 pub fn stop(state: &TtsState) -> Result<(), String> {
+    let _control = state.control_lock.lock().map_err(|e| e.to_string())?;
+    state.latest_request.store(0, Ordering::SeqCst);
     // 取出 player（在调用方线程，仅 Mutex 操作无 COM 调用）
     let player = state
         .player
@@ -280,18 +356,7 @@ pub fn stop(state: &TtsState) -> Result<(), String> {
         .and_then(|mut g| g.take())
         .map(|(_, p)| p);
     if let Some(p) = player {
-        // COM 调用放 MTA 线程（player 是 agile 对象，跨线程 Close 需规范 COM 环境）
-        let _ = std::thread::spawn(move || {
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            }
-            let _ = p.Pause();
-            let _ = p.Close();
-            unsafe {
-                CoUninitialize();
-            }
-        })
-        .join();
+        close_player_on_mta(p);
     }
     if let Ok(mut p) = state.paused.lock() {
         *p = false;
@@ -299,14 +364,33 @@ pub fn stop(state: &TtsState) -> Result<(), String> {
     Ok(())
 }
 
+/// Release a MediaPlayer on a dedicated MTA thread. The caller must not hold
+/// `TtsState.player` while invoking this because WinRT may wait for callbacks
+/// that access the same mutex.
+fn close_player_on_mta(player: MediaPlayer) {
+    let _ = std::thread::spawn(move || {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let _ = player.Pause();
+        let _ = player.Close();
+        unsafe {
+            CoUninitialize();
+        }
+    })
+    .join();
+}
+
 /// 暂停：在 MTA 线程调 Pause（agile COM 对象跨线程需规范 COM 环境）
 pub fn pause(state: &TtsState) -> Result<(), String> {
+    let _control = state.control_lock.lock().map_err(|e| e.to_string())?;
     let player = state
         .player
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|(_, p)| p.clone()));
-    if let Some(p) = player {
+        .and_then(|g| g.as_ref().map(|(id, p)| (*id, p.clone())));
+    let player_id = player.as_ref().map(|(id, _)| *id);
+    if let Some((_, p)) = player {
         std::thread::spawn(move || {
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -320,20 +404,31 @@ pub fn pause(state: &TtsState) -> Result<(), String> {
         .join()
         .map_err(|e| format!("pause 线程 panic: {:?}", e))??;
     }
-    if let Ok(mut p) = state.paused.lock() {
-        *p = true;
+    if player_id.is_some_and(|player_id| {
+        state
+            .player
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|(id, _)| *id == player_id))
+            .unwrap_or(false)
+    }) {
+        if let Ok(mut p) = state.paused.lock() {
+            *p = true;
+        }
     }
     Ok(())
 }
 
 /// 继续：在 MTA 线程调 Play（MediaPlayer 用 Play 恢复播放）
 pub fn resume(state: &TtsState) -> Result<(), String> {
+    let _control = state.control_lock.lock().map_err(|e| e.to_string())?;
     let player = state
         .player
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|(_, p)| p.clone()));
-    if let Some(p) = player {
+        .and_then(|g| g.as_ref().map(|(id, p)| (*id, p.clone())));
+    let player_id = player.as_ref().map(|(id, _)| *id);
+    if let Some((_, p)) = player {
         std::thread::spawn(move || {
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -346,8 +441,17 @@ pub fn resume(state: &TtsState) -> Result<(), String> {
         .join()
         .map_err(|e| format!("resume 线程 panic: {:?}", e))?;
     }
-    if let Ok(mut p) = state.paused.lock() {
-        *p = false;
+    if player_id.is_some_and(|player_id| {
+        state
+            .player
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|(id, _)| *id == player_id))
+            .unwrap_or(false)
+    }) {
+        if let Ok(mut p) = state.paused.lock() {
+            *p = false;
+        }
     }
     Ok(())
 }
@@ -448,6 +552,25 @@ mod tests {
         let a = state.next_id.fetch_add(1, Ordering::SeqCst);
         let b = state.next_id.fetch_add(1, Ordering::SeqCst);
         assert!(b > a, "next_id 应单调递增");
+    }
+
+    #[test]
+    fn reserved_request_can_be_invalidated_before_worker_starts() {
+        let state = TtsState::default();
+        let request_id = reserve_request(&state).expect("request reservation should succeed");
+        assert!(is_current_request(&state, request_id));
+        stop(&state).expect("stopping an idle player should succeed");
+        assert!(!is_current_request(&state, request_id));
+    }
+
+    #[test]
+    fn newer_request_invalidates_an_older_player_terminal_event() {
+        let state = TtsState::default();
+        let first = reserve_request(&state).expect("first reservation should succeed");
+        let second = reserve_request(&state).expect("second reservation should succeed");
+
+        assert!(!is_current_request(&state, first));
+        assert!(is_current_request(&state, second));
     }
 
     /// 真机测试：枚举系统已安装语音。需 Windows 语音包，默认 ignore（CI 无语音环境）。

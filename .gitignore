@@ -222,6 +222,8 @@ dist-ssr/
 
 # Rust
 src-tauri/target/
+/target-*/
+src-tauri/target-*/
 
 # Tauri
 src-tauri/binaries/
@@ -242,5 +244,16 @@ release/
 levitaire-debug.log
 
 # Screenshots (不应入库)
-screenshot.png
-screenshot.ps1
+# Local visual-test captures (kept out of the repository root)
+/desktop-*.png
+/orb-*.png
+/palette*.png
+/f8.png
+/live-orb.png
+/post-card.png
+/screenshot*.png
+/screenshot.ps1
+
+# Local review/output leftovers
+/_review.diff
+/0

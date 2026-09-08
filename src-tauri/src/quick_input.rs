@@ -28,6 +28,11 @@ use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
 
 /// 是否处于转盘模式（mouse hook 据此决定是否 emit 鼠标移动）
 static QUICK_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Serialize wheel lifecycle transitions across keyboard-hook, mouse-hook,
+/// timeout, and frontend command threads. Without this, a second toggle can
+/// observe `active=true` while the first `begin_wheel` is still showing the
+/// window and then be overwritten by the stale start sequence.
+static WHEEL_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
 /// overlay 窗口的 HWND（ensure_window 创建后缓存）。
 /// 钩子线程用 IsWindowVisible 直接查询可见性，避免调用 get_webview_window
@@ -60,6 +65,20 @@ static TRIGGER_MODE: AtomicU8 = AtomicU8::new(1);
 /// 供「按住唤起」模式在松开触发键时读取并作为选中项。
 static CURRENT_HIGHLIGHT: AtomicI32 = AtomicI32::new(-1);
 
+/// 按住模式收到 keyup 后，等待前端按 keyup 时的鼠标坐标结算选中项。
+/// 这段很短的确认阶段避免异步 IPC 中的最新高亮尚未抵达时就结束会话。
+static HOLD_CONFIRM_PENDING: AtomicBool = AtomicBool::new(false);
+static HOLD_CONFIRM_X: AtomicI32 = AtomicI32::new(0);
+static HOLD_CONFIRM_Y: AtomicI32 = AtomicI32::new(0);
+/// keyup 早于 begin_wheel 完成时暂存释放状态，由唤起线程补发确认请求。
+static HOLD_RELEASE_PENDING: AtomicBool = AtomicBool::new(false);
+/// keyup 瞬间的鼠标物理坐标。与 HOLD_RELEASE_PENDING 配合使用：先写坐标，
+/// 再置 pending，读取方用 SeqCst 保证看到同一份快照。
+static HOLD_RELEASE_X: AtomicI32 = AtomicI32::new(0);
+static HOLD_RELEASE_Y: AtomicI32 = AtomicI32::new(0);
+
+const HOLD_CONFIRM_TIMEOUT_MS: u64 = 500;
+
 /// 触发模式常量
 pub const MODE_CLICK: u8 = 1;
 pub const MODE_HOLD: u8 = 2;
@@ -70,11 +89,15 @@ pub fn is_active() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QuickInputState {
     pub active: bool,
     pub x: i32,
     pub y: i32,
     pub generation: u64,
+    pub hold_confirm_pending: bool,
+    pub hold_confirm_x: i32,
+    pub hold_confirm_y: i32,
 }
 
 pub fn state() -> QuickInputState {
@@ -83,6 +106,9 @@ pub fn state() -> QuickInputState {
         x: QUICK_INPUT_X.load(Ordering::SeqCst),
         y: QUICK_INPUT_Y.load(Ordering::SeqCst),
         generation: QUICK_INPUT_GENERATION.load(Ordering::SeqCst),
+        hold_confirm_pending: HOLD_CONFIRM_PENDING.load(Ordering::SeqCst),
+        hold_confirm_x: HOLD_CONFIRM_X.load(Ordering::SeqCst),
+        hold_confirm_y: HOLD_CONFIRM_Y.load(Ordering::SeqCst),
     }
 }
 
@@ -99,11 +125,6 @@ pub fn set_mode(mode: u8) {
 /// 更新前端同步过来的高亮扇区索引（-1 = 无选中）
 pub fn set_highlight(idx: i32) {
     CURRENT_HIGHLIGHT.store(idx, Ordering::SeqCst);
-}
-
-/// 读取当前高亮扇区索引（-1 = 无选中）
-pub fn highlight() -> i32 {
-    CURRENT_HIGHLIGHT.load(Ordering::SeqCst)
 }
 
 /// 当前配置的触发键 vk_code（0 = 未启用）
@@ -124,6 +145,24 @@ pub fn is_trigger_down() -> bool {
 /// 标记触发键按下状态
 pub fn set_trigger_down(down: bool) {
     TRIGGER_DOWN.store(down, Ordering::SeqCst);
+}
+
+/// 清除上一次按住会话可能留下的释放标记，在新的 keydown 开始时调用。
+pub fn reset_hold_release_pending() {
+    HOLD_RELEASE_PENDING.store(false, Ordering::SeqCst);
+}
+
+/// 记录按住模式 keyup 发生瞬间的坐标，供尚未完成唤起的后台线程补偿处理。
+pub fn mark_hold_release_pending(x: i32, y: i32) {
+    HOLD_RELEASE_X.store(x, Ordering::SeqCst);
+    HOLD_RELEASE_Y.store(y, Ordering::SeqCst);
+    HOLD_RELEASE_PENDING.store(true, Ordering::SeqCst);
+}
+
+/// 查询是否有待处理的释放快照。快照由 request_hold_confirmation 消费，
+/// 不能在 begin_wheel 补偿检查阶段提前清除。
+pub fn is_hold_release_pending() -> bool {
+    HOLD_RELEASE_PENDING.load(Ordering::SeqCst)
 }
 
 /// 预创建转盘 overlay 窗口（隐藏、透明、不可聚焦）。首次调用创建，窗口已存在时为空操作。
@@ -186,7 +225,10 @@ pub fn wheel_visible() -> bool {
 /// 健壮性：前置检查 overlay 窗口存在，且 emit 失败时回滚激活态，
 /// 避免「窗口未就绪/事件丢失」导致 QUICK_INPUT_ACTIVE 卡在 true——
 /// 那会使转盘不显示、鼠标点击被全局吞掉，且 toggle 永远误走「关闭」分支。
-pub fn begin_wheel(app: &tauri::AppHandle) {
+fn begin_wheel_inner(app: &tauri::AppHandle) {
+    HOLD_CONFIRM_PENDING.store(false, Ordering::SeqCst);
+    HOLD_CONFIRM_X.store(0, Ordering::SeqCst);
+    HOLD_CONFIRM_Y.store(0, Ordering::SeqCst);
     // overlay 窗口不存在时 emit_to 必失败，提前终止避免无谓激活
     let Some(win) = app.get_webview_window("quick-input-overlay") else {
         crate::utils::logger::log("quick_input", "begin_wheel aborted: overlay window missing");
@@ -259,11 +301,22 @@ pub fn begin_wheel(app: &tauri::AppHandle) {
     }
 }
 
+pub fn begin_wheel(app: &tauri::AppHandle) {
+    let Ok(_lifecycle) = WHEEL_LIFECYCLE_LOCK.lock() else {
+        return;
+    };
+    begin_wheel_inner(app);
+}
+
 /// 退出转盘模式：停止鼠标移动 emit，通知前端确认/取消。
 /// `selected_index` 为 None 表示未选中（鼠标在中心或无扇区），前端据此取消不输入。
-pub fn end_wheel(app: &tauri::AppHandle, selected_index: Option<usize>) {
+fn end_wheel_inner(app: &tauri::AppHandle, selected_index: Option<usize>) {
     let generation = QUICK_INPUT_GENERATION.load(Ordering::SeqCst);
     QUICK_INPUT_ACTIVE.store(false, Ordering::SeqCst);
+    HOLD_CONFIRM_PENDING.store(false, Ordering::SeqCst);
+    HOLD_CONFIRM_X.store(0, Ordering::SeqCst);
+    HOLD_CONFIRM_Y.store(0, Ordering::SeqCst);
+    HOLD_RELEASE_PENDING.store(false, Ordering::SeqCst);
     // 结束也推进会话序号，使尚未完成的 start 查询无法复活已结束的转盘。
     QUICK_INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
     CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
@@ -277,12 +330,123 @@ pub fn end_wheel(app: &tauri::AppHandle, selected_index: Option<usize>) {
     );
 }
 
+pub fn end_wheel(app: &tauri::AppHandle, selected_index: Option<usize>) {
+    let Ok(_lifecycle) = WHEEL_LIFECYCLE_LOCK.lock() else {
+        return;
+    };
+    end_wheel_inner(app, selected_index);
+}
+
+/// Cancel only the wheel generation that requested the cancellation. The
+/// generation check must happen under the lifecycle lock together with the
+/// state transition, otherwise a new wheel can start between the caller's
+/// state read and the unconditional close.
+pub fn cancel_wheel_if_generation(app: &tauri::AppHandle, generation: Option<u64>) {
+    let Ok(_lifecycle) = WHEEL_LIFECYCLE_LOCK.lock() else {
+        return;
+    };
+    let current = state();
+    if current.active
+        && generation
+            .map(|value| value == current.generation)
+            .unwrap_or(true)
+    {
+        end_wheel_inner(app, None);
+    }
+}
+
+/// 按住模式松开触发键时请求前端按当前鼠标位置结算目标扇区。
+/// 前端收到请求后会携带会话代次和最终索引调用 `confirm_hold_wheel`；在此之前
+/// 保持会话活跃，避免鼠标移动高亮与 keyup 之间的异步 IPC 竞态。
+pub fn request_hold_confirmation(app: &tauri::AppHandle) {
+    if !is_active()
+        || HOLD_CONFIRM_PENDING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    {
+        return;
+    }
+    let generation = QUICK_INPUT_GENERATION.load(Ordering::SeqCst);
+    // 优先使用 keyup 瞬间保存的坐标；只有没有释放快照的兼容调用才读取当前坐标。
+    let pos = if HOLD_RELEASE_PENDING.swap(false, Ordering::SeqCst) {
+        crate::automation::Point {
+            x: HOLD_RELEASE_X.load(Ordering::SeqCst),
+            y: HOLD_RELEASE_Y.load(Ordering::SeqCst),
+        }
+    } else {
+        crate::automation::get_mouse_position().unwrap_or(crate::automation::Point {
+            x: QUICK_INPUT_X.load(Ordering::SeqCst),
+            y: QUICK_INPUT_Y.load(Ordering::SeqCst),
+        })
+    };
+    HOLD_CONFIRM_X.store(pos.x, Ordering::SeqCst);
+    HOLD_CONFIRM_Y.store(pos.y, Ordering::SeqCst);
+    if let Err(error) = app.emit_to(
+        "quick-input-overlay",
+        "quick-input-confirm-request",
+        serde_json::json!({ "x": pos.x, "y": pos.y, "generation": generation }),
+    ) {
+        crate::utils::logger::log(
+            "quick_input",
+            &format!("hold confirmation request failed: {}", error),
+        );
+        end_wheel(app, None);
+        return;
+    }
+
+    // WebView 初始化、事件监听器重建或前端异常时，确认事件可能无人处理。
+    // 超时只取消当前代次且必须成功取走 pending 标记，不会干扰已完成的确认。
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(HOLD_CONFIRM_TIMEOUT_MS));
+        if QUICK_INPUT_GENERATION.load(Ordering::SeqCst) != generation
+            || !is_active()
+            || HOLD_CONFIRM_PENDING
+                .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        end_wheel(&app_clone, None);
+    });
+}
+
+/// 提交前端根据 keyup 时鼠标位置结算出的扇区。
+/// 会话代次与 pending 标志共同防止过期确认结束下一次转盘会话。
+pub fn confirm_hold_wheel(
+    app: &tauri::AppHandle,
+    generation: u64,
+    selected_index: Option<usize>,
+) {
+    if generation != QUICK_INPUT_GENERATION.load(Ordering::SeqCst)
+        || !is_active()
+        || HOLD_CONFIRM_PENDING
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    {
+        return;
+    }
+    end_wheel(app, selected_index);
+}
+
 /// 转盘模式下鼠标点击选中：退出转盘模式并通知前端。
 /// 当前高亮扇区由前端持有（highlightedRef），因此这里只发点击信号，
 /// 前端读到高亮项后执行输入并隐藏窗口，后端不再回传 index。
-pub fn confirm_by_click(app: &tauri::AppHandle) {
-    let generation = QUICK_INPUT_GENERATION.load(Ordering::SeqCst);
+pub fn confirm_by_click(app: &tauri::AppHandle, generation: u64) {
+    let Ok(_lifecycle) = WHEEL_LIFECYCLE_LOCK.lock() else {
+        return;
+    };
+    if QUICK_INPUT_GENERATION.load(Ordering::SeqCst) != generation
+        || !is_active()
+        || !wheel_visible()
+    {
+        return;
+    }
     QUICK_INPUT_ACTIVE.store(false, Ordering::SeqCst);
+    HOLD_CONFIRM_PENDING.store(false, Ordering::SeqCst);
+    HOLD_CONFIRM_X.store(0, Ordering::SeqCst);
+    HOLD_CONFIRM_Y.store(0, Ordering::SeqCst);
+    HOLD_RELEASE_PENDING.store(false, Ordering::SeqCst);
     QUICK_INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
     CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
     if let Some(win) = app.get_webview_window("quick-input-overlay") {
@@ -301,6 +465,9 @@ pub fn confirm_by_click(app: &tauri::AppHandle) {
 /// 仅当 active 持续超过 WHEEL_HEAL_AFTER_MS 且窗口仍不可见才判定为卡死，
 /// 避免误伤「刚触发、窗口正在 show」窗口期内的快速二次触发（应正常走关闭分支）。
 pub fn toggle_wheel(app: &tauri::AppHandle) {
+    let Ok(_lifecycle) = WHEEL_LIFECYCLE_LOCK.lock() else {
+        return;
+    };
     if is_active() {
         let stale = now_ms().saturating_sub(QUICK_INPUT_ACTIVE_AT.load(Ordering::SeqCst))
             >= WHEEL_HEAL_AFTER_MS;
@@ -311,12 +478,12 @@ pub fn toggle_wheel(app: &tauri::AppHandle) {
             );
             QUICK_INPUT_ACTIVE.store(false, Ordering::SeqCst);
             CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
-            begin_wheel(app);
+            begin_wheel_inner(app);
             return;
         }
-        end_wheel(app, None);
+        end_wheel_inner(app, None);
     } else {
-        begin_wheel(app);
+        begin_wheel_inner(app);
     }
 }
 
@@ -467,6 +634,8 @@ fn load_history_from(path: &Path) -> Vec<ClipboardHistoryItem> {
     match serde_json::from_slice::<Vec<ClipboardHistoryItem>>(&plaintext) {
         Ok(mut items) => {
             items.retain(|i| !i.text.is_empty());
+            // 历史按最旧到最新保存；只合并连续相同文本，保留非相邻重复项。
+            items.dedup_by(|current, previous| current.text == previous.text);
             let limit = get_history_limit();
             if items.len() > limit {
                 let overflow = items.len() - limit;
@@ -515,7 +684,8 @@ fn save_history_to(path: &Path, items: &[ClipboardHistoryItem]) -> Result<(), St
 }
 
 /// 由 keyboard hook 在检测到 Ctrl+C 复制文本后调用，追加到历史。
-/// 去重：与最近一条相同则跳过。内存更新后持久化到本地文件。
+/// 去重：仅与最近一条（相邻项）相同则跳过；非相邻重复项仍会保留。
+/// 内存更新后持久化到本地文件。
 /// 测试环境跳过落盘，避免污染真实用户数据。
 pub fn push_history(text: &str) {
     if !get_history_enabled() || text.is_empty() || get_history_limit() == 0 {
@@ -1023,6 +1193,23 @@ mod tests {
     }
 
     #[test]
+    fn hold_release_snapshot_keeps_keyup_coordinates_until_confirmation() {
+        super::reset_hold_release_pending();
+        super::mark_hold_release_pending(123, 456);
+        assert!(super::is_hold_release_pending());
+        assert_eq!(
+            super::HOLD_RELEASE_X.load(std::sync::atomic::Ordering::SeqCst),
+            123
+        );
+        assert_eq!(
+            super::HOLD_RELEASE_Y.load(std::sync::atomic::Ordering::SeqCst),
+            456
+        );
+        super::reset_hold_release_pending();
+        assert!(!super::is_hold_release_pending());
+    }
+
+    #[test]
     fn get_history_returns_latest_first() {
         let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_history();
@@ -1033,6 +1220,25 @@ mod tests {
         assert_eq!(hist.len(), 2);
         assert_eq!(hist[0].text, "second", "最新一条应排在最前");
         assert_eq!(hist[1].text, "first");
+        clear_history();
+    }
+
+    #[test]
+    fn history_deduplicates_only_adjacent_entries() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_history();
+        push_history("first");
+        push_history("second");
+        push_history("first");
+        push_history("first");
+
+        let hist = get_history();
+        assert_eq!(
+            hist.iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second", "first"]
+        );
         clear_history();
     }
 
@@ -1182,6 +1388,50 @@ mod tests {
         assert_eq!(loaded.len(), HISTORY_MAX, "空文本应被过滤并裁剪到上限");
         assert_eq!(loaded[0].text, "t5", "最旧一条被裁剪");
         assert_eq!(loaded.last().unwrap().text, "t24", "最新一条应保留");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        set_history_limit(HISTORY_DEFAULT_LIMIT);
+    }
+
+    #[test]
+    fn history_persistence_deduplicates_adjacent_entries_only() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_history_limit(HISTORY_MAX);
+        let tmp = std::env::temp_dir().join(format!(
+            "levitaire_test_hist_adjacent_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("clipboard_history.json");
+
+        let items = vec![
+            ClipboardHistoryItem {
+                preview: "a".to_string(),
+                text: "a".to_string(),
+            },
+            ClipboardHistoryItem {
+                preview: "a duplicate".to_string(),
+                text: "a".to_string(),
+            },
+            ClipboardHistoryItem {
+                preview: "b".to_string(),
+                text: "b".to_string(),
+            },
+            ClipboardHistoryItem {
+                preview: "a again".to_string(),
+                text: "a".to_string(),
+            },
+        ];
+        save_history_to(&path, &items).unwrap();
+
+        let loaded = load_history_from(&path);
+        assert_eq!(
+            loaded
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "a"]
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
         set_history_limit(HISTORY_DEFAULT_LIMIT);

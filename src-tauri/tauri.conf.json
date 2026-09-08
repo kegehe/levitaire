@@ -44,7 +44,7 @@
         "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "visible": true,
+        "visible": false,
         "x": 100,
         "y": 100,
         "backgroundColor": [
