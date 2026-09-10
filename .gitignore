@@ -237,7 +237,7 @@ src-tauri/libs/
 *tarius-signing-key*
 
 # 本地发版生成物（release/latest.json 每次重新生成，重新生成即可；
-# 仓库根 latest.json 用于 GitHub Pages 在线升级，需手动提交并 push 到 main）
+# 仓库根 latest.json 用于 GitHub Pages 在线升级，需手动提交并 push 到 master）
 release/
 
 # Debug log (written by app at runtime)
