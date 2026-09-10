@@ -48,12 +48,21 @@ Levitaire 是一款面向 Windows 的悬浮效率工具集。运行后一个悬�
 - 🖼️ **区域截图** — 拖框截取屏幕任意区域，支持多显示器 / 虚拟桌面
 - ✏️ **截图标注** — 截图后可绘制箭头、矩形、文字标注
 - 📌 **钉图** — 截图后钉在桌面最上层，可拖拽、缩放，作为临时参考
+- 📜 **长截图** — 滚动捕获可滚动页面并自动拼接为一张长图，支持预览、保存与复制
+- 🖌️ **屏幕草稿** — 在当前屏幕上绘制临时草图，可保存为透明 PNG
 - 🔤 **离线 OCR** — 双引擎离线文字识别（Windows 系统 OCR + PaddleOCR），截图后一键提取文字，支持引擎切换
 - 🎥 **GIF / 视频录制** — 录制屏幕区域为 GIF 或 MP4（ffmpeg 编码），支持全屏 / 区域 / 窗口识别
 
 ### 📊 系统工具
 - 📈 **系统监控** — 常驻悬浮显示 CPU、内存、网络、磁盘、电池实时曲线
 - 🍅 **番茄钟** — 常驻悬浮倒计时，专注 / 休息自动循环，到点语音播报或提示音提醒
+- ⏰ **时钟 / 倒计时 / 秒表 / 日历** — 桌面时钟与计时工具，内置月历、农历与 24 节气标注（本地历法计算，不联网）
+- ✅ **待办清单** — 分组待办、截止时间与提醒、重复任务、导入导出，支持全局快捷键快速添加
+- 📝 **便利贴** — 桌面多张便签，6 种预置纸色，实时编辑并持久化，收起不丢失
+
+### 🧰 通用工具集
+- 🎨 **取色器** — 拾取屏幕任意位置的颜色值
+- 🧭 **滚动导航** — 对长网页 / 长文档提供精确与百分比两种翻页方式（基于 UIA 滚动接口）
 
 ### ⚙️ 全局能力
 - 💫 **悬浮球** — 可拖拽、始终置顶，点击展开全部工具面板；每个工具可独立启停开关
@@ -90,10 +99,29 @@ Levitaire 是一款面向 Windows 的悬浮效率工具集。运行后一个悬�
 
 - Windows 10 / 11
 - [Rust](https://rustup.rs/) 1.70+
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) 18+（本项目使用 npm）
 - [Tauri CLI](https://tauri.app/) 2.x
 
-> **说明**：PaddleOCR 依赖 ONNX Runtime（`onnxruntime.dll`，约 20.5MB），已纳入仓库并采用 `load-dynamic` 模式运行时动态加载，无需联网下载。若仅使用 Windows 系统 OCR，可在 `Cargo.toml` 中移除 `ort` 依赖以减小构建体积。
+### 构建与资源（重要）
+
+PaddleOCR 依赖 ONNX Runtime（`onnxruntime.dll`，约 20.5MB），MP4 录制依赖 ffmpeg（`ffmpeg.exe`，约 242MB）。
+这两个文件体积过大、**未纳入 Git 仓库**（见 `.gitignore`），因此：
+
+- **开发模式**（`npm run tauri dev`）：照常可用，无需它们。系统 OCR 走 Windows 内置引擎。
+- **打包发版**（`npm run release` / `npm run build:app`）：必须先把它们放到：
+
+  | 文件 | 放置路径 | 用途 |
+  |------|----------|------|
+  | `ffmpeg.exe` | `src-tauri/binaries/ffmpeg.exe` | MP4 视频编码 |
+  | `onnxruntime.dll` | `src-tauri/libs/onnxruntime.dll` | PaddleOCR 本地推理 |
+
+  发版脚本内置预检，缺失时会直接提示上述路径。这两个资源由
+  `src-tauri/tauri.bundle.conf.json` 在发版时注入安装包；基础配置 `tauri.conf.json`
+  不含它们，以保证 fresh clone 可以直接 `cargo check` / `cargo test`。
+
+PaddleOCR 采用 `load-dynamic` 模式运行时动态加载 ONNX Runtime，运行时按
+`ORT_DYLIB_PATH` 环境变量 → 当前目录 → exe 同目录的顺序查找 DLL。若不使用 PaddleOCR，
+可在 `Cargo.toml` 中移除 `ort` 依赖以减小构建体积。
 
 ### 安装与运行
 
@@ -117,8 +145,12 @@ npm run tauri dev
 ### 构建发布版本
 
 ```bash
-npm run tauri build
+npm run build:app
 ```
+
+> `build:app` = `tauri build --config src-tauri/tauri.bundle.conf.json`，会自动把
+> `ffmpeg.exe` / `onnxruntime.dll` 打进安装包。若坚持用原生 `npm run tauri build`，
+> 请自行追加 `-- --config src-tauri/tauri.bundle.conf.json`，否则产物不含这两个资源。
 
 构建产物位于 `src-tauri/target/release/bundle/`，含 `.msi` 安装包与独立 `.exe`。
 
@@ -128,13 +160,13 @@ Levitaire 已接入 Tauri Updater：设置页 → 通用 → 在线更新 可手
 
 #### 发布一次新版本（本地脚本，无需 CI / Secrets）
 
-> 前置：仓库已开启 GitHub Pages（源 = main 分支根目录）。
+> 前置：仓库已开启 GitHub Pages（源 = `master` 分支根目录）。
 
 ```bash
 npm run release 0.1.1 "修复了…\n新增了…"
 ```
 
-脚本自动：校验三处版本一致 → 一起升到 `0.1.1` → `tauri build --bundles nsis` → `tauri signer sign` 生成安装包签名 → 生成 `release/latest.json`（含签名与下载地址）。随后手动确认执行：
+脚本自动：校验三处版本一致 → 一起升到 `0.1.1` → 预检 `ffmpeg.exe`/`onnxruntime.dll` → `tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json` → `tauri signer sign` 生成安装包签名 → 生成 `release/latest.json`（含签名与下载地址）。随后手动确认执行：
 
 ```bash
 git tag v0.1.1 && git push origin v0.1.1
@@ -143,13 +175,13 @@ git add latest.json && git commit -m "chore: 更新在线升级清单至 v0.1.1"
 ```
 
 - 仅同步版本号不打包：`npm run release:bump 0.2.0`；不重新出包签现有安装包：`node scripts/release.mjs 0.1.1 --no-build`。
-- `release/` 目录已加入 `.gitignore`（每次重新生成）；**仓库根 `latest.json` 需提交并推到 main**，GitHub Pages 才会更新（updater 从 `kegehe.github.io/levitaire/latest.json` 读取）。
+- `release/` 目录已加入 `.gitignore`（每次重新生成）；**仓库根 `latest.json` 需提交并推到 `master`**，GitHub Pages 才会更新（updater 从 `kegehe.github.io/levitaire/latest.json` 读取）。
 - 变体：`git tag v0.1.1` 需先 push 到带 `--force` 覆盖旧 tag？不需要——每次发版用新版本号即可，无需覆盖。
 
 #### 首次一次性配置
 
 1. **签名私钥**：本机 `C:\Users\<你>\.tauri\levitaire.key` 与口令 `levitaire-key-password.txt` 已生成。请妥善备份私钥与口令——丢失任一个 = 永久无法再签名更新包。私钥与口令**严禁**提交到仓库（已由 `.gitignore` 忽略 `.tauri/`、`*.key` 等）。
-2. **GitHub Pages**：仓库 Settings → Pages，源设为 main 分支根目录（已配置，确认即可）。
+2. **GitHub Pages**：仓库 Settings → Pages，源设为 `master` 分支根目录（已配置，确认即可）。
 
 > 说明：首次发布 `v0.1.0` 作为可分发基线；Updater 仅在「服务器版本 > 本地已装版本」时提示更新，因此后续补丁需递增版本号（如 `v0.1.1`）。
 
@@ -184,11 +216,11 @@ Levitaire/
 ├── src-tauri/                          # Rust 后端
 │   ├── src/
 │   │   ├── main.rs                     # 入口：初始化模块、注册命令
-│   │   ├── commands.rs                 # Tauri 命令（#[tauri::command]）
+│   │   ├── commands/                   # Tauri 命令（#[tauri::command]）
 │   │   ├── hooks/                      # WH_MOUSE_LL / WH_KEYBOARD_LL / RegisterHotKey
 │   │   ├── automation/                 # 多策略选区获取（UIA / Win32 / 剪贴板 / OCR 回退）
 │   │   ├── quick_input.rs               # 快速输入转盘 + 剪贴板历史
-│   │   ├── clipboard/                   # 剪贴板写入（文字 / 图片 / GIF）
+│   │   ├── clipboard/                  # 剪贴板写入（文字 / 图片 / GIF）
 │   │   ├── screenshot/                  # GDI 截屏（多显示器）、钉图窗口
 │   │   ├── ocr/                         # OcrService（Windows OCR + PaddleOCR 双引擎）
 │   │   ├── recording/                   # GIF / ffmpeg MP4 录制、窗口检测
@@ -263,10 +295,14 @@ Levitaire/
 2. 提交前请确保通过测试与代码检查：
 
 ```bash
-npm run test        # 单元测试（Vitest）
-npm run lint        # ESLint 检查
+npm run typecheck    # TypeScript 类型检查
+npm run test         # 单元测试（Vitest，前端 786 项）
+npm run lint         # ESLint 检查
 npm run format:check # Prettier 格式检查
+cargo test           # 后端单元测试（在 src-tauri/ 下）
 ```
+
+> 推送与 PR 会由 CI（`.github/workflows/ci.yml`）自动跑 typecheck / lint / vitest / cargo clippy / cargo test。
 
 3. 提交清晰的改动说明，参考现有代码风格
 

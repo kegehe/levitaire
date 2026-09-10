@@ -11,7 +11,7 @@ import {
   contextMenuHeight,
   type ContextMenuRequest,
 } from "../components/contextMenuTypes";
-import { BACKEND_TOOLS, FLOATING_TOOLS } from "../tools/registry";
+import { BACKEND_TOOLS } from "../tools/registry";
 
 type ToolWindowLabel =
   | "screenshot-overlay"
@@ -955,14 +955,17 @@ export async function ensureStickyNotesManagerWindow(): Promise<WebviewWindowIns
 }
 
 /**
- * 根据工具 ID 打开对应的工具窗口。
- * 用于 ToolPalette 激活和 FloatingOrb 自启动两种场景。
- * 返回 true 表示成功打开，false 表示该工具不支持窗口打开或打开失败。
- */
-/**
- * Preload every tool that is currently enabled in the persisted backend
- * configuration. Windows remain hidden; this only moves WebView creation and
- * lazy chunk loading to application startup so first use is immediate.
+ * Warm up only the windows a global hotkey may summon at an arbitrary moment,
+ * plus the pinned-sticky-note restoration. All other tool windows are created
+ * on first real use by their ensure-* / openToolWindow call sites.
+ *
+ * Background: each tool window is an independent WebView2 renderer (tens of MB
+ * of working set). Pre-creating a hidden window for every enabled tool made
+ * merely enabling a tool keep that renderer alive for the whole session, so
+ * "3 tools enabled" could mean 6-7 resident WebViews. Auxiliary per-flow
+ * windows (long-capture controls/frame, context menu, recording controls) and
+ * panel tools (monitor/pomodoro/timer/utility-hub) do not need this and are now
+ * created lazily. quick-input's overlay is ensured natively when enabled.
  */
 export async function preloadEnabledToolWindows(): Promise<void> {
   const enabledResults = await Promise.all(
@@ -978,52 +981,19 @@ export async function preloadEnabledToolWindows(): Promise<void> {
   const enabledIds = new Set(enabledResults.filter(({ enabled }) => enabled).map(({ id }) => id));
   const tasks: Array<{ label: string; promise: Promise<unknown> }> = [];
 
-  for (const tool of FLOATING_TOOLS) {
-    if (enabledIds.has(tool.id)) {
-      tasks.push({ label: `${tool.id} component`, promise: tool.loader() });
-    }
-  }
-
-  // Screenshot and recording share the selection overlay. A screenshot also
-  // owns the long-capture and contextual-menu WebViews used after selection.
+  // Screenshot and recording share the selection overlay; their hotkeys must be
+  // able to show it immediately. The long-capture and contextual-menu WebViews
+  // are only needed after a selection exists, so they are ensured on demand.
   if (enabledIds.has("screenshot") || enabledIds.has("recording")) {
     tasks.push({ label: "screenshot overlay", promise: ensureScreenshotWindow() });
   }
-  if (enabledIds.has("screenshot")) {
-    tasks.push(
-      { label: "long capture controls", promise: ensureLongCaptureControlsWindow() },
-      { label: "long capture frame", promise: ensureLongCaptureFrameWindow() },
-      { label: "context menu", promise: ensureContextMenuWindow() },
-    );
-  }
   if (enabledIds.has("sketch")) {
+    // 草稿由全局热键唤起全屏画板，需即时可用。
     tasks.push({ label: "sketch overlay", promise: ensureSketchWindow() });
   }
-  if (enabledIds.has("recording")) {
-    tasks.push({ label: "recording controls", promise: ensureRecordingControlsWindow() });
-  }
-  if (enabledIds.has("system-monitor")) {
-    tasks.push({
-      label: "system monitor",
-      promise: ensureMonitorWindow().then(async ({ created }) => {
-        if (created) await waitForNewMonitorWindowReady();
-      }),
-    });
-  }
-  if (enabledIds.has("pomodoro")) {
-    tasks.push({ label: "pomodoro", promise: ensurePomodoroWindow() });
-  }
-  if (enabledIds.has("timer")) {
-    tasks.push({ label: "timer", promise: ensureTimerWindow() });
-  }
   if (enabledIds.has("todo")) {
+    // 待办支持 Ctrl+Alt+T 全局快速添加，需即时可用。
     tasks.push({ label: "todo", promise: ensureTodoWindow() });
-  }
-  if (enabledIds.has("quick-input")) {
-    tasks.push({ label: "quick input", promise: invoke("ensure_quick_input_window") });
-  }
-  if (enabledIds.has("utility-hub")) {
-    tasks.push({ label: "utility hub", promise: ensureUtilityHubWindow() });
   }
   if (enabledIds.has("sticky-notes")) {
     // 恢复启动前已钉在桌面的便签（后端按 visible 重建窗口），不打开管理窗。
@@ -1038,6 +1008,11 @@ export async function preloadEnabledToolWindows(): Promise<void> {
   });
 }
 
+/**
+ * 根据工具 ID 打开对应的工具窗口。
+ * 用于 ToolPalette 激活和 FloatingOrb 自启动两种场景。
+ * 返回 true 表示成功打开，false 表示该工具不支持窗口打开或打开失败。
+ */
 export async function openToolWindow(toolId: string): Promise<boolean> {
   try {
     if (toolId === "utility-hub") {

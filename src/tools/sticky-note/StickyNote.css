@@ -197,6 +197,22 @@
   background: rgb(0 0 0 / 0.12);
 }
 
+/* 便利贴图片：限宽贴边，圆角融入纸面；src 未就绪（目录未返回）时先隐藏 */
+.sn-editor img[data-note-img] {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  height: auto;
+  margin: 4px 0;
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.16);
+  user-select: none;
+}
+
+.sn-editor img[data-note-img]:not([src]) {
+  display: none;
+}
+
 /* 底栏：新建 · 提示 · 删除 */
 .sn-foot {
   display: flex;
@@ -231,4 +247,17 @@
   background: rgb(190 60 52 / 0.85);
   color: #fff;
   opacity: 1;
+}
+
+/* 粘贴图片保存失败的内联提示（短暂展示后自动消失） */
+.sn-paste-error {
+  margin: 6px 10px 0;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(185, 28, 28, 0.1);
+  color: #b91c1c;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  overflow-wrap: anywhere;
 }

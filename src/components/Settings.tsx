@@ -10,8 +10,11 @@ import { AiConfig } from "../types";
 import {
   TOOLBAR_FEATURES,
   DEFAULT_FEATURE_IDS,
+  DEFAULT_FEATURE_ORDER,
   fetchEnabledFeatures,
+  fetchToolbarFeatureOrder,
   saveEnabledFeatures,
+  saveToolbarFeatureOrder,
 } from "../constants/toolbarFeatures";
 import {
   DEFAULT_DEDUP_MODE,
@@ -142,7 +145,7 @@ const TOOL_SETTINGS_TABS = [
   { id: "quick-input", label: "快速输入", icon: "Compass" as IconName },
   { id: "monitor", label: "系统监控", icon: "Activity" as IconName },
   { id: "pomodoro", label: "番茄钟", icon: "Timer" as IconName },
-  { id: "timer", label: "时钟、倒计时、秒表与日历", icon: "Timer" as IconName },
+  { id: "timer", label: "时钟、倒计时、秒表与日历", icon: "Clock" as IconName },
   { id: "todo", label: "待办清单", icon: "ListFilter" as IconName },
   { id: "toolbar", label: "文字工具栏", icon: "Grid3x3" as IconName },
 ] as const;
@@ -163,7 +166,7 @@ const WINDOW_POSITION_TARGETS = [
   { id: "orb", label: "悬浮球", icon: "GripVertical" as IconName },
   { id: "monitor-overlay", label: "系统监控", icon: "Activity" as IconName },
   { id: "pomodoro-overlay", label: "番茄钟", icon: "Timer" as IconName },
-  { id: "time-overlay", label: "时钟、倒计时、秒表与日历", icon: "Timer" as IconName },
+  { id: "time-overlay", label: "时钟、倒计时、秒表与日历", icon: "Clock" as IconName },
   { id: "todo-overlay", label: "待办清单", icon: "ListFilter" as IconName },
 ] as const;
 
@@ -181,6 +184,14 @@ function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTabId>(() =>
     isToolConfigWindow ? "screenshot" : "general",
   );
+  // 页签懒加载标记：仅首次进入某页签时拉取该页后端配置（窗口隐藏复用后不重复请求）
+  const loadedTabsRef = useRef<Partial<Record<SettingsTabId, boolean>>>({});
+  // 始终指向最新 activeTab，供 onFocusChanged 回调读取，避免依赖变更导致重复订阅
+  const activeTabRef = useRef<SettingsTabId>(activeTab);
+  activeTabRef.current = activeTab;
+  // 工具启停/自动打开快照是否已在本窗口会话内拉取过；重新聚焦时重置，
+  // 保证重新打开窗口后首次进入「启动时自动打开」相关页签能取到最新快照。
+  const toolSnapshotLoadedRef = useRef(false);
   const [autoStart, setAutoStart] = useState(false);
   const [autoStartError, setAutoStartError] = useState(false);
   const persistedThemePreferencesRef = useRef<ThemePreferences>(getStoredThemePreferences());
@@ -201,15 +212,69 @@ function Settings() {
   const [orbIcon, setOrbIconState] = useState<OrbIconId>(() => getOrbIcon());
   const orbIconSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [isClosing, setIsClosing] = useState(false);
+  const settingsShellRef = useRef<HTMLDivElement | null>(null);
+  // 关闭流程守卫：请求过一次后忽略再次点击，避免快速重复点击导致退出动画/定时器错乱
+  const closingRequestedRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
+  // 保存当前淡出过渡的 transitionend 监听器，供「重新聚焦取消关闭」时一并拆除，
+  // 否则淡出被中断后 opacity 回弹会误触发 onOpacityEnd 而把窗口关掉。
+  const closeTransitionHandlerRef = useRef<((event: TransitionEvent) => void) | null>(null);
 
   const requestSettingsClose = useCallback(() => {
+    if (closingRequestedRef.current) return;
+    closingRequestedRef.current = true;
     setIsClosing(true);
-    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+
+    const doClose = () => {
+      getCurrentWebviewWindow()
+        .close()
+        .catch((err) => {
+          console.error(err);
+          // 关闭失败时复位守卫并淡回窗口，避免留下 opacity:0 的隐形窗口，
+          // 让界面恢复可见以便用户重新触发关闭流程。
+          closingRequestedRef.current = false;
+          setIsClosing(false);
+        });
+    };
+
+    const shell = settingsShellRef.current;
+    if (!shell) {
+      doClose();
+      return;
+    }
+    // prefers-reduced-motion 下 transition 已被 CSS 禁用，淡出无实际动画，
+    // 直接关闭，避免无意义的兜底等待。
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      doClose();
+      return;
+    }
+    // 用 transitionend 精确对齐淡出动画结束的时机再真正关闭，
+    // 取代原先硬编码的 180ms 定时（后者与 CSS 过渡时长可能不同步而带来迟滞感）。
+    let didClose = false;
+    const onOpacityEnd = (event: TransitionEvent) => {
+      // 仅响应 shell 自身的 opacity 过渡结束：child 的 transitionend 会冒泡上来，
+      // 若仅按 propertyName 过滤，子元素的透明度过渡可能被误判为窗口淡出完成而提前关闭。
+      if (event.target === shell && event.propertyName === "opacity") finish();
+    };
+    const finish = () => {
+      if (didClose) return;
+      didClose = true;
+      shell.removeEventListener("transitionend", onOpacityEnd);
+      closeTransitionHandlerRef.current = null;
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+      doClose();
+    };
+    shell.addEventListener("transitionend", onOpacityEnd);
+    closeTransitionHandlerRef.current = onOpacityEnd;
+    // 兜底：shell 自身的 opacity transitionend 未触发（如过渡被中断）时仍按时关闭，防止窗口卡住。
+    // 时长取略长于过渡值，保证正常情况下由 transitionend 驱动，兜底不会提前抢走关闭。
     closeTimerRef.current = window.setTimeout(() => {
       closeTimerRef.current = null;
-      getCurrentWebviewWindow().close().catch(console.error);
-    }, 180);
+      finish();
+    }, 300);
   }, []);
 
   const handleOrbIconChange = (id: OrbIconId) => {
@@ -239,6 +304,23 @@ function Settings() {
   // 工具栏功能配置（默认全量，挂载后从后端异步加载）
   const [enabledFeatures, setEnabledFeaturesState] = useState<string[]>(DEFAULT_FEATURE_IDS);
   const [featuresStatus, setFeaturesStatus] = useState<"idle" | "saved" | "error">("idle");
+
+  // 工具栏按钮顺序（全量 ID 有序列表，与启用状态相互独立）
+  const [featureOrder, setFeatureOrderState] = useState<string[]>(() => [...DEFAULT_FEATURE_ORDER]);
+  const featureOrderRef = useRef<string[]>(featureOrder);
+  featureOrderRef.current = featureOrder;
+  // 后端确认过的顺序，拖拽落库失败时回滚用
+  const persistedFeatureOrderRef = useRef<string[]>([...DEFAULT_FEATURE_ORDER]);
+  // 顺序保存请求版本号：仅最新一次请求可写回持久化基准/回滚，避免陈旧请求覆盖后续编辑
+  const featureOrderSaveVersionRef = useRef(0);
+  // 工具栏功能启停保存请求版本号：仅最新一次请求可更新状态/回滚，避免陈旧读写覆盖用户后续切换
+  const featuresSaveVersionRef = useRef(0);
+  const [featureOrderStatus, setFeatureOrderStatus] = useState<"idle" | "saved" | "error">("idle");
+  // 拖拽排序状态（与快速输入预设词行拖拽同一套 HTML5 DnD 交互模型）
+  const [featureDragIndex, setFeatureDragIndex] = useState<number | null>(null);
+  const featureDragIndexRef = useRef<number | null>(null);
+  const featureDragOrderRef = useRef<string[]>([]);
+  const featureDragDirtyRef = useRef(false);
 
   // 去重粒度配置（默认按行，挂载后从后端异步加载）
   const [dedupMode, setDedupModeState] = useState<DedupMode>(DEFAULT_DEDUP_MODE);
@@ -337,6 +419,11 @@ function Settings() {
     label: string;
     text: string;
   }
+  interface QuickInputHistoryItem {
+    preview: string;
+    text: string;
+    favorite?: boolean;
+  }
   const [qiTriggerKey, setQiTriggerKey] = useState("CapsLock");
   const [qiTriggerKeyStatus, setQiTriggerKeyStatus] = useState<"idle" | "saved" | "error">("idle");
   const [qiMode, setQiMode] = useState("click");
@@ -353,9 +440,11 @@ function Settings() {
   const [qiSnippetsStatus, setQiSnippetsStatus] = useState<"idle" | "saved" | "error">("idle");
   const [qiNewLabel, setQiNewLabel] = useState("");
   const [qiNewText, setQiNewText] = useState("");
-  // 剪贴板历史（后端内存缓冲并持久化，默认保留最新 5 条）
-  const [qiHistory, setQiHistory] = useState<Array<{ preview: string; text: string }>>([]);
+  // 剪贴板历史（后端内存缓冲并持久化，默认保留最新 5 条；收藏项固定在最前）
+  const [qiHistory, setQiHistory] = useState<QuickInputHistoryItem[]>([]);
   const [qiHistoryStatus, setQiHistoryStatus] = useState<"idle" | "cleared" | "error">("idle");
+  /** 单条删除 / 收藏失败时的行内提示 */
+  const [qiHistoryActionError, setQiHistoryActionError] = useState("");
   const [qiHistoryEnabled, setQiHistoryEnabled] = useState(true);
   const [qiHistoryEnabledStatus, setQiHistoryEnabledStatus] = useState<"idle" | "saved" | "error">(
     "idle",
@@ -380,8 +469,7 @@ function Settings() {
   // 设置窗口会被隐藏后复用，不能依赖组件重新挂载来更新历史。
   const refreshQiHistory = useCallback(async () => {
     try {
-      const history =
-        await invoke<Array<{ preview: string; text: string }>>("get_quick_input_history");
+      const history = await invoke<QuickInputHistoryItem[]>("get_quick_input_history");
       setQiHistory(history);
     } catch (err) {
       console.error("Failed to refresh quick input history:", err);
@@ -554,22 +642,108 @@ function Settings() {
   };
 
   const handleToggleFeature = (id: string) => {
+    const version = ++featuresSaveVersionRef.current;
     const previous = enabledFeatures;
     const next = previous.includes(id) ? previous.filter((f) => f !== id) : [...previous, id];
     setEnabledFeaturesState(next);
     emit("levitaire-features-changed", next);
     saveEnabledFeatures(next)
       .then(() => {
+        if (version !== featuresSaveVersionRef.current) return;
         setFeaturesStatus("saved");
         setTimeout(() => setFeaturesStatus("idle"), 1500);
       })
       .catch((err) => {
+        if (version !== featuresSaveVersionRef.current) return;
         console.error("Failed to save toolbar features:", err);
         setFeaturesStatus("error");
         setTimeout(() => setFeaturesStatus("idle"), 3000);
         setEnabledFeaturesState(previous);
         emit("levitaire-features-changed", previous);
       });
+  };
+
+  // 保存按钮顺序：乐观更新 → 写后端 → 广播给文字工具栏窗口
+  const handleSaveFeatureOrder = (order: string[]) => {
+    const version = ++featureOrderSaveVersionRef.current;
+    setFeatureOrderState(order);
+    featureOrderRef.current = order;
+    emit("levitaire-feature-order-changed", order);
+    saveToolbarFeatureOrder(order)
+      .then(() => {
+        if (version !== featureOrderSaveVersionRef.current) return;
+        persistedFeatureOrderRef.current = order;
+        setFeatureOrderStatus("saved");
+        setTimeout(() => setFeatureOrderStatus("idle"), 1500);
+      })
+      .catch((err) => {
+        if (version !== featureOrderSaveVersionRef.current) return;
+        console.error("Failed to save toolbar feature order:", err);
+        setFeatureOrderStatus("error");
+        setTimeout(() => setFeatureOrderStatus("idle"), 3000);
+        const persisted = persistedFeatureOrderRef.current;
+        setFeatureOrderState(persisted);
+        featureOrderRef.current = persisted;
+        // 回滚时同步广播，避免文字工具栏窗口停留在乐观更新的错误顺序上
+        emit("levitaire-feature-order-changed", persisted);
+      });
+  };
+
+  /** 拖拽排序：把 from 位置的功能移动到 to 位置（to 为移除后新列表中的目标下标） */
+  const reorderFeatures = (from: number, to: number) => {
+    if (from === to) return;
+    const next = [...featureDragOrderRef.current];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    featureDragOrderRef.current = next;
+    featureDragIndexRef.current = to;
+    featureDragDirtyRef.current = true;
+    setFeatureDragIndex(to);
+    setFeatureOrderState(next);
+    featureOrderRef.current = next;
+  };
+
+  /** 开始拖拽：记录源索引与初始列表快照 */
+  const onFeatureDragStart = (e: DragEvent<HTMLDivElement>, idx: number) => {
+    featureDragIndexRef.current = idx;
+    featureDragOrderRef.current = featureOrderRef.current;
+    featureDragDirtyRef.current = false;
+    setFeatureDragIndex(idx);
+    // Firefox 需要 setData 才允许开始拖拽
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(idx));
+    }
+  };
+
+  /** 拖过行时实时重排：按鼠标在行内的上下半区决定插入该行前/后 */
+  const onFeatureDragOver = (e: DragEvent<HTMLDivElement>, targetIdx: number) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    const from = featureDragIndexRef.current;
+    if (from === null) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2;
+    let to = before ? targetIdx : targetIdx + 1;
+    if (from < to) to -= 1;
+    if (to !== from) reorderFeatures(from, to);
+  };
+
+  /** 放下：仅阻止浏览器默认行为，最终顺序由 dragend 统一落库 */
+  const onFeatureDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+  };
+
+  /** 拖拽结束：清理状态，拖拽中若发生过顺序变更则落库 */
+  const onFeatureDragEnd = () => {
+    if (featureDragIndexRef.current === null) return;
+    const final = featureDragOrderRef.current;
+    const dirty = featureDragDirtyRef.current;
+    featureDragIndexRef.current = null;
+    featureDragOrderRef.current = [];
+    featureDragDirtyRef.current = false;
+    setFeatureDragIndex(null);
+    if (dirty) handleSaveFeatureOrder(final);
   };
 
   const handleToggleClearOption = (id: string) => {
@@ -720,24 +894,6 @@ function Settings() {
   }, []);
 
   useEffect(() => {
-    Promise.all([
-      invoke<boolean>("get_todo_reminders_enabled"),
-      invoke<string>("get_todo_reminder_sound"),
-    ])
-      .then(([enabled, sound]) => {
-        setTodoRemindersEnabled(enabled);
-        setTodoReminderSound(sound);
-      })
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    invoke<string>("get_todo_quick_add_hotkey")
-      .then((hotkey) => setTodoQuickAddHotkey(hotkey))
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
     const preferences = applyThemePreferences({ theme, accent: themeAccent, scheme: themeScheme });
     if (!themePreferencesReady) return;
 
@@ -785,29 +941,6 @@ function Settings() {
   }, []);
 
   useEffect(() => {
-    invoke<boolean>("get_auto_start")
-      .then((enabled) => setAutoStart(enabled))
-      .catch((err) => console.error("Failed to get auto start status:", err));
-  }, []);
-
-  useEffect(() => {
-    invoke<AiConfig>("get_ai_config")
-      .then((config) => setAiConfig(config))
-      .catch((err) => console.error("Failed to load AI config:", err));
-  }, []);
-
-  useEffect(() => {
-    invoke<string>("get_screenshot_hotkey")
-      .then((hk) => setScreenshotHotkey(hk))
-      .catch((err) => console.error("Failed to load screenshot hotkey:", err));
-  }, []);
-
-  // 设置窗口会被隐藏后复用，因此在进入快捷键相关页面时重新检查一次。
-  useEffect(() => {
-    void checkHotkeyConflicts();
-  }, [checkHotkeyConflicts]);
-
-  useEffect(() => {
     if (
       activeTab === "screenshot" ||
       activeTab === "recording" ||
@@ -819,164 +952,206 @@ function Settings() {
     }
   }, [activeTab, checkHotkeyConflicts]);
 
+  // 按页签懒加载：仅当首次进入某页签时才拉取对应工具/设置的后端配置，
+  // 避免打开设置（默认停留在「通用」）就一次性读取截图、录屏、系统监控、
+  // 番茄钟、待办、快速输入等全部工具的配置与数据。
   useEffect(() => {
-    Promise.allSettled([
-      fetchEnabledFeatures(),
-      fetchDedupMode(),
-      fetchMd5Length(),
-      fetchNumberingStyle(),
-      fetchClearOptions(),
-      fetchTtsConfig(),
-      fetchSearchEngine(),
-      invoke<VoiceInfo[]>("tts_get_voices"),
-      fetchSystemMonitorConfig(),
-      fetchPomodoroConfig(),
-      fetchRecordingConfig(),
-      invoke<string>("get_recording_hotkey"),
-      invoke<string>("get_recording_save_path"),
-      invoke<string>("get_screenshot_save_path"),
-      fetchPinBorderColor(),
-      fetchPinBorderWidth(),
-      invoke<string>("get_quick_input_trigger_key"),
-      invoke<string>("get_quick_input_mode"),
-      invoke<string>("get_quick_input_snippets"),
-      invoke<string[]>("get_tools_autostart"),
-      invoke<boolean>("get_timer_enabled"),
-      invoke<boolean>("get_timer_reminders_enabled"),
-      invoke<string>("get_timer_reminder_sound"),
-      invoke<boolean>("get_timer_lunar_enabled"),
-      invoke<boolean>("get_quick_input_history_enabled"),
-      invoke<Array<{ preview: string; text: string }>>("get_quick_input_history"),
-      invoke<boolean>("get_quick_input_snippets_enabled"),
-    ]).then(
-      ([
-        features,
-        dedup,
-        md5,
-        numbering,
-        clear,
-        tts,
-        search,
-        voices,
-        sysMon,
-        pomodoro,
-        recCfg,
-        recHk,
-        recSavePath,
-        ssSavePath,
-        pinColor,
-        pinWidth,
-        qiKey,
-        qiMode,
-        qiSnips,
-        autostart,
-        timer,
-        timerReminders,
-        timerSound,
-        timerLunar,
-        qiHistoryEnabledResult,
-        qiHist,
-        qiSnippetsEnabledResult,
-      ]) => {
-        if (features.status === "fulfilled") setEnabledFeaturesState(features.value);
-        if (dedup.status === "fulfilled") setDedupModeState(dedup.value);
-        if (md5.status === "fulfilled") setMd5LengthState(md5.value);
-        if (numbering.status === "fulfilled") setNumberingStyleState(numbering.value);
-        if (clear.status === "fulfilled") setEnabledClearIdsState(clear.value);
-        if (tts.status === "fulfilled") setTtsConfigState(tts.value);
-        if (search.status === "fulfilled") setSearchEngineState(search.value);
-        if (voices.status === "fulfilled") setTtsVoices(voices.value);
-        if (sysMon.status === "fulfilled") {
-          if (systemMonitorSaveVersionRef.current === 0) {
-            systemMonitorConfigRef.current = sysMon.value;
-            setSystemMonitorConfig(sysMon.value);
-          }
-        }
-        if (pomodoro.status === "fulfilled") {
-          if (pomodoroSaveVersionRef.current === 0) {
-            pomodoroConfigRef.current = pomodoro.value;
-            setPomodoroConfig(pomodoro.value);
-          }
-        }
-        if (recCfg.status === "fulfilled") {
-          if (recordingConfigSaveVersionRef.current === 0) {
-            recordingConfigRef.current = recCfg.value;
-            setRecordingConfig(recCfg.value);
-          }
-        }
-        if (recHk.status === "fulfilled") setRecordingHotkey(recHk.value);
-        if (recSavePath.status === "fulfilled") setRecordingSavePath(recSavePath.value);
-        if (ssSavePath.status === "fulfilled") setScreenshotSavePath(ssSavePath.value);
-        if (pinColor.status === "fulfilled") {
-          const value = normalizePinBorderColor(pinColor.value);
-          persistedPinBorderColorRef.current = value;
-          pinBorderColorLoadedRef.current = true;
-          const shouldApply =
-            pinBorderColorSaveVersionRef.current === 0 ||
-            pinBorderColorFailedVersionRef.current === pinBorderColorSaveVersionRef.current;
-          if (shouldApply) {
-            pinBorderColorRef.current = value;
-            setPinBorderColor(value);
-            pinBorderColorFailedVersionRef.current = 0;
-          }
-        }
-        if (pinWidth.status === "fulfilled") {
-          const value = normalizePinBorderWidth(pinWidth.value);
-          persistedPinBorderWidthRef.current = value;
-          pinBorderWidthLoadedRef.current = true;
-          const shouldApply =
-            pinBorderWidthSaveVersionRef.current === 0 ||
-            pinBorderWidthFailedVersionRef.current === pinBorderWidthSaveVersionRef.current;
-          if (shouldApply) {
-            pinBorderWidthRef.current = value;
-            setPinBorderWidth(value);
-            pinBorderWidthFailedVersionRef.current = 0;
-          }
-        }
-        if (qiKey.status === "fulfilled") setQiTriggerKey(qiKey.value || "CapsLock");
-        if (qiMode.status === "fulfilled") setQiMode(qiMode.value === "hold" ? "hold" : "click");
-        if (qiSnips.status === "fulfilled" && qiSnips.value) {
-          try {
-            setQiSnippets(JSON.parse(qiSnips.value) as QuickInputSnippet[]);
-          } catch {
-            /* 忽略解析错误 */
-          }
-        }
-        if (autostart.status === "fulfilled") setAutostartIdsState(autostart.value);
-        if (timer.status === "fulfilled") setTimerEnabled(timer.value);
-        if (timerReminders.status === "fulfilled") setTimerRemindersEnabled(timerReminders.value);
-        if (timerSound.status === "fulfilled")
-          setTimerReminderSound(timerSound.value === "none" ? "none" : "tone");
-        if (timerLunar.status === "fulfilled") setTimerLunarEnabled(timerLunar.value);
-        if (qiHistoryEnabledResult.status === "fulfilled") {
-          qiHistoryEnabledRef.current = qiHistoryEnabledResult.value;
-          setQiHistoryEnabled(qiHistoryEnabledResult.value);
-        }
-        if (qiHist.status === "fulfilled") setQiHistory(qiHist.value);
-        if (qiSnippetsEnabledResult.status === "fulfilled") {
-          qiSnippetsEnabledRef.current = qiSnippetsEnabledResult.value;
-          setQiSnippetsEnabled(qiSnippetsEnabledResult.value);
-        }
-      },
-    );
-  }, []);
+    if (loadedTabsRef.current[activeTab]) return;
+    loadedTabsRef.current[activeTab] = true;
 
-  useEffect(() => {
-    invoke<number>("get_quick_input_history_limit")
-      .then((limit) => {
-        // 用户已开始修改时，忽略较晚返回的初始读取结果，避免覆盖用户输入。
-        if (qiHistoryLimitSaveVersionRef.current !== 0) return;
-        const normalized = Math.max(0, Math.min(20, Math.trunc(limit)));
-        qiHistoryLimitRef.current = normalized;
-        setQiHistoryLimit(normalized);
-      })
-      .catch((err) => console.error("Failed to load quick input history limit:", err));
-  }, []);
+    switch (activeTab) {
+      case "general":
+        invoke<boolean>("get_auto_start")
+          .then((enabled) => setAutoStart(enabled))
+          .catch((err) => console.error("Failed to get auto start status:", err));
+        break;
+      case "ai":
+        invoke<AiConfig>("get_ai_config")
+          .then((config) => setAiConfig(config))
+          .catch((err) => console.error("Failed to load AI config:", err));
+        break;
+      case "screenshot":
+        void Promise.allSettled([
+          invoke<string>("get_screenshot_hotkey"),
+          invoke<string>("get_screenshot_save_path"),
+          fetchPinBorderColor(),
+          fetchPinBorderWidth(),
+        ]).then(([hotkey, savePath, pinColor, pinWidth]) => {
+          if (hotkey.status === "fulfilled") setScreenshotHotkey(hotkey.value);
+          if (savePath.status === "fulfilled") setScreenshotSavePath(savePath.value);
+          if (pinColor.status === "fulfilled") {
+            const value = normalizePinBorderColor(pinColor.value);
+            persistedPinBorderColorRef.current = value;
+            pinBorderColorLoadedRef.current = true;
+            const shouldApply =
+              pinBorderColorSaveVersionRef.current === 0 ||
+              pinBorderColorFailedVersionRef.current === pinBorderColorSaveVersionRef.current;
+            if (shouldApply) {
+              pinBorderColorRef.current = value;
+              setPinBorderColor(value);
+              pinBorderColorFailedVersionRef.current = 0;
+            }
+          }
+          if (pinWidth.status === "fulfilled") {
+            const value = normalizePinBorderWidth(pinWidth.value);
+            persistedPinBorderWidthRef.current = value;
+            pinBorderWidthLoadedRef.current = true;
+            const shouldApply =
+              pinBorderWidthSaveVersionRef.current === 0 ||
+              pinBorderWidthFailedVersionRef.current === pinBorderWidthSaveVersionRef.current;
+            if (shouldApply) {
+              pinBorderWidthRef.current = value;
+              setPinBorderWidth(value);
+              pinBorderWidthFailedVersionRef.current = 0;
+            }
+          }
+        });
+        break;
+      case "recording":
+        void Promise.allSettled([
+          invoke<string>("get_recording_hotkey"),
+          invoke<string>("get_recording_save_path"),
+          fetchRecordingConfig(),
+        ]).then(([hotkey, savePath, config]) => {
+          if (hotkey.status === "fulfilled") setRecordingHotkey(hotkey.value);
+          if (savePath.status === "fulfilled") setRecordingSavePath(savePath.value);
+          if (config.status === "fulfilled") {
+            if (recordingConfigSaveVersionRef.current === 0) {
+              recordingConfigRef.current = config.value;
+              setRecordingConfig(config.value);
+            }
+          }
+        });
+        break;
+      case "sketch":
+        invoke<string>("get_sketch_hotkey")
+          .then((hotkey) => {
+            if (sketchHotkeyRequestRef.current !== 0) return;
+            setSketchHotkey(hotkey);
+            sketchHotkeyRef.current = hotkey;
+          })
+          .catch((err) => console.error("Failed to load sketch hotkey:", err));
+        break;
+      case "quick-input":
+        void Promise.allSettled([
+          invoke<string>("get_quick_input_trigger_key"),
+          invoke<string>("get_quick_input_mode"),
+          invoke<string>("get_quick_input_snippets"),
+          invoke<boolean>("get_quick_input_history_enabled"),
+          invoke<boolean>("get_quick_input_snippets_enabled"),
+          invoke<number>("get_quick_input_history_limit"),
+        ]).then(([key, mode, snippets, historyEnabled, snippetsEnabled, historyLimit]) => {
+          if (key.status === "fulfilled") setQiTriggerKey(key.value || "CapsLock");
+          if (mode.status === "fulfilled") setQiMode(mode.value === "hold" ? "hold" : "click");
+          if (snippets.status === "fulfilled" && snippets.value) {
+            try {
+              setQiSnippets(JSON.parse(snippets.value) as QuickInputSnippet[]);
+            } catch {
+              /* 忽略解析错误 */
+            }
+          }
+          if (historyEnabled.status === "fulfilled") {
+            qiHistoryEnabledRef.current = historyEnabled.value;
+            setQiHistoryEnabled(historyEnabled.value);
+          }
+          if (snippetsEnabled.status === "fulfilled") {
+            qiSnippetsEnabledRef.current = snippetsEnabled.value;
+            setQiSnippetsEnabled(snippetsEnabled.value);
+          }
+          if (historyLimit.status === "fulfilled") {
+            // 用户已开始修改时，忽略较晚返回的初始读取结果，避免覆盖用户输入。
+            if (qiHistoryLimitSaveVersionRef.current === 0) {
+              const normalized = Math.max(0, Math.min(20, Math.trunc(historyLimit.value)));
+              qiHistoryLimitRef.current = normalized;
+              setQiHistoryLimit(normalized);
+            }
+          }
+        });
+        break;
+      case "monitor":
+        // 工具启用/自动打开状态由进入页签时的快照刷新统一处理（见 refreshToolEnableSnapshot）
+        fetchSystemMonitorConfig()
+          .then((config) => {
+            if (systemMonitorSaveVersionRef.current === 0) {
+              systemMonitorConfigRef.current = config;
+              setSystemMonitorConfig(config);
+            }
+          })
+          .catch(() => {});
+        break;
+      case "pomodoro":
+        fetchPomodoroConfig()
+          .then((config) => {
+            if (pomodoroSaveVersionRef.current === 0) {
+              pomodoroConfigRef.current = config;
+              setPomodoroConfig(config);
+            }
+          })
+          .catch(() => {});
+        break;
+      case "timer":
+        void Promise.allSettled([
+          invoke<boolean>("get_timer_reminders_enabled"),
+          invoke<string>("get_timer_reminder_sound"),
+          invoke<boolean>("get_timer_lunar_enabled"),
+        ]).then(([reminders, sound, lunar]) => {
+          if (reminders.status === "fulfilled") setTimerRemindersEnabled(reminders.value);
+          if (sound.status === "fulfilled") {
+            setTimerReminderSound(sound.value === "none" ? "none" : "tone");
+          }
+          if (lunar.status === "fulfilled") setTimerLunarEnabled(lunar.value);
+        });
+        break;
+      case "todo":
+        void Promise.allSettled([
+          invoke<boolean>("get_todo_reminders_enabled"),
+          invoke<string>("get_todo_reminder_sound"),
+          invoke<string>("get_todo_quick_add_hotkey"),
+        ]).then(([reminders, sound, quickAdd]) => {
+          if (reminders.status === "fulfilled") setTodoRemindersEnabled(reminders.value);
+          if (sound.status === "fulfilled") setTodoReminderSound(sound.value);
+          if (quickAdd.status === "fulfilled") setTodoQuickAddHotkey(quickAdd.value);
+        });
+        break;
+      case "toolbar":
+        void Promise.allSettled([
+          fetchEnabledFeatures(),
+          fetchToolbarFeatureOrder(),
+          fetchDedupMode(),
+          fetchMd5Length(),
+          fetchNumberingStyle(),
+          fetchClearOptions(),
+          fetchTtsConfig(),
+          fetchSearchEngine(),
+          invoke<VoiceInfo[]>("tts_get_voices"),
+        ]).then(([features, order, dedup, md5, numbering, clear, tts, search, voices]) => {
+          // 若读取期间用户已启停过功能开关，忽略本次读取结果，避免覆盖用户刚做的修改
+          if (features.status === "fulfilled" && featuresSaveVersionRef.current === 0) {
+            setEnabledFeaturesState(features.value);
+          }
+          // 若读取期间用户已拖拽保存过顺序，忽略本次读取结果，避免覆盖用户刚做的修改
+          if (order.status === "fulfilled" && featureOrderSaveVersionRef.current === 0) {
+            persistedFeatureOrderRef.current = order.value;
+            setFeatureOrderState(order.value);
+            featureOrderRef.current = order.value;
+          }
+          if (dedup.status === "fulfilled") setDedupModeState(dedup.value);
+          if (md5.status === "fulfilled") setMd5LengthState(md5.value);
+          if (numbering.status === "fulfilled") setNumberingStyleState(numbering.value);
+          if (clear.status === "fulfilled") setEnabledClearIdsState(clear.value);
+          if (tts.status === "fulfilled") setTtsConfigState(tts.value);
+          if (search.status === "fulfilled") setSearchEngineState(search.value);
+          if (voices.status === "fulfilled") setTtsVoices(voices.value);
+        });
+        break;
+    }
+  }, [activeTab]);
 
   // 「启动时自动打开」勾选框依赖工具启用状态（系统监控/番茄钟/时钟与倒计时/待办）。
   // 这些开关可在悬浮球面板等外部入口被改动，而设置窗口隐藏后组件仍挂载，
   // 若只在首次挂载读取会导致勾选框状态滞后，这里单独抽出供重新聚焦时重新同步。
   const refreshToolEnableSnapshot = useCallback(() => {
+    toolSnapshotLoadedRef.current = true;
     void Promise.allSettled([
       invoke<boolean>("get_system_monitor_enabled"),
       invoke<boolean>("get_pomodoro_enabled"),
@@ -992,8 +1167,24 @@ function Settings() {
     });
   }, []);
 
+  // 首次进入展示「启动时自动打开」的页签时同步工具启停/自动打开快照。
+  // 快照按窗口会话只拉取一次（重新聚焦时失效），既避免在这些页签间反复读取后端，
+  // 也避免刚保存的自动打开状态被后续快照覆盖。
+  useEffect(() => {
+    if (
+      !toolSnapshotLoadedRef.current &&
+      (activeTab === "monitor" ||
+        activeTab === "pomodoro" ||
+        activeTab === "timer" ||
+        activeTab === "todo")
+    ) {
+      refreshToolEnableSnapshot();
+    }
+  }, [activeTab, refreshToolEnableSnapshot]);
+
   // 处理设置窗口被隐藏后再次打开的场景：此时 Settings 组件仍然挂载，
   // 只有重新读取后端快照才能显示最新的剪贴板历史与工具启停/自动打开状态。
+  // 仅在当前页签确实展示对应数据时才刷新，避免在「通用/AI」页反复读取各工具快照。
   useEffect(() => {
     const window = getCurrentWebviewWindow();
     let disposed = false;
@@ -1002,8 +1193,32 @@ function Settings() {
       .onFocusChanged(({ payload: focused }) => {
         if (focused) {
           setIsClosing(false);
-          void refreshQiHistory();
-          void refreshToolEnableSnapshot();
+          // 关闭流程守卫复位，允许本轮会话再次触发关闭
+          closingRequestedRef.current = false;
+          // 同时拆除淡出监听与兜底定时器，真正取消关闭：若不拆除，
+          // opacity 回弹会触发 transitionend 或 300ms 兜底定时器把窗口关掉。
+          if (closeTransitionHandlerRef.current && settingsShellRef.current) {
+            settingsShellRef.current.removeEventListener(
+              "transitionend",
+              closeTransitionHandlerRef.current,
+            );
+            closeTransitionHandlerRef.current = null;
+          }
+          if (closeTimerRef.current !== null) {
+            globalThis.clearTimeout(closeTimerRef.current);
+            closeTimerRef.current = null;
+          }
+          // 重新聚焦即视为新一轮窗口会话：使快照失效，确保再进入相关页签时取到最新状态
+          toolSnapshotLoadedRef.current = false;
+          if (activeTabRef.current === "quick-input") void refreshQiHistory();
+          if (
+            activeTabRef.current === "monitor" ||
+            activeTabRef.current === "pomodoro" ||
+            activeTabRef.current === "timer" ||
+            activeTabRef.current === "todo"
+          ) {
+            refreshToolEnableSnapshot();
+          }
         }
       })
       .then((stop) => {
@@ -1026,54 +1241,6 @@ function Settings() {
   useEffect(() => {
     if (activeTab === "quick-input") void refreshQiHistory();
   }, [activeTab, refreshQiHistory]);
-
-  // 加载系统监控的启用状态（「启动时自动打开」仅对已启用工具生效）
-  useEffect(() => {
-    let cancelled = false;
-    invoke<boolean>("get_system_monitor_enabled")
-      .then((enabled) => {
-        if (!cancelled) setSystemMonitorEnabled(enabled);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    invoke<string>("get_sketch_hotkey")
-      .then((hotkey) => {
-        if (sketchHotkeyRequestRef.current !== 0) return;
-        setSketchHotkey(hotkey);
-        sketchHotkeyRef.current = hotkey;
-      })
-      .catch((err) => console.error("Failed to load sketch hotkey:", err));
-  }, []);
-
-  // 加载番茄钟的启用状态（「启动时自动打开」仅对已启用工具生效）
-  useEffect(() => {
-    let cancelled = false;
-    invoke<boolean>("get_pomodoro_enabled")
-      .then((enabled) => {
-        if (!cancelled) setPomodoroEnabled(enabled);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    invoke<boolean>("get_todo_enabled")
-      .then((enabled) => {
-        if (!cancelled) setTodoEnabled(enabled);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   // 快捷键录入：聚焦时捕获按键组合
   const handleHotkeyKeyDown = (e: React.KeyboardEvent) => {
@@ -1692,6 +1859,7 @@ function Settings() {
   /** 清空剪贴板历史（后端内存缓冲区） */
   const clearQiHistory = async () => {
     setQiHistoryStatus("idle");
+    setQiHistoryActionError("");
     try {
       await invoke("clear_quick_input_history");
       setQiHistory([]);
@@ -1701,6 +1869,33 @@ function Settings() {
       console.error("Failed to clear quick input history:", err);
       setQiHistoryStatus("error");
       setTimeout(() => setQiHistoryStatus("idle"), 3000);
+    }
+  };
+
+  /** 删除单条历史记录（敏感内容可单独清理，无需整批清空） */
+  const removeQiHistoryItem = async (text: string) => {
+    setQiHistoryStatus("idle");
+    setQiHistoryActionError("");
+    try {
+      await invoke("remove_quick_input_history_item", { text });
+      await refreshQiHistory();
+    } catch (err) {
+      console.error("Failed to remove quick input history item:", err);
+      setQiHistoryActionError("删除失败，请重试");
+    }
+  };
+
+  /** 收藏 / 取消收藏某条历史记录：收藏项固定在转盘历史区最前，不被滚动裁剪 */
+  const toggleQiHistoryFavorite = async (item: QuickInputHistoryItem) => {
+    setQiHistoryStatus("idle");
+    setQiHistoryActionError("");
+    const favorite = !item.favorite;
+    try {
+      await invoke("set_quick_input_history_favorite", { text: item.text, favorite });
+      await refreshQiHistory();
+    } catch (err) {
+      console.error("Failed to toggle quick input history favorite:", err);
+      setQiHistoryActionError(favorite ? "收藏失败，请重试" : "取消收藏失败，请重试");
     }
   };
 
@@ -1720,19 +1915,21 @@ function Settings() {
     qiHistoryLimitSaveQueueRef.current = save;
 
     void save
-      .then(() => {
+      .then(async () => {
         if (version !== qiHistoryLimitSaveVersionRef.current) return;
-        setQiHistory((history) => history.slice(0, limit));
+        // 后端裁剪含收藏项语义（收藏项不受保留条数限制），统一拉取最新列表避免本地截断失真
+        await refreshQiHistory();
+        if (version !== qiHistoryLimitSaveVersionRef.current) return;
         setQiHistoryLimitStatus("saved");
         setTimeout(() => setQiHistoryLimitStatus("idle"), 2000);
       })
-      .catch((err) => {
+      .catch(async (err) => {
         if (version !== qiHistoryLimitSaveVersionRef.current) return;
         console.error("Failed to save quick input history limit:", err);
         qiHistoryLimitRef.current = previous;
         setQiHistoryLimit(previous);
-        setQiHistory((history) => history.slice(0, previous));
         setQiHistoryLimitStatus("error");
+        await refreshQiHistory();
         setTimeout(() => setQiHistoryLimitStatus("idle"), 3000);
       });
   };
@@ -1897,7 +2094,7 @@ function Settings() {
   };
 
   return (
-    <div className={`settings-shell${isClosing ? " is-closing" : ""}`}>
+    <div className={`settings-shell${isClosing ? " is-closing" : ""}`} ref={settingsShellRef}>
       <TitleBar
         title={isToolConfigWindow ? "Levitaire 工具配置" : "Levitaire 系统设置"}
         onCloseRequested={requestSettingsClose}
@@ -2847,7 +3044,7 @@ function Settings() {
                   <label className="settings-label">剪贴板历史</label>
                   <span
                     className="settings-hint-inline"
-                    title="自动记录复制到剪贴板的文本，最新在前；可设置保留条数，设为 0 可关闭历史记录。"
+                    title="自动记录复制到剪贴板的文本，最新在前。点击星标可收藏常用片段，固定到转盘历史区最前且不会被自动清理；行内垃圾桶可删除某一条敏感记录。保留条数限制普通记录条数，设为 0 可停用历史（收藏一并清除）。"
                   >
                     <Icon name="AlertCircle" size={14} aria-hidden="true" />
                   </span>
@@ -2877,8 +3074,35 @@ function Settings() {
                     </p>
                   )}
                   {qiHistory.map((h, i) => (
-                    <div className="qi-snippet-row" key={i} title={h.text}>
+                    <div
+                      className={`qi-snippet-row qi-history-row${h.favorite ? " is-favorite" : ""}`}
+                      key={`${h.text}-${i}`}
+                      title={h.text}
+                    >
                       <div className="qi-snippet-text">{h.preview}</div>
+                      <div className="qi-snippet-actions">
+                        <button
+                          className={`settings-toggle-btn settings-toggle-btn-sm${h.favorite ? " is-active" : ""}`}
+                          onClick={() => void toggleQiHistoryFavorite(h)}
+                          title={
+                            h.favorite
+                              ? "取消收藏（不再固定到最前）"
+                              : "收藏（固定到转盘历史区最前）"
+                          }
+                          aria-label={h.favorite ? "取消收藏" : "收藏"}
+                          aria-pressed={!!h.favorite}
+                        >
+                          <Icon name="Star" size={14} />
+                        </button>
+                        <button
+                          className="settings-toggle-btn settings-toggle-btn-sm"
+                          onClick={() => void removeQiHistoryItem(h.text)}
+                          title="删除该条记录"
+                          aria-label="删除"
+                        >
+                          <Icon name="Trash2" size={14} />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -2901,7 +3125,7 @@ function Settings() {
                       }}
                       style={{ width: 84 }}
                     />
-                    <span className="settings-hint">条（0 表示不记录）</span>
+                    <span className="settings-hint">条（收藏项不计入；0 不记录）</span>
                   </div>
                 </div>
                 {qiHistoryLimitStatus === "saved" && <span className="settings-hint">已保存</span>}
@@ -2915,7 +3139,7 @@ function Settings() {
                     className="settings-danger-btn"
                     onClick={clearQiHistory}
                     disabled={qiHistory.length === 0}
-                    title="清空剪贴板历史"
+                    title="清空剪贴板历史（含收藏项）"
                   >
                     <Icon name="Eraser" size={14} />
                     清空历史
@@ -2924,6 +3148,11 @@ function Settings() {
                   {qiHistoryStatus === "error" && (
                     <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
                       清空失败
+                    </span>
+                  )}
+                  {qiHistoryActionError && (
+                    <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                      {qiHistoryActionError}
                     </span>
                   )}
                 </div>
@@ -3352,20 +3581,57 @@ function Settings() {
               <h2 className="settings-panel-title">文字工具</h2>
 
               <h3 className="settings-subsection-title">功能按钮</h3>
-              <p className="settings-hint">选中文字后显示的功能按钮</p>
-              <div className="settings-features-grid">
-                {TOOLBAR_FEATURES.map((feature) => (
-                  <label key={feature.id} className="settings-feature-chip">
-                    <input
-                      type="checkbox"
-                      checked={enabledFeatures.includes(feature.id)}
-                      onChange={() => handleToggleFeature(feature.id)}
-                    />
-                    <Icon name={feature.icon} size={14} />
-                    <span>{feature.label}</span>
-                  </label>
-                ))}
+              <p className="settings-hint">选中文字后显示的功能按钮，可拖拽调整顺序</p>
+              <div className="toolbar-order-list" role="list" aria-label="文字工具栏按钮顺序">
+                {featureOrder.map((id, index) => {
+                  const feature = TOOLBAR_FEATURES.find((f) => f.id === id);
+                  if (!feature) return null;
+                  const enabled = enabledFeatures.includes(feature.id);
+                  return (
+                    <div
+                      key={feature.id}
+                      role="listitem"
+                      className={`toolbar-order-row${featureDragIndex === index ? " is-dragging" : ""}`}
+                      draggable
+                      onDragStart={(e) => onFeatureDragStart(e, index)}
+                      onDragOver={(e) => onFeatureDragOver(e, index)}
+                      onDrop={onFeatureDrop}
+                      onDragEnd={onFeatureDragEnd}
+                    >
+                      <span className="toolbar-order-grip" aria-hidden="true">
+                        <Icon name="GripVertical" size={14} />
+                      </span>
+                      <Icon
+                        name={feature.icon}
+                        size={16}
+                        className="toolbar-order-feature-icon"
+                        aria-hidden="true"
+                      />
+                      <span className="toolbar-order-label">{feature.label}</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        draggable={false}
+                        aria-checked={enabled}
+                        aria-label={`${enabled ? "禁用" : "启用"}${feature.label}`}
+                        className={`toolbar-feature-switch${enabled ? " is-on" : ""}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleFeature(feature.id);
+                        }}
+                      >
+                        <span className="toolbar-feature-switch-thumb" />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
+              {featureOrderStatus === "saved" && <p className="settings-hint">顺序已保存</p>}
+              {featureOrderStatus === "error" && (
+                <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                  顺序保存失败，请重试
+                </p>
+              )}
               {featuresStatus === "saved" && <p className="settings-hint">已保存</p>}
               {featuresStatus === "error" && (
                 <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>

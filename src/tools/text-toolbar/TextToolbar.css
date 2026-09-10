@@ -329,6 +329,33 @@
   background: var(--button-danger-active-bg);
 }
 
+/* ── QR Code over-length confirm ──────────────────────────── */
+/* 超长文本进入二维码前的中转提示：告知将截断，由用户确认后再生成，
+   避免用户将不完整的二维码分享出去却不自知 */
+.toolbar-qrcode-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 340px;
+  max-width: 380px;
+  animation: previewEnter var(--transition-normal) ease-out;
+}
+
+.toolbar-qrcode-confirm-message {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1-5);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-fg);
+}
+
+.toolbar-qrcode-confirm-icon {
+  color: var(--color-danger-fg);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
 /* ── Char Count Preview ──────────────────────────────────── */
 .toolbar-charcount {
   display: flex;
@@ -435,7 +462,7 @@
   min-width: 34px;
 }
 
-/* 进度条轨道固定宽度，避免每 500ms 刷新时容器尺寸变化触发窗口抖动 */
+/* 进度条轨道固定宽度，避免进度刷新时容器尺寸变化触发窗口抖动 */
 .toolbar-tts-bar {
   position: relative;
   width: 96px;
@@ -453,7 +480,7 @@
   bottom: 0;
   border-radius: 3px;
   background: var(--color-accent);
-  /* 与 500ms 轮询间隔匹配的线性过渡，进度条平滑推进不跳变。
+  /* 进度刷新时的线性过渡，进度条平滑推进不跳变。
      注意不能用 `width var(--transition-normal) linear`——var 展开成
      `200ms ease` 后会变成两个 timing-function，整个 transition 声明无效。 */
   transition: width 200ms linear;

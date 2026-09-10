@@ -5,9 +5,15 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
 import ToolbarButton from "../../components/ToolbarButton";
 import Icon from "../../components/Icon";
+import type { IconName } from "../../components/Icon";
 import { SelectionInfo } from "../../types";
 import { OPTIMIZE_MODES, OptimizeMode } from "../../constants/optimizeModes";
-import { DEFAULT_FEATURE_IDS, fetchEnabledFeatures } from "../../constants/toolbarFeatures";
+import {
+  DEFAULT_FEATURE_IDS,
+  DEFAULT_FEATURE_ORDER,
+  fetchEnabledFeatures,
+  fetchToolbarFeatureOrder,
+} from "../../constants/toolbarFeatures";
 import { DEFAULT_DEDUP_MODE, fetchDedupMode, type DedupMode } from "../../constants/dedupConfig";
 import { DEFAULT_MD5_LENGTH, fetchMd5Length, type Md5Length } from "../../constants/md5Config";
 import {
@@ -32,6 +38,7 @@ import { dedup } from "../../utils/dedup";
 import { clearText } from "../../utils/clearText";
 import { charCount } from "../../utils/charCount";
 import { numbering } from "../../utils/numbering";
+import { convertToSimplified, convertToTraditional } from "../../utils/chineseConvert";
 import { useAiOptimize } from "../../hooks/useAiOptimize";
 import {
   applyThemePreferences,
@@ -75,6 +82,41 @@ function formatTime(ms: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+/** 字节数格式化为可读字符串（≥1024 显示 KB） */
+function formatBytes(bytes: number): string {
+  return bytes >= 1024 ? `${(bytes / 1024).toFixed(2)} KB` : `${bytes} B`;
+}
+
+/**
+ * 按 UTF-8 字节数上限截断文本。截断点可能落在多字节字符中间，
+ * 需回退到合法字符边界（检查完整解码结果比只看 continuation byte 更可靠）。
+ * 未超限时原样返回。
+ */
+function truncateToUtf8Bytes(
+  text: string,
+  maxBytes: number,
+): { content: string; truncated: boolean } {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(text);
+  if (bytes.length <= maxBytes) return { content: text, truncated: false };
+  let end = maxBytes;
+  while (end > 0) {
+    // 每次尝试都用全新的 decoder：fatal 解码失败后实例状态不可靠，复用可能导致后续误判
+    try {
+      const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(0, end));
+      return { content, truncated: true };
+    } catch {
+      end--;
+    }
+  }
+  return { content: "", truncated: true };
+}
+
+// Keep the symbol below Version 26 at M correction. Larger symbols have modules
+// smaller than two physical pixels in the toolbar and phone cameras cannot scan
+// them reliably, even though qrcode can generate one.
+const QR_MAX_BYTES = 1000;
+
 type ToolbarState =
   | "default"
   | "mode-select"
@@ -83,6 +125,7 @@ type ToolbarState =
   | "preview"
   | "error"
   | "qrcode-preview"
+  | "qrcode-confirm"
   | "charcount-preview"
   | "speaking";
 
@@ -99,6 +142,11 @@ function FloatingToolbar() {
 
   // 工具栏功能配置（默认全量，挂载后从后端异步加载；监听设置窗口的变更事件）
   const [enabledFeatureIds, setEnabledFeatureIds] = useState<string[]>(DEFAULT_FEATURE_IDS);
+
+  // 工具栏按钮顺序（默认按历史渲染顺序，挂载后从后端异步加载；监听设置窗口的变更事件）
+  const [featureOrder, setFeatureOrder] = useState<string[]>(DEFAULT_FEATURE_ORDER);
+  // 挂载期间若已收到顺序变更事件，忽略后到的初始读取结果，避免覆盖事件值
+  const featureOrderTouchedRef = useRef(false);
 
   // 去重粒度配置（默认按行，挂载后从后端异步加载；监听设置窗口的变更事件）
   const [dedupMode, setDedupModeState] = useState<DedupMode>(DEFAULT_DEDUP_MODE);
@@ -143,14 +191,18 @@ function FloatingToolbar() {
     // 并行加载跨窗口持久化配置（减少串行 IPC 往返延迟）
     Promise.allSettled([
       fetchEnabledFeatures(),
+      fetchToolbarFeatureOrder(),
       fetchDedupMode(),
       fetchMd5Length(),
       fetchNumberingStyle(),
       fetchTtsConfig(),
       fetchClearOptions(),
       fetchSearchEngine(),
-    ]).then(([features, dedup, md5, numbering, tts, clear, search]) => {
+    ]).then(([features, order, dedup, md5, numbering, tts, clear, search]) => {
       if (features.status === "fulfilled") setEnabledFeatureIds(features.value);
+      if (order.status === "fulfilled" && !featureOrderTouchedRef.current) {
+        setFeatureOrder(order.value);
+      }
       if (dedup.status === "fulfilled") setDedupModeState(dedup.value);
       if (md5.status === "fulfilled") setMd5LengthState(md5.value);
       if (numbering.status === "fulfilled") setNumberingStyleState(numbering.value);
@@ -162,6 +214,10 @@ function FloatingToolbar() {
     const unlistenTheme = subscribeThemePreferences();
     const unlistenFeatures = listen<string[]>("levitaire-features-changed", (event) => {
       setEnabledFeatureIds(event.payload);
+    });
+    const unlistenFeatureOrder = listen<string[]>("levitaire-feature-order-changed", (event) => {
+      featureOrderTouchedRef.current = true;
+      setFeatureOrder(event.payload);
     });
     const unlistenDedupMode = listen<DedupMode>("levitaire-dedup-mode-changed", (event) => {
       setDedupModeState(event.payload);
@@ -190,6 +246,7 @@ function FloatingToolbar() {
     return () => {
       unlistenTheme.then((fn) => fn());
       unlistenFeatures.then((fn) => fn());
+      unlistenFeatureOrder.then((fn) => fn());
       unlistenDedupMode.then((fn) => fn());
       unlistenMd5Length.then((fn) => fn());
       unlistenNumberingStyle.then((fn) => fn());
@@ -208,6 +265,10 @@ function FloatingToolbar() {
     checkAiConfig,
   } = useAiOptimize();
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
+  // 二维码内容超长确认：content 为截断后将要编码的内容，originalBytes 用于提示原字节数
+  const [qrPending, setQrPending] = useState<{ content: string; originalBytes: number } | null>(
+    null,
+  );
   // 图片是否已加载完成并完成精确校准；用于避免 onLoad 先于扩窗 effect 触发时的尺寸竞态
   const qrImageLoadedRef = useRef(false);
 
@@ -270,6 +331,7 @@ function FloatingToolbar() {
     setIsVisible(false);
     setState("default");
     setQrCodeDataUrl(null);
+    setQrPending(null);
     cancel();
     if (errorTimerRef.current) {
       clearTimeout(errorTimerRef.current);
@@ -311,6 +373,7 @@ function FloatingToolbar() {
   const resetToDefault = useCallback(() => {
     setState("default");
     setQrCodeDataUrl(null);
+    setQrPending(null);
     optimizeInProgressRef.current = false;
     cancel();
     setTtsPositionMs(0);
@@ -334,6 +397,7 @@ function FloatingToolbar() {
       currentState === "clear-select" ||
       currentState === "preview" ||
       currentState === "charcount-preview" ||
+      currentState === "qrcode-confirm" ||
       currentState === "error" ||
       currentState === "speaking"
     ) {
@@ -379,6 +443,7 @@ function FloatingToolbar() {
       setSelection(event.payload);
       setIsVisible(true);
       setQrCodeDataUrl(null);
+      setQrPending(null);
       optimizeInProgressRef.current = false;
       cancel();
       if (errorTimerRef.current) {
@@ -395,9 +460,19 @@ function FloatingToolbar() {
           setState("speaking");
           setTtsPlaying(true);
           setTtsPaused(st.paused);
-          // 进度由 speaking 态轮询即时获取，先清零避免展示上一轮的残留值
-          setTtsPositionMs(0);
-          setTtsDurationMs(0);
+          // 暂停时后端 PositionChanged 不再触发、进度不自更新；用 tts_get_progress
+          // 取真实进度显示，避免重开工具栏时进度先清零、暂停状态下一直卡在 0:00。
+          // （朗读中 tts-progress 事件仍会即时覆盖，此处取到既真实又能消除残留跳变。）
+          try {
+            const progress = await invoke<{ positionMs: number; durationMs: number }>(
+              "tts_get_progress",
+            );
+            setTtsPositionMs(progress?.positionMs ?? 0);
+            setTtsDurationMs(progress?.durationMs ?? 0);
+          } catch {
+            setTtsPositionMs(0);
+            setTtsDurationMs(0);
+          }
         } else {
           setTtsPlaying(false);
           setTtsPaused(false);
@@ -456,6 +531,26 @@ function FloatingToolbar() {
       },
     );
 
+    // 朗读进度：后端在 PlaybackSession.PositionChanged 时推送 tts-progress，
+    // 替代原每 500ms 轮询 tts_get_progress，降低朗读长文本时的 IPC 往返。
+    // 按 requestId 过滤，避免上一次请求残留的延迟事件串台。
+    const unlistenTtsProgress = win.listen<{
+      requestId?: number;
+      positionMs: number;
+      durationMs: number;
+    }>("tts-progress", (event) => {
+      const activeRequestId = ttsRequestIdRef.current;
+      if (
+        activeRequestId !== null &&
+        event.payload.requestId !== undefined &&
+        event.payload.requestId !== activeRequestId
+      ) {
+        return;
+      }
+      setTtsPositionMs(event.payload.positionMs);
+      setTtsDurationMs(event.payload.durationMs);
+    });
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         handleEscape();
@@ -471,6 +566,7 @@ function FloatingToolbar() {
       unlistenHidden.then((fn) => fn());
       unlistenTtsFinished.then((fn) => fn());
       unlistenTtsError.then((fn) => fn());
+      unlistenTtsProgress.then((fn) => fn());
       unlistenEsc.then((fn) => fn());
       document.removeEventListener("keydown", handleKeyDown);
     };
@@ -596,6 +692,28 @@ function FloatingToolbar() {
     await replaceSelectionText(result);
   };
 
+  // 简体 → 繁体：动态加载转换器，写回后保持工具栏显示便于连续操作
+  const handleToTraditional = async () => {
+    if (!selection?.text?.trim()) return;
+    try {
+      const result = await convertToTraditional(selection.text);
+      await replaceSelectionText(result, "转繁体失败，请重试");
+    } catch (err) {
+      showError(toErrorMessage(err, "转繁体失败，请重试"));
+    }
+  };
+
+  // 繁体 → 简体：同 handleToTraditional
+  const handleToSimplified = async () => {
+    if (!selection?.text?.trim()) return;
+    try {
+      const result = await convertToSimplified(selection.text);
+      await replaceSelectionText(result, "转简体失败，请重试");
+    } catch (err) {
+      showError(toErrorMessage(err, "转简体失败，请重试"));
+    }
+  };
+
   const handleMd5Encrypt = async () => {
     if (!selection) return;
     const text = selection.text.trim();
@@ -698,33 +816,6 @@ function FloatingToolbar() {
     resetToDefault();
   };
 
-  // 朗读进度轮询：speaking 态下每 500ms 查询后端进度刷新进度条与时长显示。
-  // 注意：不在轮询中同步 paused——前端暂停/继续由用户操作驱动，
-  // 轮询读到的 paused 可能与点击瞬间的在途请求竞态，导致按钮短暂闪烁；
-  // 暂停态恢复由 selection-found 时的 tts_get_state 负责。
-  useEffect(() => {
-    if (state !== "speaking" || !ttsPlaying) return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const p = await invoke<{ positionMs: number; durationMs: number; paused: boolean }>(
-          "tts_get_progress",
-        );
-        if (cancelled) return;
-        setTtsPositionMs(p.positionMs);
-        setTtsDurationMs(p.durationMs);
-      } catch {
-        // 无朗读进度（可能刚结束/暂无 player），保持现有显示
-      }
-    };
-    tick();
-    const timer = setInterval(tick, 500);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [state, ttsPlaying]);
-
   // 进入清除子菜单（与"优化"的 mode-select 同构，无需 AI 配置检查）
   const handleClearClick = () => {
     setState("clear-select");
@@ -749,50 +840,50 @@ function FloatingToolbar() {
     setState("charcount-preview");
   };
 
+  // 实际生成二维码：对给定内容编码并进入预览态
+  const generateQrCode = useCallback(
+    async (content: string) => {
+      try {
+        const { toDataURL } = await import("qrcode");
+        const dataUrl = await toDataURL(content, {
+          width: 384,
+          margin: 4,
+          errorCorrectionLevel: "M",
+          color: {
+            dark: "#000000",
+            light: "#ffffff",
+          },
+        });
+        // 新一轮二维码生成，重置图片加载标志，允许再次扩窗/精确校准
+        qrImageLoadedRef.current = false;
+        setQrCodeDataUrl(dataUrl);
+        setState("qrcode-preview");
+        invoke("set_qrcode_preview", { active: true }).catch(() => {});
+      } catch {
+        showError("生成二维码失败");
+      }
+    },
+    [showError],
+  );
+
   const handleQrCode = async () => {
     if (!selection?.text) return;
     const text = selection.text.trim();
     if (!text) return;
-    // Keep the symbol below Version 26 at M correction. Larger symbols have
-    // modules smaller than two physical pixels in the toolbar and phone
-    // cameras cannot scan them reliably, even though qrcode can generate one.
-    const MAX_BYTES = 1000;
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(text);
-    let content = text;
-    if (bytes.length > MAX_BYTES) {
-      // 回退到有效 UTF-8 边界。检查完整解码结果比只看 continuation
-      // byte 更可靠，因为截断点可能落在多字节字符的首字节之后。
-      let end = MAX_BYTES;
-      const decoder = new TextDecoder("utf-8", { fatal: true });
-      while (end > 0) {
-        try {
-          content = decoder.decode(bytes.slice(0, end));
-          break;
-        } catch {
-          end--;
-        }
-      }
+    const { content, truncated } = truncateToUtf8Bytes(text, QR_MAX_BYTES);
+    if (truncated) {
+      // 内容超长：不静默截断，先提示用户（原字节数 + 将只编码前段），由用户确认后再生成
+      setQrPending({ content, originalBytes: new TextEncoder().encode(text).length });
+      setState("qrcode-confirm");
+      return;
     }
-    try {
-      const { toDataURL } = await import("qrcode");
-      const dataUrl = await toDataURL(content, {
-        width: 384,
-        margin: 4,
-        errorCorrectionLevel: "M",
-        color: {
-          dark: "#000000",
-          light: "#ffffff",
-        },
-      });
-      // 新一轮二维码生成，重置图片加载标志，允许再次扩窗/精确校准
-      qrImageLoadedRef.current = false;
-      setQrCodeDataUrl(dataUrl);
-      setState("qrcode-preview");
-      invoke("set_qrcode_preview", { active: true }).catch(() => {});
-    } catch {
-      showError("生成二维码失败");
-    }
+    await generateQrCode(content);
+  };
+
+  // 用户在超长确认提示中选择“仍要生成”：对截断后的内容生成二维码
+  const handleQrConfirm = async () => {
+    if (!qrPending) return;
+    await generateQrCode(qrPending.content);
   };
 
   const handleTranslate = async () => {
@@ -862,6 +953,54 @@ function FloatingToolbar() {
     return null;
   }
 
+  // 默认态按钮定义：图标/标签/点击处理与历史一致，渲染顺序由 featureOrder 驱动
+  const featureButtons: Record<string, { icon: IconName; label: string; onClick: () => void }> = {
+    copy: { icon: "Copy", label: "复制", onClick: handleCopy },
+    search: { icon: "Search", label: "搜索", onClick: handleSearch },
+    translate: { icon: "Globe", label: "翻译", onClick: handleTranslate },
+    optimize: { icon: "Sparkles", label: "优化", onClick: handleOptimizeClick },
+    uppercase: { icon: "CaseUpper", label: "大写", onClick: handleUppercase },
+    lowercase: { icon: "CaseLower", label: "小写", onClick: handleLowercase },
+    dedup: { icon: "ListFilter", label: "去重", onClick: handleDedup },
+    numbering: { icon: "ListOrdered", label: "编号", onClick: handleNumbering },
+    qrcode: { icon: "QrCode", label: "二维码", onClick: handleQrCode },
+    "base64-encode": { icon: "Binary", label: "编码", onClick: handleBase64Encode },
+    "base64-decode": { icon: "Binary", label: "解码", onClick: handleBase64Decode },
+    "unicode-encode": { icon: "Type", label: "转Unicode", onClick: handleUnicodeEncode },
+    "unicode-decode": { icon: "Type", label: "转中文", onClick: handleUnicodeDecode },
+    "to-traditional": { icon: "Languages", label: "转繁体", onClick: handleToTraditional },
+    "to-simplified": { icon: "Languages", label: "转简体", onClick: handleToSimplified },
+    "md5-encrypt": { icon: "Hash", label: "MD5", onClick: handleMd5Encrypt },
+    "char-count": { icon: "Calculator", label: "统计", onClick: handleCharCount },
+    tts: { icon: "Volume2", label: "朗读", onClick: handleSpeak },
+    clear: { icon: "RemoveFormatting", label: "清除", onClick: handleClearClick },
+  };
+  const selectionText = selection.text ?? "";
+  const trimmedText = selectionText.trim();
+  // 纯图片选区（有图无文字）时只显示复制按钮，历史行为
+  const imageOnlySelection = Boolean(selection["has-image"] && !selectionText);
+  const needsNonEmptyText = new Set([
+    "qrcode",
+    "unicode-encode",
+    "unicode-decode",
+    "to-traditional",
+    "to-simplified",
+    "md5-encrypt",
+    "char-count",
+    "tts",
+  ]);
+  // 按用户自定义顺序 + 启用状态 + 选区上下文过滤出实际显示的按钮
+  const defaultButtons = featureOrder
+    .filter((id) => enabledFeatureIds.includes(id))
+    .filter((id) => {
+      if (id === "copy") return true;
+      if (imageOnlySelection) return false;
+      if (id === "base64-decode") return isBase64(trimmedText);
+      if (id === "unicode-decode") return trimmedText.length > 0 && isUnicodeEscaped(trimmedText);
+      if (needsNonEmptyText.has(id)) return trimmedText.length > 0;
+      return true;
+    });
+
   const previewText =
     optimizedText && optimizedText.length > 500
       ? optimizedText.slice(0, 500) + "..."
@@ -878,63 +1017,13 @@ function FloatingToolbar() {
       <div className="toolbar-drag-handle" data-tauri-drag-region aria-hidden="true" />
       {state === "default" && (
         <>
-          {enabledFeatureIds.includes("copy") && (
-            <ToolbarButton icon="Copy" label="复制" onClick={handleCopy} />
-          )}
-          {/* 纯图片选区时只显示复制按钮 */}
-          {!(selection["has-image"] && !selection.text) && (
-            <>
-              {enabledFeatureIds.includes("search") && (
-                <ToolbarButton icon="Search" label="搜索" onClick={handleSearch} />
-              )}
-              {enabledFeatureIds.includes("translate") && (
-                <ToolbarButton icon="Globe" label="翻译" onClick={handleTranslate} />
-              )}
-              {enabledFeatureIds.includes("optimize") && (
-                <ToolbarButton icon="Sparkles" label="优化" onClick={handleOptimizeClick} />
-              )}
-              {enabledFeatureIds.includes("uppercase") && (
-                <ToolbarButton icon="CaseUpper" label="大写" onClick={handleUppercase} />
-              )}
-              {enabledFeatureIds.includes("lowercase") && (
-                <ToolbarButton icon="CaseLower" label="小写" onClick={handleLowercase} />
-              )}
-              {enabledFeatureIds.includes("dedup") && (
-                <ToolbarButton icon="ListFilter" label="去重" onClick={handleDedup} />
-              )}
-              {enabledFeatureIds.includes("numbering") && (
-                <ToolbarButton icon="ListOrdered" label="编号" onClick={handleNumbering} />
-              )}
-              {enabledFeatureIds.includes("qrcode") && selection.text.trim() && (
-                <ToolbarButton icon="QrCode" label="二维码" onClick={handleQrCode} />
-              )}
-              {enabledFeatureIds.includes("base64-encode") && (
-                <ToolbarButton icon="Binary" label="编码" onClick={handleBase64Encode} />
-              )}
-              {enabledFeatureIds.includes("base64-decode") && isBase64(selection.text.trim()) && (
-                <ToolbarButton icon="Binary" label="解码" onClick={handleBase64Decode} />
-              )}
-              {enabledFeatureIds.includes("unicode-encode") && selection.text.trim() && (
-                <ToolbarButton icon="Type" label="转Unicode" onClick={handleUnicodeEncode} />
-              )}
-              {enabledFeatureIds.includes("unicode-decode") &&
-                isUnicodeEscaped(selection.text.trim()) && (
-                  <ToolbarButton icon="Type" label="转中文" onClick={handleUnicodeDecode} />
-                )}
-              {enabledFeatureIds.includes("md5-encrypt") && selection.text.trim() && (
-                <ToolbarButton icon="Hash" label="MD5" onClick={handleMd5Encrypt} />
-              )}
-              {enabledFeatureIds.includes("char-count") && selection.text.trim() && (
-                <ToolbarButton icon="Calculator" label="统计" onClick={handleCharCount} />
-              )}
-              {enabledFeatureIds.includes("tts") && selection.text.trim() && (
-                <ToolbarButton icon="Volume2" label="朗读" onClick={handleSpeak} />
-              )}
-              {enabledFeatureIds.includes("clear") && (
-                <ToolbarButton icon="RemoveFormatting" label="清除" onClick={handleClearClick} />
-              )}
-            </>
-          )}
+          {defaultButtons.map((id) => {
+            const def = featureButtons[id];
+            if (!def) return null;
+            return (
+              <ToolbarButton key={id} icon={def.icon} label={def.label} onClick={def.onClick} />
+            );
+          })}
         </>
       )}
 
@@ -1064,6 +1153,31 @@ function FloatingToolbar() {
               <Icon name="X" size={14} />
               <span>关闭</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {state === "qrcode-confirm" && qrPending && (
+        <div
+          className="toolbar-qrcode-confirm"
+          role="alertdialog"
+          aria-label="二维码内容过长，确认是否截断生成"
+        >
+          <div className="toolbar-qrcode-confirm-message">
+            <Icon name="AlertCircle" size={15} className="toolbar-qrcode-confirm-icon" />
+            <span>
+              内容过长（{formatBytes(qrPending.originalBytes)}）。为保证可扫码识别，将仅编码前{" "}
+              {formatBytes(QR_MAX_BYTES)}，超出部分会被截断，扫码后无法读到完整内容。
+            </span>
+          </div>
+          <div className="toolbar-preview-actions">
+            <ToolbarButton icon="X" label="取消" onClick={resetToDefault} variant="danger" />
+            <ToolbarButton
+              icon="QrCode"
+              label="仍要生成"
+              onClick={handleQrConfirm}
+              variant="primary"
+            />
           </div>
         </div>
       )}

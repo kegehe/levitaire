@@ -92,7 +92,7 @@ Levitaire/
 - 自动出现在选中文字下方
 - 支持动画效果
 - 失去焦点自动隐藏
-- 可扩展的插件按钮
+- 文字工具按钮可在设置页自定义启用与排序
 
 ### 3. 剪切和复制
 
@@ -141,17 +141,18 @@ Levitaire/
 - [架构设计文档](architecture-design.md) - 了解系统架构
 - [开发指南](developer-guide.md) - 了解开发细节
 
-### 尝试开发插件
+### 尝试开发一个新工具
 
-1. 阅读 [插件开发指南](developer-guide.md#插件开发)
-2. 创建自己的插件
-3. 测试插件功能
+1. 阅读 [工具开发指南](developer-guide.md#工具开发)
+2. 在 `src/tools/registry.ts` 登记你的工具
+3. 在 `src/tools/<your-tool>/` 实现组件，按需在 `src-tauri/src/commands/` 下添加后端命令
+4. 运行 `npm run test` 与 `cargo test` 验证
 
 ### 参与贡献
 
-1. 查看 [贡献指南](developer-guide.md#贡献指南)
+1. 查看 [开发指南](developer-guide.md) 了解代码组织
 2. 选择一个 Issue 开始
-3. 提交 Pull Request
+3. 提交 Pull Request（提交前请通过 `npm run typecheck && npm run lint && npm run test` 与 `cargo test`）
 
 ---
 
@@ -167,13 +168,13 @@ Levitaire/
 ### 官方文档
 
 - [Rust 官方文档](https://doc.rust-lang.org/)
-- [Tauri 官方文档](https://tauri.app/v1/guides/)
+- [Tauri 官方文档](https://tauri.app/)
 - [windows-rs 文档](https://microsoft.github.io/windows-rs/)
 
 ### 学习资源
 
 - [Rust 程序设计语言](https://kaisery.github.io/trpl-zh-cn/)
-- [Tauri 教程](https://tauri.app/v1/tutorials/)
+- [Tauri 教程](https://tauri.app/start/)
 
 ---
 

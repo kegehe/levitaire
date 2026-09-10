@@ -67,6 +67,7 @@ describe("SystemMonitor theme synchronization", () => {
         net: [],
         disks: [],
         disk_io: { read_rate: 3 * 1024, write_rate: 1024 },
+        gpu: { has_gpu: false, usage: 0, memory_used: 0, memory_total: 0 },
         battery: { has_battery: false, percent: 0, charging: false },
       }),
     );
@@ -100,6 +101,7 @@ describe("SystemMonitor theme synchronization", () => {
         net: [],
         disks: [{ mount_point: "C:\\", total: 1, available: 0, kind: "SSD" }],
         disk_io: null,
+        gpu: { has_gpu: false, usage: 0, memory_used: 0, memory_total: 0 },
         battery: { has_battery: true, percent: 50, charging: false },
       }),
     );

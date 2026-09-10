@@ -26,6 +26,11 @@ fn ffmpeg_path(extra_candidates: &[PathBuf]) -> PathBuf {
         PathBuf::from("src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe"),
         PathBuf::from("binaries/ffmpeg.exe"),
         PathBuf::from("binaries/ffmpeg-x86_64-pc-windows-msvc.exe"),
+        // 开发模式兜底：仓库源码目录（编译期常量，不依赖 cwd）。
+        // 发版产物走 exe 同目录 / resource_dir；端用户机器上该路径不存在，is_file() 为 false，无副作用。
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("ffmpeg.exe"),
     ];
     for candidate in candidates {
         if candidate.is_file() {

@@ -6,7 +6,7 @@
 2. [开发环境](#开发环境)
 3. [项目结构](#项目结构)
 4. [核心模块](#核心模块)
-5. [插件开发](#插件开发)
+5. [工具开发](#工具开发)
 6. [测试指南](#测试指南)
 7. [发布流程](#发布流程)
 8. [常见问题](#常见问题)
@@ -81,49 +81,43 @@ cargo tauri dev
 Levitaire/
 ├── src-tauri/                          # Rust 后端
 │   ├── src/
-│   │   ├── main.rs                     # 程序入口
-│   │   ├── lib.rs                      # 库入口
-│   │   ├── hooks/                      # 系统钩子
-│   │   │   ├── mod.rs
-│   │   │   ├── mouse.rs                # 鼠标钩子
-│   │   │   └── keyboard.rs             # 键盘钩子
-│   │   ├── automation/                 # UI Automation
-│   │   │   ├── mod.rs
-│   │   │   └── text_selection.rs       # 文字选择检测
-│   │   ├── clipboard/                  # 剪贴板管理
-│   │   │   ├── mod.rs
-│   │   │   └── manager.rs
-│   │   ├── plugins/                    # 插件系统
-│   │   │   ├── mod.rs
-│   │   │   ├── trait.rs                # 插件接口
-│   │   │   └── builtin/               # 内置插件
-│   │   ├── commands/                   # Tauri 命令
-│   │   │   ├── mod.rs
-│   │   │   └── toolbar.rs
-│   │   └── config/                     # 配置管理
-│   │       └── mod.rs
-│   ├── Cargo.toml                      # Rust 依赖
-│   └── tauri.conf.json                 # Tauri 配置
+│   │   ├── main.rs                     # 入口：模块初始化、命令注册、托盘与窗口定位
+│   │   ├── commands/                   # Tauri 命令（#[tauri::command]）与会话/窗口编排
+│   │   ├── hooks/                      # 全局钩子：mouse / keyboard / hotkey
+│   │   ├── automation/                 # 选区获取：selection / clipboard_selection / ocr_selection
+│   │   ├── screenshot/                 # 截屏、钉图、目标窗口识别
+│   │   ├── scroll_capture/             # 长截图（滚动捕获与拼接）
+│   │   ├── scroll_navigation.rs        # 滚动导航
+│   │   ├── recording/                  # GIF / MP4 录制、窗口检测
+│   │   ├── ocr/                        # OcrService：Windows OCR + PaddleOCR
+│   │   ├── tts/  sound/                # 语音合成 / 提示音
+│   │   ├── monitor/  pomodoro/         # 系统监控 / 番茄钟
+│   │   ├── timer/  todo/  sticky_note/ # 时钟 / 待办 / 便利贴
+│   │   ├── quick_input.rs              # 快速输入转盘 + 剪贴板历史
+│   │   ├── clipboard/                  # 剪贴板读写与监听
+│   │   ├── ai/                         # AI 服务（Anthropic / OpenAI 兼容）
+│   │   ├── config/                     # ConfigManager、自启动、窗口位置记忆
+│   │   ├── updater/                    # 在线更新
+│   │   └── utils/                      # 日志、DPAPI 加解密
+│   ├── resources/ocr/                  # PaddleOCR 模型（随包分发）
+│   ├── binaries/ · libs/               # ffmpeg.exe / onnxruntime.dll（不入库，见 README）
+│   ├── tauri.conf.json                 # Tauri 基础配置
+│   ├── tauri.bundle.conf.json          # 发版叠加配置（发版时注入上述两个二进制）
+│   └── Cargo.toml
 │
-├── src/                                # 前端代码
-│   ├── index.html                      # 主页面
-│   ├── toolbar.html                    # 工具栏页面
-│   ├── styles/                         # 样式
-│   │   ├── main.css
-│   │   ├── toolbar.css
-│   │   └── themes/
-│   │       ├── dark.css
-│   │       └── light.css
-│   ├── scripts/                        # 脚本
-│   │   ├── main.js
-│   │   ├── toolbar.js
-│   │   └── bridge.js                   # Tauri 桥接
-│   └── assets/                         # 资源
-│       ├── icons/
-│       └── fonts/
+├── src/                                # 前端（React + TypeScript + Vite）
+│   ├── main.tsx / App.tsx              # 入口与多窗口路由
+│   ├── components/                     # FloatingOrb / ToolPalette / Settings / ToolIcon / ContextMenu…
+│   ├── tools/
+│   │   ├── registry.ts                 # 工具注册表（新增工具在此登记）
+│   │   ├── text-toolbar/ screenshot/ recording/ quick-input/
+│   │   ├── pomodoro/ system-monitor/ timer/ todo/ sticky-note/
+│   │   └── sketch/ utility-hub/ scroll-navigator/ color-picker/
+│   ├── constants/ hooks/ utils/        # 常量、hooks、纯函数工具
+│   └── styles/                         # 主题与设计 token
 │
 ├── docs/                               # 文档
-├── Cargo.toml                          # 工作区配置
+├── scripts/                            # 发版脚本 release.mjs 等
 └── README.md
 ```
 
@@ -190,19 +184,20 @@ Levitaire/
 - `ClipboardManager`: 剪贴板管理器
 - `ClipboardError`: 错误类型
 
-### 4. 插件系统模块 (plugins/)
+### 4. 工具模块与注册表 (tools/ + registry.ts)
 
-管理插件的加载和执行。
+每个工具前端是一个独立目录，后端是若干 `#[tauri::command]`。
+前端用注册表统一登记，工具面板据此自动展示。
 
 **职责：**
-- 插件的注册和管理
-- 插件的执行调度
-- 插件结果处理
+- 登记工具的元信息与组件入口（懒加载）
+- 决定工具的激活方式（选中文字触发 / 点击即进入）
+- 保持前后端的工具启停状态一致
 
 **关键类型：**
-- `Plugin` trait: 插件接口
-- `PluginManager`: 插件管理器
-- `PluginResult`: 执行结果
+- `FloatingTool`（`src/tools/registry.ts`）：工具定义接口
+- `FLOATING_TOOLS`：工具注册表数组
+- `BACKEND_TOOLS`：工具 id → 后端启停 getter 的映射
 
 ### 5. Tauri 命令模块 (commands/)
 
@@ -213,86 +208,62 @@ Levitaire/
 - 处理前端请求
 - 返回执行结果
 
-**关键命令：**
-- `get_selected_text`: 获取选中的文字
-- `copy_text`: 复制文字
-- `cut_text`: 剪切文字
-- `show_toolbar`: 显示工具栏
-- `hide_toolbar`: 隐藏工具栏
-- `execute_plugin`: 执行插件
+**关键命令（完整列表见 `main.rs` 的 `generate_handler!`）：**
+- `get_selection`: 获取选中文字（多策略回退）
+- `copy_text` / `copy_selection`: 复制到剪贴板
+- `replace_selection`: 替换选区
+- `start_screenshot` / `ocr_region`: 截图 / OCR
+- `call_ai` / `call_ai_stream`: AI 翻译与优化
+- `show_toolbar` / `hide_toolbar` / `show_settings`: 窗口显隐
 
 ---
 
-## 插件开发
+## 工具开发
 
-### 插件接口
+### 前端：登记一个工具
 
-```rust
-pub trait Plugin {
-    /// 插件名称
-    fn name(&self) -> &str;
+在 `src/tools/registry.ts` 的 `FLOATING_TOOLS` 中追加一项：
 
-    /// 插件图标
-    fn icon(&self) -> &str;
-
-    /// 插件描述
-    fn description(&self) -> &str;
-
-    /// 是否启用
-    fn is_enabled(&self) -> bool;
-
-    /// 优先级
-    fn priority(&self) -> i32;
-
-    /// 执行插件
-    fn execute(&self, text: &str, context: &PluginContext) -> PluginResult;
-
-    /// 初始化
-    fn initialize(&mut self) -> Result<(), PluginError>;
-
-    /// 销毁
-    fn destroy(&mut self) -> Result<(), PluginError>;
+```ts
+{
+  id: "my-tool",
+  name: "我的工具",
+  icon: "Sparkles",           // 可用图标名见 components/ToolIcon.tsx
+  description: "一句话说明",
+  category: "text",            // text | screen | system
+  defaultEnabled: false,
+  loader: () => import("./my-tool/MyTool"),   // 懒加载，Vite 自动分包
+  activation: "immediate",     // immediate=点击即进入；selection=选中文字后触发
 }
 ```
 
-### 创建新插件
+若该工具有独立启停开关，再到 `BACKEND_TOOLS` 登记 `{ id, getter }`，
+用于与 `config.json` 中的真值双向同步（否则设置页开关不会生效）。
 
-1. 在 `src-tauri/src/plugins/builtin/` 创建新文件
-2. 定义插件结构体
-3. 实现 `Plugin` trait
-4. 在 `mod.rs` 中注册
+### 后端：新增一个命令
 
-**示例：字数统计插件**
+1. 在对应功能域模块里写函数并标注 `#[tauri::command]`
+2. 在 `src-tauri/src/main.rs` 的 `tauri::generate_handler![...]` 中加入它
+3. 前端用 `invoke("命令名", { 参数 })` 调用
 
 ```rust
-pub struct WordCountPlugin {
-    name: String,
-    enabled: bool,
-}
-
-impl Plugin for WordCountPlugin {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn execute(&self, text: &str, _context: &PluginContext) -> PluginResult {
-        let char_count = text.chars().count();
-        let word_count = text.split_whitespace().count();
-
-        PluginResult::success(format!(
-            "字符数: {}, 单词数: {}",
-            char_count, word_count
-        ))
-    }
+/// 统计文本的字数与词数。
+#[tauri::command]
+pub fn count_words(text: String) -> Result<(usize, usize), String> {
+    let chars = text.chars().count();
+    let words = text.split_whitespace().count();
+    Ok((chars, words))
 }
 ```
 
-### 插件最佳实践
+### 最佳实践
 
-1. **保持轻量**: 执行应该快速返回
-2. **错误处理**: 返回友好的错误信息
-3. **资源清理**: 在 `destroy` 中释放资源
-4. **配置支持**: 支持插件配置
+1. **保持轻量**：钩子回调与命令应快速返回，耗时操作放后台线程
+2. **错误处理**：命令返回 `Result<T, String>`，错误信息用中文，前端可直接展示
+3. **勿阻塞钩子**：不要在低级钩子回调里做耗时操作，否则会拖慢系统输入
+4. **状态管理**：新状态优先放进 Tauri `State`，避免继续新增模块级 `static`
+5. **配置读写**：新增配置项走 `config::ConfigManager`，它保证原子写入（临时文件 + rename）
+6. **提交前自检**：`npm run typecheck && npm run lint && npm run test`，以及 `cargo test`
 
 ---
 
@@ -300,7 +271,8 @@ impl Plugin for WordCountPlugin {
 
 ### 单元测试
 
-项目使用 Rust 内置的测试框架。
+后端使用 Rust 内置测试框架，测试模块与源码同文件（`#[cfg(test)] mod tests`）；
+前端使用 Vitest + Testing Library。
 
 ```rust
 #[cfg(test)]
@@ -308,17 +280,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_clipboard_copy() {
-        let manager = ClipboardManager::new();
-        let result = manager.copy_text("测试文字");
-        assert!(result.is_ok());
+    fn test_redact_url_for_log_drops_path_and_query() {
+        assert_eq!(
+            redact_url_for_log("https://www.bing.com/search?q=secret#frag"),
+            "https://www.bing.com"
+        );
     }
 
     #[test]
-    fn test_plugin_execute() {
-        let plugin = WordCountPlugin::new();
-        let result = plugin.execute("Hello World", &PluginContext::default());
-        assert!(result.is_success());
+    fn test_default_window_position_unknown_fallback() {
+        assert_eq!(default_window_position("unknown-window", 100, 100), (100, 100));
     }
 }
 ```
@@ -326,20 +297,23 @@ mod tests {
 ### 运行测试
 
 ```bash
-# 运行所有测试
+# 后端全部测试
 cargo test
 
-# 运行特定测试
-cargo test test_clipboard
+# 只跑名字含 redact_url 的测试
+cargo test redact_url
 
-# 运行集成测试
-cargo test --test integration
+# 前端全部测试（Vitest）
+npm run test
+
+# 前端类型检查 + Lint
+npm run typecheck && npm run lint
 ```
 
 ### 调试技巧
 
-1. **日志输出**: 使用 `tracing` crate 输出日志
-2. **断点调试**: 使用 VS Code + CodeLLDB 插件
+1. **日志输出**: 使用内置 `crate::utils::logger::log(tag, msg)`，写入 `levitaire-debug.log`
+2. **断点调试**: 使用 VS Code + CodeLLDB 扩展
 3. **Windows API 调试**: 使用 Spy++ 查看窗口消息
 
 ---
@@ -350,21 +324,25 @@ cargo test --test integration
 
 项目使用语义化版本号：`主版本号.次版本号.修订号`
 
-更新版本号的位置：
-- `src-tauri/Cargo.toml` 中的 `version` 字段
-- `src-tauri/tauri.conf.json` 中的 `version` 字段
+需要同步版本号的**三处**（`npm run release <ver>` 会自动一起改并校验一致性）：
+- `src-tauri/Cargo.toml` 中的 `version`
+- `src-tauri/tauri.conf.json` 中的 `version`
+- `package.json` 中的 `version`
 
 ### 2. 构建发布版本
 
-```bash
-# 清理构建
-cargo clean
+发版前需先补齐两个不入库的二进制资源（见 README「构建与资源」）：
+`src-tauri/binaries/ffmpeg.exe` 与 `src-tauri/libs/onnxruntime.dll`。
 
-# 构建 Release 版本
-cargo tauri build
+```bash
+# 一条命令：升版本号 → 打包(--bundles nsis, 含发版叠加配置) → 签名 → 生成 latest.json
+npm run release 0.1.4 "修复了…\n新增了…"
+
+# 仅想手动出包不发版
+npm run tauri build -- --bundles nsis --config src-tauri/tauri.bundle.conf.json
 ```
 
-构建完成后，安装包位于 `src-tauri/target/release/bundle/` 目录。
+构建完成后，安装包位于 `src-tauri/target/release/bundle/nsis/`。
 
 ### 3. 发布检查清单
 

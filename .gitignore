@@ -256,4 +256,14 @@ levitaire-debug.log
 
 # Local review/output leftovers
 /_review.diff
+/review.diff
 /0
+.tmp-ft/
+
+# Workspace-local assistant data (memory / backups / scratch) — not project source
+.workbuddy/
+
+# One-off OCR / theme experiment pages (调试用，不属产品源码)
+/test_ocr.html
+/test_ocr_text.txt
+/theme-lab.html

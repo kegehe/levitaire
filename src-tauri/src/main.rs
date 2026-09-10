@@ -201,6 +201,8 @@ fn main() {
             if let Some(window) = app.get_webview_window("orb") {
                 let _ = window.show();
                 let _ = window.set_focus();
+                // 单实例激活会强制显示 orb，需同步鼠标钩子可见状态
+                crate::hooks::set_orb_visible(true);
             }
         }))
         // 在线更新：由 tauri-plugin-updater 提供，版本检查 endpoint 与签名公钥
@@ -433,9 +435,11 @@ fn main() {
                                 if let Some(window) = app.get_webview_window("orb") {
                                     if window.is_visible().unwrap_or(false) {
                                         let _ = window.hide();
+                                        crate::hooks::set_orb_visible(false);
                                     } else {
                                         let _ = window.show();
                                         // 注意：orb 窗口是 setFocusable(false)，不调用 set_focus()
+                                        crate::hooks::set_orb_visible(true);
                                     }
                                 }
                             }
@@ -491,9 +495,11 @@ fn main() {
                             if let Some(window) = app.get_webview_window("orb") {
                                 if window.is_visible().unwrap_or(false) {
                                     let _ = window.hide();
+                                    crate::hooks::set_orb_visible(false);
                                 } else {
                                     let _ = window.show();
                                     // 注意：orb 窗口是 setFocusable(false)，不调用 set_focus()
+                                    crate::hooks::set_orb_visible(true);
                                 }
                             }
                         }
@@ -680,6 +686,7 @@ fn main() {
             commands::capture_sketch_background,
             commands::start_screenshot,
             commands::mark_screenshot_overlay_heartbeat,
+            commands::is_capture_session_active,
             commands::show_screenshot_error,
             commands::consume_screenshot_start_pending,
             commands::consume_recording_select_start_pending,
@@ -735,6 +742,8 @@ fn main() {
             commands::get_text_toolbar_enabled,
             commands::get_toolbar_features,
             commands::set_toolbar_features,
+            commands::get_toolbar_feature_order,
+            commands::set_toolbar_feature_order,
             commands::get_search_engine,
             commands::set_search_engine,
             commands::get_dedup_mode,
@@ -833,6 +842,8 @@ fn main() {
             commands::collect_sticky_note,
             commands::collect_all_notes,
             commands::delete_sticky_note,
+            commands::save_sticky_note_image,
+            commands::get_sticky_note_images_dir,
             commands::restore_pinned_notes,
             commands::show_sticky_notes_manager,
             commands::hide_sticky_notes_manager,
@@ -894,6 +905,8 @@ fn main() {
             commands::set_quick_input_snippets_enabled,
             commands::get_quick_input_history,
             commands::clear_quick_input_history,
+            commands::remove_quick_input_history_item,
+            commands::set_quick_input_history_favorite,
             commands::quick_input_paste,
             commands::ensure_quick_input_window,
             commands::toggle_quick_input_wheel,

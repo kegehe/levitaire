@@ -6,6 +6,16 @@ import { emitMockEvent, clearMockListeners, mockHide } from "../../test/tauri-mo
 import { CLEAR_OPTIONS } from "../../constants/clearConfig";
 import type { SelectionInfo } from "../../types";
 
+// Mock chineseConvert：opencc-js 词库较大，避免每次单测加载真实词典；
+// 转换函数本身的正确性由 src/utils/chineseConvert.test.ts 单独覆盖
+vi.mock("../../utils/chineseConvert", () => ({
+  convertToTraditional: vi.fn(),
+  convertToSimplified: vi.fn(),
+}));
+import { convertToTraditional, convertToSimplified } from "../../utils/chineseConvert";
+const mockConvertToTraditional = vi.mocked(convertToTraditional);
+const mockConvertToSimplified = vi.mocked(convertToSimplified);
+
 // Mock qrcode 库（命名导出，匹配生产代码的动态 import("qrcode") 方式）
 vi.mock("qrcode", () => ({
   toDataURL: vi.fn(),
@@ -1740,9 +1750,9 @@ describe("FloatingToolbar 二维码功能", () => {
     expect(mockToDataURL).toHaveBeenCalledWith('{"key":"value","num":42}', expect.anything());
   });
 
-  // ── 超长文本截断 ──────────────────────────────────────────────
+  // ── 超长文本截断提示 ──────────────────────────────────────
 
-  it("超长文本（超过二维码 M 级别容量）自动截断", async () => {
+  it("超长文本点击二维码先提示将截断，不直接生成", async () => {
     // 构造约 3000 字节的中文文本（每中文字符 3 字节）
     const longText = "你".repeat(1000); // 3000 字节
 
@@ -1754,11 +1764,82 @@ describe("FloatingToolbar 二维码功能", () => {
       fireEvent.click(btn);
     });
 
-    // toDataURL 应被调用，传入截断后的文本
+    // 不静默生成：toDataURL 不应被调用，而是先进入超长确认提示
+    expect(mockToDataURL).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveTextContent(/内容过长/);
+    expect(dialog).toHaveTextContent(/会被截断/);
+    expect(screen.getByRole("button", { name: "仍要生成" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消" })).toBeInTheDocument();
+  });
+
+  it("超长文本确认后生成截断的二维码", async () => {
+    const longText = "你".repeat(1000); // 3000 字节
+
+    render(<FloatingToolbar />);
+    await showToolbar(longText);
+
+    const btn = screen.getByRole("button", { name: "二维码" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    expect(mockToDataURL).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "仍要生成" }));
+    });
+
+    // 确认后 toDataURL 被调用，传入截断后的文本（≤1000 字节）
     expect(mockToDataURL).toHaveBeenCalledTimes(1);
     const passedText = mockToDataURL.mock.calls[0][0] as string;
     const passedBytes = new TextEncoder().encode(passedText);
     expect(passedBytes.length).toBeLessThanOrEqual(1000);
+    expect(document.querySelector(".toolbar-qrcode")).toBeInTheDocument();
+  });
+
+  it("超长文本取消后返回默认状态且不生成二维码", async () => {
+    const longText = "a".repeat(2000); // 2000 字节 ASCII
+
+    render(<FloatingToolbar />);
+    await showToolbar(longText);
+
+    const btn = screen.getByRole("button", { name: "二维码" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    });
+
+    expect(mockToDataURL).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    // 返回默认按钮行
+    expect(screen.getByRole("button", { name: "搜索" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "二维码" })).toBeInTheDocument();
+  });
+
+  it("超长文本确认提示中按 Esc 返回默认状态而非隐藏工具栏", async () => {
+    const longText = "你".repeat(1000); // 3000 字节
+
+    render(<FloatingToolbar />);
+    await showToolbar(longText);
+
+    const btn = screen.getByRole("button", { name: "二维码" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: "Escape" });
+    });
+
+    expect(mockToDataURL).not.toHaveBeenCalled();
+    expect(mockHide).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "二维码" })).toBeInTheDocument();
   });
 
   it("短文本不截断直接传入", async () => {
@@ -2933,6 +3014,220 @@ describe("FloatingToolbar Unicode 功能", () => {
   });
 });
 
+describe("FloatingToolbar 繁简转换功能", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    // 默认让两个转换函数返回「可辨认」的结果，便于断言写回内容
+    mockConvertToTraditional.mockImplementation(async (text: string) => `繁:${text}`);
+    mockConvertToSimplified.mockImplementation(async (text: string) => `简:${text}`);
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "replace_selection") {
+        return Promise.resolve();
+      }
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  // ── 基础渲染 ──────────────────────────────────────────────
+
+  it("默认状态下显示转繁体与转简体按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("软件开发");
+
+    expect(screen.getByRole("button", { name: "转繁体" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "转简体" })).toBeInTheDocument();
+  });
+
+  it("转简体按钮在转繁体按钮之后、MD5 按钮之前", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("软件开发");
+
+    const buttons = screen.getAllByRole("button");
+    const labels = buttons.map((b) => b.getAttribute("aria-label"));
+    const toTradIdx = labels.indexOf("转繁体");
+    const toSimpIdx = labels.indexOf("转简体");
+    const md5Idx = labels.indexOf("MD5");
+
+    expect(toTradIdx).toBeLessThan(toSimpIdx);
+    expect(toSimpIdx).toBeLessThan(md5Idx);
+  });
+
+  // ── 转换行为 ──────────────────────────────────────────────
+
+  it("点击转繁体将转换结果写回选区", async () => {
+    mockConvertToTraditional.mockResolvedValueOnce("軟件開發");
+    render(<FloatingToolbar />);
+    await showToolbar("软件开发");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "转繁体" }));
+    });
+
+    expect(mockConvertToTraditional).toHaveBeenCalledWith("软件开发");
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", { text: "軟件開發" });
+  });
+
+  it("点击转简体将转换结果写回选区", async () => {
+    mockConvertToSimplified.mockResolvedValueOnce("软件开发");
+    render(<FloatingToolbar />);
+    await showToolbar("軟件開發");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "转简体" }));
+    });
+
+    expect(mockConvertToSimplified).toHaveBeenCalledWith("軟件開發");
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", { text: "软件开发" });
+  });
+
+  it("转换时保留选区首尾空白（不 trim）", async () => {
+    mockConvertToTraditional.mockResolvedValueOnce(" 軟件開發  ");
+    render(<FloatingToolbar />);
+    await showToolbar("  软件开发  ");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "转繁体" }));
+    });
+
+    // 转换函数收到的是原始文本，前后空格一并参与转换
+    expect(mockConvertToTraditional).toHaveBeenCalledWith("  软件开发  ");
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", { text: " 軟件開發  " });
+  });
+
+  // ── 操作完成后保持显示 ────────────────────────────────────
+
+  it("转换成功后保持工具栏显示，不隐藏", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("软件开发");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "转繁体" }));
+    });
+    await flush();
+
+    expect(mockInvoke).not.toHaveBeenCalledWith("hide_toolbar");
+  });
+
+  // ── 错误处理 ──────────────────────────────────────────────
+
+  it("转换函数加载失败时显示错误信息", async () => {
+    mockConvertToTraditional.mockRejectedValueOnce(new Error("词库加载失败"));
+    render(<FloatingToolbar />);
+    await showToolbar("软件开发");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "转繁体" }));
+    });
+    await flush();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("词库加载失败");
+  });
+
+  it("转繁体 replace_selection 失败时显示错误信息", async () => {
+    mockConvertToTraditional.mockResolvedValueOnce("軟件開發");
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "replace_selection") {
+        return Promise.reject("替换失败");
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    await showToolbar("软件开发");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "转繁体" }));
+    });
+    await flush();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("替换失败");
+  });
+
+  // ── 空文本 / 纯图片选区 ──────────────────────────────────
+
+  it("空白文本时不显示转换按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("   ");
+
+    expect(screen.queryByRole("button", { name: "转繁体" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "转简体" })).not.toBeInTheDocument();
+  });
+
+  it("纯图片选区时不显示转换按钮", async () => {
+    render(<FloatingToolbar />);
+    await act(async () => {
+      emitMockEvent("selection-found", {
+        text: "",
+        rect: { x: 100, y: 200, width: 300, height: 20 },
+        "has-image": true,
+      });
+    });
+
+    expect(screen.queryByRole("button", { name: "转繁体" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "转简体" })).not.toBeInTheDocument();
+  });
+
+  // ── 功能开关 ──────────────────────────────────────────────
+
+  it("功能开关禁用转换后不显示按钮", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "get_toolbar_features") {
+        // 不含 to-traditional / to-simplified
+        return Promise.resolve(["copy", "search", "translate", "optimize"]);
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    await showToolbar("软件开发");
+
+    expect(screen.queryByRole("button", { name: "转繁体" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "转简体" })).not.toBeInTheDocument();
+  });
+
+  it("设置窗口广播 levitaire-features-changed 后实时隐藏转换按钮", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("软件开发");
+    expect(screen.getByRole("button", { name: "转繁体" })).toBeInTheDocument();
+
+    await act(async () => {
+      emitMockEvent("levitaire-features-changed", ["copy", "search"]);
+    });
+
+    expect(screen.queryByRole("button", { name: "转繁体" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "转简体" })).not.toBeInTheDocument();
+  });
+});
+
 describe("FloatingToolbar 字符统计功能", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -3306,17 +3601,14 @@ describe("FloatingToolbar 朗读进度", () => {
     document.body.innerHTML = "";
   });
 
-  /** 进入朗读状态：渲染工具栏 → 点击朗读按钮。
-      fake timers 使轮询 interval 不真实触发，避免测试结束后 setState 警告；afterEach 恢复。 */
+  /** 进入朗读状态：渲染工具栏 → 点击朗读按钮，等待 tts_speak 解析。 */
   const startSpeaking = async (text = "hello") => {
-    vi.useFakeTimers();
     render(<FloatingToolbar />);
     await showToolbar(text);
     const speakBtn = screen.getByRole("button", { name: "朗读" });
     await act(async () => {
       fireEvent.click(speakBtn);
     });
-    // flush 首个进度 tick 的微任务
     await act(async () => {});
   };
 
@@ -3345,9 +3637,7 @@ describe("FloatingToolbar 朗读进度", () => {
     expect(fill.style.width).toBe("0%");
   });
 
-  it("进度轮询更新已播/总时长与进度条宽度", async () => {
-    vi.useFakeTimers();
-    let progress = { positionMs: 5000, durationMs: 12000, paused: false };
+  it("tts-progress 事件更新已播/总时长与进度条宽度", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
         return Promise.resolve({
@@ -3360,18 +3650,15 @@ describe("FloatingToolbar 朗读进度", () => {
       if (cmd === "tts_get_state") {
         return Promise.resolve({ hasPlayer: false, paused: false, playing: false });
       }
-      if (cmd === "tts_get_progress") {
-        return Promise.resolve(progress);
-      }
       return Promise.resolve();
     });
 
-    render(<FloatingToolbar />);
-    await showToolbar("hello");
+    await startSpeaking("hello");
+
+    // 后端推送进度
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "朗读" }));
+      emitMockEvent("tts-progress", { requestId: 1, positionMs: 5000, durationMs: 12000 });
     });
-    await act(async () => {});
 
     const times = document.querySelectorAll(".toolbar-tts-time");
     expect(times[0].textContent).toBe("0:05");
@@ -3379,18 +3666,48 @@ describe("FloatingToolbar 朗读进度", () => {
     const fill = document.querySelector(".toolbar-tts-bar-fill") as HTMLElement;
     expect(parseFloat(fill.style.width)).toBeCloseTo(41.67, 1);
 
-    // 进度推进：500ms 后轮询返回新位置
-    progress = { positionMs: 8000, durationMs: 12000, paused: false };
+    // 进度推进：后端推送新位置
     await act(async () => {
-      vi.advanceTimersByTime(500);
+      emitMockEvent("tts-progress", { requestId: 1, positionMs: 8000, durationMs: 12000 });
     });
-    await act(async () => {});
 
     const timesAfter = document.querySelectorAll(".toolbar-tts-time");
     expect(timesAfter[0].textContent).toBe("0:08");
     expect(parseFloat(fill.style.width)).toBeCloseTo(66.67, 1);
+  });
 
-    vi.useRealTimers();
+  it("忽略另一请求的 tts-progress 事件，仅采用当前请求的进度", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      if (cmd === "tts_get_state") {
+        return Promise.resolve({ hasPlayer: false, paused: false, playing: false });
+      }
+      if (cmd === "tts_speak") {
+        return Promise.resolve(42);
+      }
+      return Promise.resolve();
+    });
+
+    await startSpeaking("hello");
+
+    // 旧请求残留事件应被忽略，进度保持初始 0:00
+    await act(async () => {
+      emitMockEvent("tts-progress", { requestId: 41, positionMs: 5000, durationMs: 12000 });
+    });
+    expect(document.querySelectorAll(".toolbar-tts-time")[0].textContent).toBe("0:00");
+
+    // 当前请求的进度事件生效
+    await act(async () => {
+      emitMockEvent("tts-progress", { requestId: 42, positionMs: 5000, durationMs: 12000 });
+    });
+    expect(document.querySelectorAll(".toolbar-tts-time")[0].textContent).toBe("0:05");
   });
 
   it("点击暂停调用 tts_pause 并立即显示继续按钮", async () => {
@@ -3421,7 +3738,7 @@ describe("FloatingToolbar 朗读进度", () => {
     await act(async () => {});
     expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
 
-    // 用户点击暂停 → 前端立即切暂停态，无需等轮询
+    // 用户点击暂停 → 前端立即切暂停态，无需等进度推送
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "暂停" }));
     });
@@ -3646,5 +3963,137 @@ describe("FloatingToolbar Esc 事件转发", () => {
     expect(document.querySelector(".toolbar-qrcode")).not.toBeInTheDocument();
     expect(mockInvoke).toHaveBeenCalledWith("set_qrcode_preview", { active: false });
     expect(mockInvoke).toHaveBeenCalledWith("hide_toolbar");
+  });
+});
+
+describe("FloatingToolbar 按钮顺序", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  const visibleLabels = () =>
+    screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label"))
+      .filter((l): l is string => Boolean(l));
+
+  it("默认顺序保持历史排列：复制在最前、去重在编号前、清除在最后", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+
+    const labels = visibleLabels();
+    expect(labels.indexOf("复制")).toBeLessThan(labels.indexOf("去重"));
+    expect(labels.indexOf("去重")).toBeLessThan(labels.indexOf("编号"));
+    expect(labels.indexOf("编号")).toBeLessThan(labels.indexOf("二维码"));
+    expect(labels.indexOf("统计")).toBeLessThan(labels.indexOf("清除"));
+  });
+
+  it("挂载时按后端 get_toolbar_feature_order 顺序渲染按钮", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_toolbar_feature_order") {
+        // 用户把「去重」放到最前
+        return Promise.resolve([
+          "dedup",
+          "copy",
+          "search",
+          "translate",
+          "optimize",
+          "uppercase",
+          "lowercase",
+          "numbering",
+          "qrcode",
+          "base64-encode",
+          "base64-decode",
+          "unicode-encode",
+          "unicode-decode",
+          "to-traditional",
+          "to-simplified",
+          "md5-encrypt",
+          "char-count",
+          "tts",
+          "clear",
+        ]);
+      }
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({
+          api_key: "sk-test",
+          base_url: "https://api.test",
+          model: "m",
+          api_type: "anthropic",
+        });
+      }
+      return Promise.resolve();
+    });
+
+    render(<FloatingToolbar />);
+    // 等待挂载时的配置读取完成，避免默认顺序覆盖后端结果
+    await flush();
+    await showToolbar("hello");
+
+    const labels = visibleLabels();
+    expect(labels.indexOf("去重")).toBeLessThan(labels.indexOf("复制"));
+  });
+
+  it("设置窗口广播 levitaire-feature-order-changed 后实时调整按钮顺序", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("hello");
+    expect(visibleLabels().indexOf("复制")).toBeLessThan(visibleLabels().indexOf("去重"));
+
+    await act(async () => {
+      emitMockEvent("levitaire-feature-order-changed", [
+        "dedup",
+        "copy",
+        "search",
+        "translate",
+        "optimize",
+        "uppercase",
+        "lowercase",
+        "numbering",
+        "qrcode",
+        "base64-encode",
+        "base64-decode",
+        "unicode-encode",
+        "unicode-decode",
+        "to-traditional",
+        "to-simplified",
+        "md5-encrypt",
+        "char-count",
+        "tts",
+        "clear",
+      ]);
+    });
+
+    const labels = visibleLabels();
+    expect(labels.indexOf("去重")).toBeLessThan(labels.indexOf("复制"));
+  });
+
+  it("纯图片选区时仅按顺序渲染复制按钮，其他按钮不出现", async () => {
+    render(<FloatingToolbar />);
+    await act(async () => {
+      emitMockEvent("selection-found", {
+        text: "",
+        rect: { x: 100, y: 200, width: 300, height: 20 },
+        "has-image": true,
+      });
+    });
+
+    const labels = visibleLabels();
+    expect(labels).toEqual(["复制"]);
   });
 });

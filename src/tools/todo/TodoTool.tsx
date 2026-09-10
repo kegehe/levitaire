@@ -29,6 +29,7 @@ interface TodoItem {
 interface TodoList { id: string; name: string; createdAt: string; updatedAt: string; }
 interface TodoFocusPayload { todoId?: string; itemId?: string; }
 const INBOX_LIST_ID = "inbox";
+const normalizeTagForComparison = (tag: string) => tag.trim().toLocaleLowerCase();
 
 const toLocalInput = (iso?: string) => {
   if (!iso) return "";
@@ -82,6 +83,7 @@ function TodoTool() {
   const [confirmDeleteListId, setConfirmDeleteListId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [filter, setFilter] = useState<"all" | "today" | "completed" | "trash">("all");
+  const [selectedTag, setSelectedTag] = useState("");
   const [sortMode, setSortMode] = useState<"priority" | "manual">("manual");
   const [dueAt, setDueAt] = useState("");
   const [remindAt, setRemindAt] = useState("");
@@ -159,6 +161,13 @@ function TodoTool() {
       setLastReminder(event.payload.item);
       refresh();
     });
+    // The tool-level switch silences reminders globally. Clear any toast that
+    // was already mounted so re-enabling the window cannot resurrect it.
+    const remindersSilenced = listen("todo-reminders-silenced", () => {
+      setLastReminder(null);
+      setShowSnoozePicker(false);
+      setSnoozeAt("");
+    });
     const focusAdd = listen("todo-focus-add", () => {
       window.setTimeout(() => {
         inputRef.current?.focus();
@@ -191,6 +200,7 @@ function TodoTool() {
       readyRequest.then((fn) => fn()).catch(console.error);
       changed.then((fn) => fn()).catch(console.error);
       reminder.then((fn) => fn()).catch(console.error);
+      remindersSilenced.then((fn) => fn()).catch(console.error);
       focusAdd.then((fn) => fn()).catch(console.error);
       focusItem.then((fn) => fn()).catch(console.error);
       pomodoroTick.then((fn) => fn()).catch(console.error);
@@ -250,13 +260,13 @@ function TodoTool() {
   };
 
   const exportTodos = async () => {
-    try { if (await invoke<boolean>("export_todos")) setIoMessage("Exported"); }
-    catch (error) { console.error("export todos failed", error); setIoMessage("Export failed"); }
+    try { if (await invoke<boolean>("export_todos")) setIoMessage("导出成功"); }
+    catch (error) { console.error("export todos failed", error); setIoMessage("导出失败"); }
   };
 
   const importTodos = async () => {
-    try { if (await invoke<boolean>("import_todos")) { setIoMessage("Imported"); } }
-    catch (error) { console.error("import todos failed", error); setIoMessage("Import failed"); }
+    try { if (await invoke<boolean>("import_todos")) { setIoMessage("导入成功"); } }
+    catch (error) { console.error("import todos failed", error); setIoMessage("导入失败"); }
   };
 
   // 拖拽排序依赖 items 的 sort_order 顺序（beforeId 取同组下一项），
@@ -440,17 +450,36 @@ function TodoTool() {
   const visibleItems = (filter === "trash" ? deletedItems : items).filter((item) => {
     const normalized = query.trim().toLowerCase();
     const matchesQuery = !normalized || item.title.toLowerCase().includes(normalized) || (item.notes ?? "").toLowerCase().includes(normalized) || (item.tags ?? []).some((tag) => tag.toLowerCase().includes(normalized));
+    const matchesTag = !selectedTag || (item.tags ?? []).some((tag) => normalizeTagForComparison(tag) === normalizeTagForComparison(selectedTag));
     if (filter !== "trash" && (item.listId ?? INBOX_LIST_ID) !== selectedListId) return false;
-    if (filter === "trash") return matchesQuery;
-    if (filter === "completed") return item.status === "completed" && matchesQuery;
+    if (filter === "trash") return matchesQuery && matchesTag;
+    if (filter === "completed") return item.status === "completed" && matchesQuery && matchesTag;
     if (filter === "today") {
       if (!item.dueAt) return false;
       const date = new Date(item.dueAt); const now = new Date();
-      return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate() && item.status === "active" && matchesQuery;
+      return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate() && item.status === "active" && matchesQuery && matchesTag;
     }
     if (item.status !== "active") return false;
-    return matchesQuery;
+    return matchesQuery && matchesTag;
   });
+
+  const availableTags = useMemo(() => {
+    const tagsByNormalizedValue = new Map<string, string>();
+    (filter === "trash" ? deletedItems : items).forEach((item) => {
+      if (filter !== "trash" && (item.listId ?? INBOX_LIST_ID) !== selectedListId) return;
+      (item.tags ?? []).forEach((tag) => {
+        const value = tag.trim();
+        if (value) tagsByNormalizedValue.set(normalizeTagForComparison(value), value);
+      });
+    });
+    return [...tagsByNormalizedValue.values()].sort((a, b) => a.localeCompare(b));
+  }, [deletedItems, filter, items, selectedListId]);
+
+  useEffect(() => {
+    if (selectedTag && !availableTags.some((tag) => normalizeTagForComparison(tag) === normalizeTagForComparison(selectedTag))) {
+      setSelectedTag("");
+    }
+  }, [availableTags, selectedTag]);
 
   useEffect(() => {
     if (!focusedTodoId) return;
@@ -520,6 +549,13 @@ function TodoTool() {
         {showSearch && <div className="todo-search"><Icon name="Search" size={14} /><input autoFocus aria-label="搜索任务" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务标题、备注或标签" /></div>}
 
         {filter === "trash" ? <div className="todo-trash-state"><span><Icon name="Trash2" size={13} />回收站</span><button onClick={() => setFilter("all")}>返回待办</button></div> : <div className="todo-filters" role="tablist"><button className={filter === "all" ? "is-active" : ""} onClick={() => setFilter("all")}>待办</button><button className={filter === "today" ? "is-active" : ""} onClick={() => setFilter("today")}>今天</button><button className={filter === "completed" ? "is-active" : ""} onClick={() => setFilter("completed")}>已完成</button></div>}
+        <div className="todo-tag-filter">
+          <Icon name="ListFilter" size={13} />
+          <select aria-label="按标签筛选" value={selectedTag} onChange={(event) => setSelectedTag(event.target.value)}>
+            <option value="">全部标签</option>
+            {availableTags.map((tag) => <option key={normalizeTagForComparison(tag)} value={tag}>{tag}</option>)}
+          </select>
+        </div>
 
         <div className="todo-list">
           {filter === "trash" && deletedItems.length > 0 && <button className="todo-empty-trash" onClick={() => void purgeDeleted()}>清空回收站</button>}

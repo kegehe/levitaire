@@ -3,8 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   TOOLBAR_FEATURES,
   DEFAULT_FEATURE_IDS,
+  DEFAULT_FEATURE_ORDER,
   fetchEnabledFeatures,
+  fetchToolbarFeatureOrder,
   saveEnabledFeatures,
+  saveToolbarFeatureOrder,
 } from "./toolbarFeatures";
 
 const mockInvoke = vi.mocked(invoke);
@@ -50,6 +53,30 @@ describe("TOOLBAR_FEATURES 完整性", () => {
     expect(b64DecIdx).toBeLessThan(uniEncIdx);
     expect(uniEncIdx).toBeLessThan(uniDecIdx);
     expect(uniDecIdx).toBeLessThan(md5Idx);
+  });
+
+  it("包含繁简转换两个功能", () => {
+    expect(TOOLBAR_FEATURES.some((f) => f.id === "to-traditional")).toBe(true);
+    expect(TOOLBAR_FEATURES.some((f) => f.id === "to-simplified")).toBe(true);
+  });
+
+  it("繁简转换图标为 Languages", () => {
+    const trad = TOOLBAR_FEATURES.find((f) => f.id === "to-traditional");
+    const simp = TOOLBAR_FEATURES.find((f) => f.id === "to-simplified");
+    expect(trad?.icon).toBe("Languages");
+    expect(simp?.icon).toBe("Languages");
+  });
+
+  it("繁简转换位于 Unicode 解码与 MD5 之间", () => {
+    const ids = TOOLBAR_FEATURES.map((f) => f.id);
+    const uniDecIdx = ids.indexOf("unicode-decode");
+    const toTradIdx = ids.indexOf("to-traditional");
+    const toSimpIdx = ids.indexOf("to-simplified");
+    const md5Idx = ids.indexOf("md5-encrypt");
+
+    expect(uniDecIdx).toBeLessThan(toTradIdx);
+    expect(toTradIdx).toBeLessThan(toSimpIdx);
+    expect(toSimpIdx).toBeLessThan(md5Idx);
   });
 
   it("包含字符统计功能", () => {
@@ -180,5 +207,104 @@ describe("saveEnabledFeatures", () => {
     expect(mockInvoke).toHaveBeenCalledWith("set_toolbar_features", {
       features: ["copy", "unicode-encode"],
     });
+  });
+});
+
+describe("DEFAULT_FEATURE_ORDER", () => {
+  it("与 TOOLBAR_FEATURES 互为同一批功能（无遗漏/无多余）", () => {
+    const registryIds = TOOLBAR_FEATURES.map((f) => f.id).sort();
+    const orderIds = [...DEFAULT_FEATURE_ORDER].sort();
+    expect(orderIds).toEqual(registryIds);
+    expect(new Set(DEFAULT_FEATURE_ORDER).size).toBe(DEFAULT_FEATURE_ORDER.length);
+  });
+
+  it("保持工具栏历史 JSX 渲染顺序", () => {
+    // 与 TextToolbar 改版前硬编码渲染顺序一致，保证存量用户按钮排列不变
+    expect(DEFAULT_FEATURE_ORDER[0]).toBe("copy");
+    expect(DEFAULT_FEATURE_ORDER[DEFAULT_FEATURE_ORDER.length - 1]).toBe("clear");
+    const idx = (id: string) => DEFAULT_FEATURE_ORDER.indexOf(id);
+    expect(idx("dedup")).toBeLessThan(idx("numbering"));
+    expect(idx("numbering")).toBeLessThan(idx("qrcode"));
+    expect(idx("qrcode")).toBeLessThan(idx("base64-encode"));
+    expect(idx("base64-decode")).toBeLessThan(idx("unicode-encode"));
+    expect(idx("md5-encrypt")).toBeLessThan(idx("char-count"));
+    expect(idx("char-count")).toBeLessThan(idx("tts"));
+    expect(idx("tts")).toBeLessThan(idx("clear"));
+  });
+});
+
+describe("fetchToolbarFeatureOrder", () => {
+  it("后端返回空列表时回退为默认顺序", async () => {
+    mockInvoke.mockResolvedValueOnce([]);
+    const result = await fetchToolbarFeatureOrder();
+    expect(result).toEqual(DEFAULT_FEATURE_ORDER);
+  });
+
+  it("后端返回 undefined 时回退为默认顺序", async () => {
+    mockInvoke.mockResolvedValueOnce(undefined as unknown as string[]);
+    const result = await fetchToolbarFeatureOrder();
+    expect(result).toEqual(DEFAULT_FEATURE_ORDER);
+  });
+
+  it("有效顺序原样返回", async () => {
+    const stored = [
+      "dedup",
+      "copy",
+      ...DEFAULT_FEATURE_ORDER.filter((id) => !["copy", "dedup"].includes(id)),
+    ];
+    mockInvoke.mockResolvedValueOnce(stored);
+    const result = await fetchToolbarFeatureOrder();
+    expect(result).toEqual(stored);
+  });
+
+  it("缺少新功能时按默认顺序追加到末尾（不写回，等用户拖拽时再落库）", async () => {
+    const stored = DEFAULT_FEATURE_ORDER.filter((id) => id !== "qrcode");
+    mockInvoke.mockResolvedValueOnce(stored);
+
+    const result = await fetchToolbarFeatureOrder();
+
+    expect(result).toEqual([...stored, "qrcode"]);
+    expect(mockInvoke).not.toHaveBeenCalledWith("set_toolbar_feature_order", expect.anything());
+  });
+
+  it("含已移除的旧 ID 时剔除并补全默认顺序（不写回）", async () => {
+    const stored = ["copy", "removed-old-feature"];
+    mockInvoke.mockResolvedValueOnce(stored);
+
+    const result = await fetchToolbarFeatureOrder();
+
+    expect(result).not.toContain("removed-old-feature");
+    expect(result).toHaveLength(DEFAULT_FEATURE_ORDER.length);
+    expect(mockInvoke).not.toHaveBeenCalledWith("set_toolbar_feature_order", expect.anything());
+  });
+
+  it("剔除重复 ID，保留首次出现的位置", async () => {
+    const stored = [
+      "dedup",
+      "copy",
+      "dedup",
+      ...DEFAULT_FEATURE_ORDER.filter((id) => !["copy", "dedup"].includes(id)),
+    ];
+    mockInvoke.mockResolvedValueOnce(stored);
+
+    const result = await fetchToolbarFeatureOrder();
+
+    expect(result.filter((id) => id === "dedup")).toHaveLength(1);
+    expect(result).toHaveLength(DEFAULT_FEATURE_ORDER.length);
+  });
+
+  it("invoke 抛错时回退为默认顺序", async () => {
+    mockInvoke.mockRejectedValueOnce(new Error("config read failed"));
+    const result = await fetchToolbarFeatureOrder();
+    expect(result).toEqual(DEFAULT_FEATURE_ORDER);
+  });
+});
+
+describe("saveToolbarFeatureOrder", () => {
+  it("调用 set_toolbar_feature_order 持久化", async () => {
+    mockInvoke.mockResolvedValueOnce(undefined);
+    const order = ["dedup", "copy", "search"];
+    await saveToolbarFeatureOrder(order);
+    expect(mockInvoke).toHaveBeenCalledWith("set_toolbar_feature_order", { order });
   });
 });

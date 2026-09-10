@@ -198,6 +198,35 @@
   opacity: 1;
 }
 
+/* 删除二次确认：整行进入待确认态 */
+.snm-item.is-confirming,
+.snm-item.is-confirming:hover {
+  background: var(--color-danger-subtle, #fbe6e4);
+}
+
+.snm-item.is-confirming .snm-preview {
+  color: var(--color-danger, #d64540);
+}
+
+/* 确认态下即使该便签处于"已收起"（is-hidden 半透明）也保持醒目，
+   并让操作按钮常显，避免鼠标移开后红底删除按钮隐形 */
+.snm-item.is-confirming .snm-preview,
+.snm-item.is-confirming .snm-meta,
+.snm-item.is-confirming .snm-item-actions {
+  opacity: 1;
+}
+
+.snm-meta.is-danger-text {
+  color: var(--color-danger, #d64540);
+  font-weight: 600;
+}
+
+.snm-icon-btn.is-danger.is-confirm,
+.snm-icon-btn.is-danger.is-confirm:hover:not(:disabled) {
+  background: var(--color-danger, #d64540);
+  color: #ffffff;
+}
+
 /* 空状态 / 加载 */
 .snm-empty {
   display: flex;

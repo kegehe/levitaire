@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Core::MediaSource;
-use windows::Media::Playback::MediaPlayer;
+use windows::Media::Playback::{MediaPlayer, MediaPlaybackSession};
 use windows::Media::SpeechSynthesis::{SpeechSynthesizer, VoiceGender};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
@@ -31,7 +31,10 @@ pub struct VoiceInfo {
 /// MediaPlayer 无 IsPaused 查询接口，用 paused 自行标记暂停态。
 pub struct TtsState {
     control_lock: Mutex<()>,
-    player: Mutex<Option<(u64, MediaPlayer)>>,
+    /// (id, player, PositionChanged 注册 token)。token 在播放器关闭/替换时必须反注册，
+    /// 否则 handler 与 PlaybackSession 形成引用环且强持有 AppHandle，每次朗读泄漏一个。
+    /// （windows 0.61 中 PositionChanged 返回的 token 类型为 i64）
+    player: Mutex<Option<(u64, MediaPlayer, Option<i64>)>>,
     paused: Mutex<bool>,
     next_id: AtomicU64,
     latest_request: AtomicU64,
@@ -149,10 +152,10 @@ pub fn speak(
                 .lock()
                 .ok()
                 .and_then(|mut guard| guard.take())
-                .map(|(_, player)| player);
+                .map(|(_, player, token)| (player, token));
             drop(_control);
-            if let Some(old) = old_player {
-                close_player_on_mta(old);
+            if let Some((old, token)) = old_player {
+                close_player_on_mta(old, token);
             }
             if let Ok(mut p) = state.paused.lock() {
                 *p = false;
@@ -245,17 +248,23 @@ pub fn speak(
                         let is_latest_request =
                             state.latest_request.load(Ordering::SeqCst) == player_id;
                         let taken = state.player.lock().ok().and_then(|mut g| {
-                            if g.as_ref().map(|(id, _)| *id == player_id).unwrap_or(false) {
-                                g.take().map(|(_, p)| p)
+                            if g.as_ref().map(|(id, _, _)| *id == player_id).unwrap_or(false) {
+                                g.take().map(|(_, p, t)| (p, t))
                             } else {
                                 None
                             }
                         });
-                        if let Some(p) = taken {
-                            // 移到独立线程 Drop，避免在事件回调中同步销毁事件源的 COM 重入风险
+                        if let Some((p, token)) = taken {
+                            // 移到独立线程 Drop，避免在事件回调中同步销毁事件源的 COM 重入风险；
+                            // 先反注册 PositionChanged handler 打断「handler ↔ session」引用环。
                             std::thread::spawn(move || {
                                 unsafe {
                                     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                                }
+                                if let Some(t) = token {
+                                    if let Ok(session) = p.PlaybackSession() {
+                                        let _ = session.RemovePositionChanged(t);
+                                    }
                                 }
                                 drop(p);
                                 unsafe {
@@ -282,24 +291,82 @@ pub fn speak(
                 .MediaEnded(&handler)
                 .map_err(|e| format!("MediaEnded 注册: {:?}", e))?;
 
+            // 6b. 进度主动推送：PlaybackSession.PositionChanged 触发时 emit tts-progress，
+            // 由后端推给前端，替代前端每 500ms 轮询 tts_get_progress，降低朗读长文本时的 IPC 往返。
+            // 回调运行于 MTA 线程，可直接读 Position/NaturalDuration 并 emit（不访问 TtsState 可变状态，
+            // 仅用 latest_request 做归属校验，与 MediaEnded 一致的防交错逻辑）。
+            let app_for_progress = app_handle.clone();
+            // 记录本次注册的 token，随 player 一并存进 TtsState，关闭时反注册，
+            // 避免 handler 与 PlaybackSession 形成引用环并强持有 AppHandle（每次朗读泄漏）。
+            let mut progress_token: Option<i64> = None;
+            if let Ok(session) = player.PlaybackSession() {
+                // 克隆会话供回调读取进度（MediaPlaybackSession 为 COM 接口，可 clone）
+                let session_for_progress = session.clone();
+                let progress_handler =
+                    TypedEventHandler::<MediaPlaybackSession, windows::core::IInspectable>::new(
+                        move |_sender, _args| {
+                            if let Some(st) = app_for_progress.try_state::<TtsState>() {
+                                if st.latest_request.load(Ordering::SeqCst) != player_id {
+                                    return Ok(());
+                                }
+                            }
+                            if let (Ok(pos), Ok(dur)) = (
+                                session_for_progress.Position(),
+                                session_for_progress.NaturalDuration(),
+                            )
+                            {
+                                let pos_ms = pos.Duration as u64 / 10_000;
+                                // NaturalDuration 对未知时长返回无限（i64::MAX），以 0 表示"未知"，避免前端溢出
+                                let dur_ms = if dur.Duration < 0 || dur.Duration >= i64::MAX / 2 {
+                                    0
+                                } else {
+                                    dur.Duration as u64 / 10_000
+                                };
+                                let _ = app_for_progress.emit(
+                                    "tts-progress",
+                                    serde_json::json!({
+                                        "requestId": player_id,
+                                        "positionMs": pos_ms,
+                                        "durationMs": dur_ms,
+                                    }),
+                                );
+                            }
+                            Ok(())
+                        },
+                    );
+                // 注册失败则退回前端轮询（PositionChanged 一般总能注册成功，无需 fail-fast）
+                progress_token = session.PositionChanged(&progress_handler).ok();
+            }
+
             // 7. 先存入 TtsState 再 Play：确保 MediaEnded 触发时 player 已在 TtsState 中
             // （否则极短音频可能在存入前结束，回调无法清理导致 player 残留）。
             // clone player 调 Play，避免持锁做 COM 调用阻塞其他等锁命令。
             // 若 Play 失败，需 take 清理已存入的 player。
-            if state.latest_request.load(Ordering::SeqCst) != player_id {
-                return Ok(());
-            }
-
-            if let Ok(mut guard) = state.player.lock() {
+            // 在任一「请求已被新版本作废」的分支都要释放刚创建的 player 及其进度 handler，
+            // 否则注册的 PositionChanged handler 与 PlaybackSession 会形成引用环泄漏。
+            // 释放统一放在 guard 作用域之外（Close 可能同步触发 MediaEnded 回调，而该回调
+            // 会锁 state.player，持锁调用 Close 会死锁）。
+            let to_release: Option<(MediaPlayer, Option<i64>)> =
                 if state.latest_request.load(Ordering::SeqCst) != player_id {
-                    return Ok(());
-                }
-                *guard = Some((player_id, player));
+                    Some((player, progress_token))
+                } else if let Ok(mut guard) = state.player.lock() {
+                    if state.latest_request.load(Ordering::SeqCst) != player_id {
+                        Some((player, progress_token))
+                    } else {
+                        *guard = Some((player_id, player, progress_token));
+                        None
+                    }
+                } else {
+                    Some((player, progress_token))
+                };
+            if let Some((p, tok)) = to_release {
+                close_player_on_mta(p, tok);
+                return Ok(());
             }
             let player_clone = state.player.lock().ok().and_then(|g| {
                 g.as_ref()
-                    .filter(|(id, _)| *id == player_id)
-                    .map(|(_, p)| p.clone())
+                    .filter(|(id, _, _)| *id == player_id)
+                    .map(|(_, p, _)| p.clone())
             });
             // Play 可能等待媒体管线，不要让 stop/pause/resume 被 COM 调用阻塞。
             drop(control);
@@ -310,16 +377,16 @@ pub fn speak(
                         let failed_player = state.player.lock().ok().and_then(|mut guard| {
                             if guard
                                 .as_ref()
-                                .map(|(id, _)| *id == player_id)
+                                .map(|(id, _, _)| *id == player_id)
                                 .unwrap_or(false)
                             {
-                                guard.take().map(|(_, player)| player)
+                                guard.take().map(|(_, player, token)| (player, token))
                             } else {
                                 None
                             }
                         });
-                        if let Some(old) = failed_player {
-                            close_player_on_mta(old);
+                        if let Some((old, token)) = failed_player {
+                            close_player_on_mta(old, token);
                         }
                         return Err(format!("Play: {:?}", e));
                     }
@@ -354,9 +421,9 @@ pub fn stop(state: &TtsState) -> Result<(), String> {
         .lock()
         .ok()
         .and_then(|mut g| g.take())
-        .map(|(_, p)| p);
-    if let Some(p) = player {
-        close_player_on_mta(p);
+        .map(|(_, p, t)| (p, t));
+    if let Some((p, token)) = player {
+        close_player_on_mta(p, token);
     }
     if let Ok(mut p) = state.paused.lock() {
         *p = false;
@@ -367,10 +434,16 @@ pub fn stop(state: &TtsState) -> Result<(), String> {
 /// Release a MediaPlayer on a dedicated MTA thread. The caller must not hold
 /// `TtsState.player` while invoking this because WinRT may wait for callbacks
 /// that access the same mutex.
-fn close_player_on_mta(player: MediaPlayer) {
+fn close_player_on_mta(player: MediaPlayer, token: Option<i64>) {
     let _ = std::thread::spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        // 反注册进度 handler，打断「handler ↔ session」引用环，释放强持有的 AppHandle。
+        if let Some(t) = token {
+            if let Ok(session) = player.PlaybackSession() {
+                let _ = session.RemovePositionChanged(t);
+            }
         }
         let _ = player.Pause();
         let _ = player.Close();
@@ -388,7 +461,7 @@ pub fn pause(state: &TtsState) -> Result<(), String> {
         .player
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|(id, p)| (*id, p.clone())));
+        .and_then(|g| g.as_ref().map(|(id, p, _)| (*id, p.clone())));
     let player_id = player.as_ref().map(|(id, _)| *id);
     if let Some((_, p)) = player {
         std::thread::spawn(move || {
@@ -409,7 +482,7 @@ pub fn pause(state: &TtsState) -> Result<(), String> {
             .player
             .lock()
             .ok()
-            .and_then(|g| g.as_ref().map(|(id, _)| *id == player_id))
+            .and_then(|g| g.as_ref().map(|(id, _, _)| *id == player_id))
             .unwrap_or(false)
     }) {
         if let Ok(mut p) = state.paused.lock() {
@@ -426,7 +499,7 @@ pub fn resume(state: &TtsState) -> Result<(), String> {
         .player
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|(id, p)| (*id, p.clone())));
+        .and_then(|g| g.as_ref().map(|(id, p, _)| (*id, p.clone())));
     let player_id = player.as_ref().map(|(id, _)| *id);
     if let Some((_, p)) = player {
         std::thread::spawn(move || {
@@ -446,7 +519,7 @@ pub fn resume(state: &TtsState) -> Result<(), String> {
             .player
             .lock()
             .ok()
-            .and_then(|g| g.as_ref().map(|(id, _)| *id == player_id))
+            .and_then(|g| g.as_ref().map(|(id, _, _)| *id == player_id))
             .unwrap_or(false)
     }) {
         if let Ok(mut p) = state.paused.lock() {
@@ -471,7 +544,7 @@ pub fn is_paused(state: &TtsState) -> bool {
 /// 前端据此只显示已播时长、隐藏进度条比例。
 /// COM 调用放 MTA 线程（同 pause/resume），避免命令线程未初始化 COM 导致调用失败。
 pub fn get_progress(state: &TtsState) -> Option<(u64, u64, bool)> {
-    let player = state.player.lock().ok()?.as_ref().map(|(_, p)| p.clone())?;
+    let player = state.player.lock().ok()?.as_ref().map(|(_, p, _)| p.clone())?;
     let res = std::thread::spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

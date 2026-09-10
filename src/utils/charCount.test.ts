@@ -94,6 +94,19 @@ describe("charCount 句子", () => {
   it("连续句末标点算一句", () => {
     expect(charCount("什么？！").sentences).toBe(1);
   });
+
+  it("小数点的点（3.14）不计为句子结束", () => {
+    expect(charCount("圆周率约等于 3.14").sentences).toBe(0);
+  });
+
+  it("多段数字内部点不计句末，句末标点照常计", () => {
+    expect(charCount("版本 v1.2.3 已发布。当前占用 3.14 GB。").sentences).toBe(2);
+  });
+
+  it("数字后的真实句号仍算句末", () => {
+    // "3." 后跟空格，属真实句末而非小数点
+    expect(charCount("得到结果 3. 下一个环节。").sentences).toBe(2);
+  });
 });
 
 describe("charCount 字节", () => {
@@ -138,6 +151,21 @@ describe("charCount 标点", () => {
 
   it("无标点时为 0", () => {
     expect(charCount("abc123").punctuation).toBe(0);
+  });
+
+  it("全角字母不计入标点", () => {
+    // ＡＢＣ 为全角大写字母 U+FF21–U+FF23，属字母而非标点
+    expect(charCount("ＡＢＣ").punctuation).toBe(0);
+  });
+
+  it("全角数字不计入标点", () => {
+    // １２３ 为全角数字 U+FF11–U+FF13，属数字而非标点
+    expect(charCount("１２３").punctuation).toBe(0);
+  });
+
+  it("全角字母数字与全角标点混排时只计标点", () => {
+    // ＡＢＣ(3) ，(1) １２３(3) 。(1) → 标点仅 ，。 共 2
+    expect(charCount("ＡＢＣ，１２３。").punctuation).toBe(2);
   });
 });
 

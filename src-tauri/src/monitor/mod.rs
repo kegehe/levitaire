@@ -7,10 +7,17 @@
 //!
 //! 指标来源：
 //! - CPU 使用率/频率、内存、网络、磁盘：sysinfo 0.32
+//! - 磁盘 I/O、GPU：windows-rs PDH 性能计数器（零额外依赖）
 //! - 电池：windows-rs GetSystemPowerStatus（零额外依赖，仅需 Win32_System_Power feature）
 //!
+//! GPU 采集说明：通过 PDH 性能计数器跨厂商（NVIDIA/AMD/Intel）统一取数，无需 nvml-wrapper。
+//! - 使用率：`\GPU Engine(*)\Utilization Percentage` 各 `engtype_*` 实例之和，反映了各引擎
+//!   聚合负载（会排除 `pid_*` 进程级实例避免重复计数）；多引擎可能合计超 100，钳制到 100。
+//! - 显存：`\GPU Adapter Memory(*)\Dedicated Usage` / `Dedicated Limit` 的 `physical_*` 实例，
+//!   分别为专用显存已用/总量（字节）。
+//! 采集前先对 uncounted 采样一次（PDH 基于两次采集差值），随后与主循环同一节奏采集。
+//!
 //! 已知限制（首版不做，列后续增强）：
-//! - GPU 使用率：仅 NVIDIA 可行（nvml-wrapper），AMD/Intel 无统一 API
 //! - CPU 核心温度：Windows 上 MSAcpi_ThermalZoneTemperature 多数机器不可用且非核温
 
 use std::collections::HashMap;
@@ -46,6 +53,9 @@ pub struct MonitorStats {
     pub disks: Vec<DiskStat>,
     /// 所有物理磁盘的聚合读写速度。PDH 不可用或首个样本尚未就绪时为 None。
     pub disk_io: Option<DiskIoStat>,
+    // GPU
+    /// 显卡负载（PDH 跨厂商采集）。无 GPU 或采集不可用时 has_gpu 为 false。
+    pub gpu: GpuStat,
     // 电池
     pub battery: BatteryStat,
 }
@@ -77,6 +87,30 @@ pub struct DiskIoStat {
     pub read_rate: f64,
     /// 写入速度，bytes/s
     pub write_rate: f64,
+}
+
+/// 显卡负载。PDH 跨厂商采集（NVIDIA/AMD/Intel），无统一驱动版本负担。
+#[derive(serde::Serialize, Clone)]
+pub struct GpuStat {
+    /// 是否存在可用的 GPU 负载数据
+    pub has_gpu: bool,
+    /// 使用率 0-100（各引擎 engtype_* 聚合，钳制到 100）
+    pub usage: f64,
+    /// 显存已用（字节）
+    pub memory_used: u64,
+    /// 显存总量（字节）
+    pub memory_total: u64,
+}
+
+impl GpuStat {
+    fn unavailable() -> Self {
+        Self {
+            has_gpu: false,
+            usage: 0.0,
+            memory_used: 0,
+            memory_total: 0,
+        }
+    }
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -152,7 +186,10 @@ impl MonitorState {
         let app_handle = app.clone();
         std::thread::spawn(move || {
             let mut disk_io_sampler = DiskIoSampler::new();
-            let mut next_disk_io_retry = Instant::now() + Duration::from_secs(10);
+            let mut gpu_sampler = GpuSampler::new();
+            // PDH 采样器初始化失败时（进程级计数暂不可用/暂无数据）每隔 10s 重试：
+            // 每次更新下一次重试时刻，避免在失败循环里空转。
+            let mut next_sampler_retry = Instant::now() + Duration::from_secs(10);
             // 辅助：检查本线程代次是否仍有效（未被 stop 作废）
             let alive = |st: &MonitorState| {
                 st.running.load(Ordering::SeqCst) && st.generation.load(Ordering::SeqCst) == gen
@@ -162,12 +199,19 @@ impl MonitorState {
                 if !alive(&st) {
                     break;
                 }
-                if disk_io_sampler.is_none() && Instant::now() >= next_disk_io_retry {
-                    disk_io_sampler = DiskIoSampler::new();
-                    next_disk_io_retry = Instant::now() + Duration::from_secs(10);
+                if Instant::now() >= next_sampler_retry
+                    && (disk_io_sampler.is_none() || gpu_sampler.is_none())
+                {
+                    if disk_io_sampler.is_none() {
+                        disk_io_sampler = DiskIoSampler::new();
+                    }
+                    if gpu_sampler.is_none() {
+                        gpu_sampler = GpuSampler::new();
+                    }
+                    next_sampler_retry = Instant::now() + Duration::from_secs(10);
                 }
                 let interval_ms = st.interval_ms.load(Ordering::SeqCst).max(200);
-                let payload = collect(&st, interval_ms, &mut disk_io_sampler);
+                let payload = collect(&st, interval_ms, &mut disk_io_sampler, &mut gpu_sampler);
                 let _ = app_handle.emit("monitor-stats", payload);
                 std::thread::sleep(std::time::Duration::from_millis(interval_ms));
             }
@@ -198,6 +242,7 @@ fn collect(
     st: &MonitorState,
     interval_ms: u64,
     disk_io_sampler: &mut Option<DiskIoSampler>,
+    gpu_sampler: &mut Option<GpuSampler>,
 ) -> MonitorStats {
     let uptime_secs = System::uptime();
     let timestamp_ms = SystemTime::now()
@@ -304,6 +349,18 @@ fn collect(
     };
     let disk_io = disk_io_sampler.as_mut().and_then(DiskIoSampler::sample);
 
+    // GPU：跨厂商 PDH 采集，失败/无 GPU 时上报 has_gpu=false
+    let gpu = gpu_sampler
+        .as_mut()
+        .and_then(GpuSampler::sample)
+        .map(|g| GpuStat {
+            has_gpu: g.usage.is_some() || g.memory_total > 0,
+            usage: g.usage.unwrap_or(0.0).clamp(0.0, 100.0),
+            memory_used: g.memory_used,
+            memory_total: g.memory_total,
+        })
+        .unwrap_or_else(GpuStat::unavailable);
+
     // 电池
     let battery = get_battery();
 
@@ -320,6 +377,7 @@ fn collect(
         net,
         disks,
         disk_io,
+        gpu,
         battery,
     }
 }
@@ -419,6 +477,175 @@ impl Drop for DiskIoSampler {
     }
 }
 
+/// 一次 GPU 采集结果（值均已通过 PDH 格式化）
+#[cfg(target_os = "windows")]
+struct GpuSampled {
+    /// 使用率，引擎聚合负载；采集不可用时为 None
+    usage: Option<f64>,
+    /// 显存已用（字节）
+    memory_used: u64,
+    /// 显存总量（字节）
+    memory_total: u64,
+}
+
+/// 跨厂商 GPU 采样器（PDH 性能计数器）。
+/// - 使用率：`\GPU Engine(*)\Utilization Percentage`，取 `engtype_*`（引擎聚合）实例之和，
+///   排除 `pid_*`（进程级）实例以免重复计数。
+/// - 显存：`\GPU Adapter Memory(*)\Dedicated Usage` / `Dedicated Limit`，取 `physical_*`
+///   （物理适配器）实例之和，忽略进程级实例。
+#[cfg(target_os = "windows")]
+struct GpuSampler {
+    query: windows::Win32::System::Performance::PDH_HQUERY,
+    util_counter: windows::Win32::System::Performance::PDH_HCOUNTER,
+    mem_usage_counter: windows::Win32::System::Performance::PDH_HCOUNTER,
+    mem_limit_counter: windows::Win32::System::Performance::PDH_HCOUNTER,
+}
+
+#[cfg(target_os = "windows")]
+impl GpuSampler {
+    fn new() -> Option<Self> {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Performance::{
+            PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhOpenQueryW, PDH_HCOUNTER,
+            PDH_HQUERY,
+        };
+
+        let mut query = PDH_HQUERY::default();
+        if unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) } != 0 {
+            return None;
+        }
+        let mut util = PDH_HCOUNTER::default();
+        let mut mem_usage = PDH_HCOUNTER::default();
+        let mut mem_limit = PDH_HCOUNTER::default();
+        let ok = |path: &str, counter: &mut PDH_HCOUNTER| {
+            let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe { PdhAddEnglishCounterW(query, PCWSTR::from_raw(wide.as_ptr()), 0, counter) == 0 }
+        };
+        if !ok(r"\GPU Engine(*)\Utilization Percentage", &mut util)
+            || !ok(r"\GPU Adapter Memory(*)\Dedicated Usage", &mut mem_usage)
+            || !ok(r"\GPU Adapter Memory(*)\Dedicated Limit", &mut mem_limit)
+            || unsafe { PdhCollectQueryData(query) } != 0
+        {
+            unsafe {
+                let _ = PdhCloseQuery(query);
+            }
+            return None;
+        }
+        Some(Self {
+            query,
+            util_counter: util,
+            mem_usage_counter: mem_usage,
+            mem_limit_counter: mem_limit,
+        })
+    }
+
+    fn sample(&mut self) -> Option<GpuSampled> {
+        use windows::Win32::System::Performance::PdhCollectQueryData;
+
+        if unsafe { PdhCollectQueryData(self.query) } != 0 {
+            return None;
+        }
+        // 使用率与显存独立容错：任一计数器瞬时无实例时，不拖累另一项，
+        // 以免空闲 GPU 因 util 暂无实例而丢失可用的显存数据。
+        let util = pdh_counter_doubles(self.util_counter);
+        let mem_usage = pdh_counter_doubles(self.mem_usage_counter);
+        let mem_limit = pdh_counter_doubles(self.mem_limit_counter);
+        Some(GpuSampled {
+            usage: util.and_then(|v| gpu_aggregate(&v, true, "engtype_")),
+            memory_used: mem_usage
+                .and_then(|v| gpu_aggregate(&v, true, "physical_"))
+                .unwrap_or(0.0) as u64,
+            memory_total: mem_limit
+                .and_then(|v| gpu_aggregate(&v, true, "physical_"))
+                .unwrap_or(0.0) as u64,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for GpuSampler {
+    fn drop(&mut self) {
+        use windows::Win32::System::Performance::PdhCloseQuery;
+
+        unsafe {
+            let _ = PdhCloseQuery(self.query);
+        }
+    }
+}
+
+/// 读取一个通配符计数器所有实例的 double 值，返回 (实例名, 值) 列表。
+/// 首次调用探测缓冲区大小（返回 PDH_MORE_DATA 说明存在实例），二次调用取数。
+#[cfg(target_os = "windows")]
+fn pdh_counter_doubles(
+    counter: windows::Win32::System::Performance::PDH_HCOUNTER,
+) -> Option<Vec<(String, f64)>> {
+    use windows::Win32::System::Performance::{
+        PdhGetFormattedCounterArrayW, PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA,
+        PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_MORE_DATA,
+    };
+
+    let mut buf_size: u32 = 0;
+    let mut buf_count: u32 = 0;
+    let mut ret = unsafe {
+        PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut buf_size, &mut buf_count, None)
+    };
+    if ret != PDH_MORE_DATA || buf_count == 0 {
+        return None;
+    }
+    let mut items = vec![PDH_FMT_COUNTERVALUE_ITEM_W::default(); buf_count as usize];
+    ret = unsafe {
+        PdhGetFormattedCounterArrayW(
+            counter,
+            PDH_FMT_DOUBLE,
+            &mut buf_size,
+            &mut buf_count,
+            Some(items.as_mut_ptr()),
+        )
+    };
+    if ret != 0 {
+        return None;
+    }
+    items.truncate(buf_count as usize);
+
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        // 仅接纳有效状态且数值有限的实例，规避 NaN 与 PDH_NO_DATA
+        if !matches!(
+            item.FmtValue.CStatus,
+            PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA
+        ) {
+            continue;
+        }
+        let value = unsafe { item.FmtValue.Anonymous.doubleValue };
+        if !value.is_finite() {
+            continue;
+        }
+        // PWSTR 实例名转 String；正常应为 ASCII（engtype_/physical_/pid_ 等）
+        let name = unsafe { item.szName.to_string().unwrap_or_default() };
+        out.push((name, value));
+    }
+    Some(out)
+}
+
+/// 对实例列表按命名规则聚合求和。`exclude_pid` 排除进程级实例（`pid_` 前缀），
+/// `prefix` 非空时仅纳入以该前缀开头的实例。无匹配实例时返回 None。
+#[cfg(target_os = "windows")]
+fn gpu_aggregate(items: &[(String, f64)], exclude_pid: bool, prefix: &str) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut any = false;
+    for (name, value) in items {
+        if exclude_pid && name.contains("pid_") {
+            continue;
+        }
+        if !prefix.is_empty() && !name.starts_with(prefix) {
+            continue;
+        }
+        sum += value;
+        any = true;
+    }
+    any.then_some(sum)
+}
+
 #[cfg(not(target_os = "windows"))]
 struct DiskIoSampler;
 
@@ -429,6 +656,23 @@ impl DiskIoSampler {
     }
 
     fn sample(&mut self) -> Option<DiskIoStat> {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+struct GpuSampler;
+
+#[cfg(not(target_os = "windows"))]
+struct GpuSampled;
+
+#[cfg(not(target_os = "windows"))]
+impl GpuSampler {
+    fn new() -> Option<Self> {
+        None
+    }
+
+    fn sample(&mut self) -> Option<GpuSampled> {
         None
     }
 }
@@ -589,6 +833,7 @@ mod tests {
             net: vec![],
             disks: vec![],
             disk_io: None,
+            gpu: GpuStat::unavailable(),
             battery: BatteryStat {
                 has_battery: false,
                 percent: 0,
@@ -640,6 +885,7 @@ mod tests {
             net: vec![],
             disks: vec![],
             disk_io: None,
+            gpu: GpuStat::unavailable(),
             battery: BatteryStat {
                 has_battery: false,
                 percent: 0,
@@ -701,5 +947,37 @@ mod tests {
         assert_eq!(disk_io_rate(-1.0), None);
         assert_eq!(disk_io_rate(f64::NAN), None);
         assert_eq!(disk_io_rate(f64::INFINITY), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn gpu_aggregate_sums_engine_instances_only() {
+        // 仅汇总 engtype_* 聚合实例，排除 pid_* 进程级实例与无关项
+        let items = vec![
+            ("engtype_3D".to_string(), 40.0),
+            ("engtype_Copy".to_string(), 20.0),
+            ("pid_1234_luid_1_phys_0_engtype_3D".to_string(), 60.0),
+            ("other".to_string(), 999.0),
+        ];
+        assert_eq!(gpu_aggregate(&items, true, "engtype_"), Some(60.0));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn gpu_aggregate_sums_physical_memory_only() {
+        // 显存只汇总 physical_* 实例，排除 pid_* 进程实例
+        let items = vec![
+            ("physical_0".to_string(), 8_000_000_000.0),
+            ("physical_1".to_string(), 2_000_000_000.0),
+            ("pid_1234_phys_0".to_string(), 9_999.0),
+        ];
+        assert_eq!(gpu_aggregate(&items, true, "physical_"), Some(10_000_000_000.0));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn gpu_aggregate_none_when_no_match() {
+        let items = vec![("pid_5_phys_0".to_string(), 10.0)];
+        assert_eq!(gpu_aggregate(&items, true, "physical_"), None);
     }
 }

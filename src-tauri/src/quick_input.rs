@@ -505,9 +505,14 @@ pub struct ClipboardHistoryItem {
     pub preview: String,
     /// 完整文本（选中后输入此字段）
     pub text: String,
+    /// 是否收藏：收藏项固定在历史列表最前，且不被滚动保留条数裁剪。
+    /// `#[serde(default)]` 保证旧版持久化文件（无该字段）升级后仍可正常读取。
+    #[serde(default)]
+    pub favorite: bool,
 }
 
-/// 内存中的历史缓冲（最新追加在末尾，展示时倒序取用）
+/// 内存中的历史缓冲（最新追加在末尾，展示时倒序取用）。
+/// 收藏项不参与滚动裁剪：裁剪只移除最旧的非收藏项，收藏项保留到上限 HISTORY_MAX。
 static HISTORY: Mutex<Vec<ClipboardHistoryItem>> = Mutex::new(Vec::new());
 
 /// 预览文本最大长度
@@ -571,25 +576,46 @@ pub fn set_history_limit(limit: usize) {
     let limit = limit.min(HISTORY_MAX);
     HISTORY_LIMIT.store(limit, Ordering::SeqCst);
 
-    let mut changed = false;
-    if let Ok(mut hist) = HISTORY.lock() {
-        if limit == 0 {
-            if !hist.is_empty() {
-                hist.clear();
-                changed = true;
-            }
-        } else if hist.len() > limit {
-            let overflow = hist.len() - limit;
-            hist.drain(0..overflow);
-            changed = true;
-        }
+    if limit == 0 {
+        // 0 = 不保留任何历史，连同收藏项一并清除（用户显式停用）。
+        clear_history();
+        return;
     }
 
-    if limit == 0 {
-        clear_history();
-    } else if changed {
+    let mut changed = false;
+    if let Ok(mut hist) = HISTORY.lock() {
+        let before = hist.len();
+        trim_history(&mut hist);
+        changed = hist.len() != before;
+    }
+
+    if changed {
         #[cfg(not(test))]
         save_history();
+    }
+}
+
+/// 按保留条数裁剪历史缓冲（内存顺序：最旧在前、最新在后）。
+/// - 非收藏项从最旧开始裁剪，使其数量不超过 `limit`；
+/// - 收藏项不受保留条数限制（用户固定的常用片段不被滚动窗口挤出），
+///   仅受整体上限 HISTORY_MAX 约束。
+fn trim_history(hist: &mut Vec<ClipboardHistoryItem>) {
+    let limit = get_history_limit();
+    while hist.iter().filter(|item| !item.favorite).count() > limit {
+        // 从最旧的非收藏项开始移除，收藏项尽可能保留
+        if let Some(idx) = hist.iter().position(|item| !item.favorite) {
+            hist.remove(idx);
+        } else {
+            break;
+        }
+    }
+    // 防御性整体上限：全部为收藏项时也只保留最近 HISTORY_MAX 条
+    while hist.len() > HISTORY_MAX {
+        if let Some(idx) = hist.iter().position(|item| !item.favorite) {
+            hist.remove(idx);
+        } else {
+            hist.remove(0);
+        }
     }
 }
 
@@ -636,11 +662,8 @@ fn load_history_from(path: &Path) -> Vec<ClipboardHistoryItem> {
             items.retain(|i| !i.text.is_empty());
             // 历史按最旧到最新保存；只合并连续相同文本，保留非相邻重复项。
             items.dedup_by(|current, previous| current.text == previous.text);
-            let limit = get_history_limit();
-            if items.len() > limit {
-                let overflow = items.len() - limit;
-                items.drain(0..overflow);
-            }
+            // 按保留条数裁剪：收藏项不受保留条数限制，仅受 HISTORY_MAX 上限约束。
+            trim_history(&mut items);
             items
         }
         Err(e) => {
@@ -700,6 +723,7 @@ pub fn push_history(text: &str) {
     let item = ClipboardHistoryItem {
         preview,
         text: text.to_string(),
+        favorite: false,
     };
     let mut changed = false;
     if let Ok(mut hist) = HISTORY.lock() {
@@ -712,10 +736,8 @@ pub fn push_history(text: &str) {
             return;
         }
         hist.push(item);
-        let limit = get_history_limit();
-        if hist.len() > limit {
-            hist.remove(0);
-        }
+        // 收藏项固定不裁剪；仅压缩超出的非收藏项
+        trim_history(&mut hist);
         changed = true;
     }
     if changed {
@@ -724,15 +746,68 @@ pub fn push_history(text: &str) {
     }
 }
 
-/// 获取历史记录快照（前端转盘展示用，最新在前）
+/// 获取历史记录快照（前端转盘展示用，最新在前）。
+/// 收藏项固定在列表最前（同样按新→旧排序），其后为普通最近记录。
 pub fn get_history() -> Vec<ClipboardHistoryItem> {
     if !get_history_enabled() {
         return Vec::new();
     }
     HISTORY
         .lock()
-        .map(|h| h.iter().rev().cloned().collect())
+        .map(|h| {
+            let newest_first: Vec<ClipboardHistoryItem> = h.iter().rev().cloned().collect();
+            // partition 保持稳定：各自内部仍为最新→最旧
+            let (mut favorites, recents): (Vec<_>, Vec<_>) =
+                newest_first.into_iter().partition(|item| item.favorite);
+            favorites.extend(recents);
+            favorites
+        })
         .unwrap_or_default()
+}
+
+/// 删除某一条（含同文本）历史记录。收藏项同样被删除。
+/// 返回是否确有删除。删除后内存为空时连历史文件一并移除。
+pub fn remove_history_item(text: &str) -> bool {
+    let mut removed = false;
+    let mut empty = false;
+    if let Ok(mut hist) = HISTORY.lock() {
+        let before = hist.len();
+        hist.retain(|item| item.text != text);
+        removed = hist.len() != before;
+        empty = hist.is_empty();
+    }
+    if removed {
+        if empty {
+            clear_history();
+        } else {
+            #[cfg(not(test))]
+            save_history();
+        }
+    }
+    removed
+}
+
+/// 收藏 / 取消收藏某条历史记录（按文本精确匹配，同文本记录状态一致）。
+/// 返回是否发生了状态变化。
+pub fn set_history_favorite(text: &str, favorite: bool) -> bool {
+    let mut changed = false;
+    if let Ok(mut hist) = HISTORY.lock() {
+        for item in hist.iter_mut() {
+            if item.text == text && item.favorite != favorite {
+                item.favorite = favorite;
+                changed = true;
+            }
+        }
+        // 取消收藏后立即把溢出窗口的非收藏项裁掉，保证列表即时回到保留条数以内
+        if changed {
+            trim_history(&mut hist);
+        }
+    }
+    if changed {
+        #[cfg(not(test))]
+        save_history();
+    }
+    changed
 }
 
 /// 清空历史并删除本地历史文件。
@@ -1077,8 +1152,8 @@ mod tests {
     use super::{
         clear_history, get_history, get_history_enabled, get_history_limit, history_path,
         is_dangerous_trigger_vk, load_history, load_history_from, parse_trigger_key, push_history,
-        save_history_to, set_history_enabled, set_history_limit, vk_to_name, ClipboardHistoryItem,
-        HISTORY_DEFAULT_LIMIT, HISTORY_MAX,
+        remove_history_item, save_history_to, set_history_enabled, set_history_favorite,
+        set_history_limit, vk_to_name, ClipboardHistoryItem, HISTORY_DEFAULT_LIMIT, HISTORY_MAX,
     };
 
     /// 串行化操作全局 HISTORY 的测试，避免并行运行互相污染
@@ -1318,10 +1393,12 @@ mod tests {
             ClipboardHistoryItem {
                 preview: "hello".to_string(),
                 text: "hello".to_string(),
+                favorite: false,
             },
             ClipboardHistoryItem {
                 preview: "world".to_string(),
                 text: "world".to_string(),
+                favorite: false,
             },
         ];
         save_history_to(&path, &items).unwrap();
@@ -1346,6 +1423,7 @@ mod tests {
             &[ClipboardHistoryItem {
                 preview: "secret".to_string(),
                 text: "secret".to_string(),
+                favorite: false,
             }],
         )
         .unwrap();
@@ -1376,11 +1454,13 @@ mod tests {
             .map(|i| ClipboardHistoryItem {
                 preview: format!("p{}", i),
                 text: format!("t{}", i),
+                favorite: false,
             })
             .collect();
         items.push(ClipboardHistoryItem {
             preview: String::new(),
             text: String::new(),
+            favorite: false,
         });
         save_history_to(&path, &items).unwrap();
 
@@ -1408,18 +1488,22 @@ mod tests {
             ClipboardHistoryItem {
                 preview: "a".to_string(),
                 text: "a".to_string(),
+                favorite: false,
             },
             ClipboardHistoryItem {
                 preview: "a duplicate".to_string(),
                 text: "a".to_string(),
+                favorite: false,
             },
             ClipboardHistoryItem {
                 preview: "b".to_string(),
                 text: "b".to_string(),
+                favorite: false,
             },
             ClipboardHistoryItem {
                 preview: "a again".to_string(),
                 text: "a".to_string(),
+                favorite: false,
             },
         ];
         save_history_to(&path, &items).unwrap();
@@ -1476,6 +1560,7 @@ mod tests {
             &[ClipboardHistoryItem {
                 preview: "persisted".to_string(),
                 text: "persisted".to_string(),
+                favorite: false,
             }],
         )
         .unwrap();
@@ -1491,5 +1576,147 @@ mod tests {
 
         clear_history();
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn favorite_pins_item_to_front_and_survives_trim() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_history();
+        set_history_limit(3);
+        push_history("one");
+        push_history("two");
+        push_history("three");
+
+        // 收藏最旧的 one：它应固定到列表最前
+        assert!(set_history_favorite("one", true));
+        let hist = get_history();
+        assert_eq!(hist[0].text, "one");
+        assert!(hist[0].favorite);
+
+        // 继续复制新内容，滚动窗口应裁掉「最旧的非收藏项」，收藏项不被挤出
+        push_history("four");
+        push_history("five");
+        push_history("six");
+        let hist = get_history();
+        let texts: Vec<&str> = hist.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(texts, vec!["one", "six", "five", "four"]);
+
+        // 取消收藏后，one 重新按时间顺序回到最近记录中（此处超出 3 条限制被裁掉）
+        assert!(set_history_favorite("one", false));
+        let history = get_history();
+        let texts: Vec<&str> = history.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(texts, vec!["six", "five", "four"]);
+
+        clear_history();
+        set_history_limit(HISTORY_DEFAULT_LIMIT);
+    }
+
+    #[test]
+    fn favorite_is_idempotent_and_marks_all_duplicates() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_history();
+        push_history("first");
+        push_history("second");
+        push_history("first"); // 非相邻重复项
+        assert!(set_history_favorite("first", true));
+        let favs: Vec<bool> = get_history()
+            .iter()
+            .filter(|item| item.text == "first")
+            .map(|item| item.favorite)
+            .collect();
+        assert_eq!(favs, vec![true, true], "同文本记录应一并收藏");
+
+        // 已经是收藏态时再次收藏不产生变更
+        assert!(!set_history_favorite("first", true));
+        clear_history();
+    }
+
+    #[test]
+    fn remove_history_item_deletes_specific_text() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_history();
+        push_history("one");
+        push_history("two");
+        push_history("three");
+
+        assert!(remove_history_item("two"));
+        let history = get_history();
+        let texts: Vec<&str> = history.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(texts, vec!["three", "one"]);
+
+        assert!(!remove_history_item("missing"));
+        clear_history();
+    }
+
+    #[test]
+    fn remove_history_item_removes_favorited_and_duplicate_occurrences() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_history();
+        push_history("secret");
+        push_history("other");
+        push_history("secret"); // 非相邻重复项
+        set_history_favorite("secret", true);
+
+        assert!(remove_history_item("secret"));
+        let history = get_history();
+        let texts: Vec<&str> = history.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(texts, vec!["other"], "删除应清除全部同文本记录");
+
+        clear_history();
+    }
+
+    #[test]
+    fn removing_last_item_leaves_empty_history() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_history();
+        push_history("only");
+        assert!(remove_history_item("only"));
+        assert!(get_history().is_empty());
+        clear_history();
+    }
+
+    /// 收藏状态应随持久化文件往返保留，旧版文件缺失 favorite 字段时按 false 读取
+    #[test]
+    fn favorite_persists_through_roundtrip_and_old_file_loads_as_false() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_history_limit(HISTORY_MAX);
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_hist_fav_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("clipboard_history.json");
+
+        let items = vec![
+            ClipboardHistoryItem {
+                preview: "pinned".to_string(),
+                text: "pinned".to_string(),
+                favorite: true,
+            },
+            ClipboardHistoryItem {
+                preview: "recent".to_string(),
+                text: "recent".to_string(),
+                favorite: false,
+            },
+        ];
+        save_history_to(&path, &items).unwrap();
+        let loaded = load_history_from(&path);
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded[0].favorite);
+        assert!(!loaded[1].favorite);
+
+        // 旧版 JSON 序列（无 favorite 字段）读取时默认 false，不 panic
+        let old_json = serde_json::json!([
+            { "preview": "old", "text": "old" },
+            { "preview": "pinned-old", "text": "pinned-old", "favorite": true }
+        ]);
+        let old_plaintext = serde_json::to_vec(&old_json).unwrap();
+        let encrypted = crate::utils::crypto::encrypt(&old_plaintext).unwrap();
+        std::fs::write(&path, crate::utils::crypto::to_hex(&encrypted)).unwrap();
+        let loaded = load_history_from(&path);
+        assert_eq!(loaded.len(), 2);
+        assert!(!loaded[0].favorite, "缺失字段应默认非收藏");
+        assert!(loaded[1].favorite);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        set_history_limit(HISTORY_DEFAULT_LIMIT);
     }
 }

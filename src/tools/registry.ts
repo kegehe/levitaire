@@ -97,7 +97,7 @@ export const FLOATING_TOOLS: FloatingTool[] = [
   {
     id: "pomodoro",
     name: "番茄钟",
-    icon: "Timer",
+    icon: "Tomato",
     description: "常驻悬浮倒计时，专注/休息自动循环，到点 TTS 提示音提醒",
     category: "system",
     defaultEnabled: false,
@@ -107,7 +107,7 @@ export const FLOATING_TOOLS: FloatingTool[] = [
   {
     id: "timer",
     name: "时钟、倒计时、秒表与日历",
-    icon: "Timer",
+    icon: "Clock",
     description: "桌面时钟、倒计时、秒表与月历，支持农历日期、快速切换和分段计时",
     category: "system",
     defaultEnabled: false,

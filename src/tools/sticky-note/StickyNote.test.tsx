@@ -20,6 +20,8 @@ function noteWith(overrides: Partial<{ id: string; content: string; colorId: str
 function mockGetNote(note: ReturnType<typeof noteWith>) {
   mockInvoke.mockImplementation((command: string) => {
     if (command === "get_sticky_note") return Promise.resolve(note);
+    if (command === "get_sticky_note_images_dir")
+      return Promise.resolve("C:/data/levitaire/sticky-images");
     return Promise.resolve();
   });
 }
@@ -105,6 +107,99 @@ describe("StickyNote", () => {
         "create_sticky_note",
         expect.objectContaining({ colorId: "yellow" }),
       );
+    });
+  });
+
+  it("正文中的图片令牌渲染为 <img>，序列化时还原为令牌", async () => {
+    setMockWindow({ label: "sticky-note-note-1750000000000-1" });
+    mockGetNote(
+      noteWith({
+        id: "note-1750000000000-1",
+        content: "看下图\n[[img:note-1750000000000-1/img_1_0.png]]\n说明文字",
+        colorId: "yellow",
+      }),
+    );
+    const { container } = render(<StickyNote />);
+
+    const editor = await screen.findByLabelText("便利贴内容");
+    await waitFor(() => {
+      const img = editor.querySelector(
+        'img[data-note-img="note-1750000000000-1/img_1_0.png"]',
+      );
+      expect(img).toBeTruthy();
+      expect((img as HTMLImageElement).src).toContain("note-1750000000000-1/img_1_0.png");
+    });
+
+    // contenteditable 的 DOM 再序列化应还原为原令牌（图片不回退文本数据丢失）
+    fireEvent.input(getEditor(container));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("update_sticky_note_content", {
+        id: "note-1750000000000-1",
+        content: expect.stringContaining("[[img:note-1750000000000-1/img_1_0.png]]"),
+      });
+    });
+  });
+
+  it("字面输入的 [[img:...]] 不匹配后端命名格式时按普通文本保留", async () => {
+    mockGetNote(
+      noteWith({
+        id: "note-1",
+        content: "用法：[[img:手动内容]] 不会变成图片",
+        colorId: "yellow",
+      }),
+    );
+    const { container } = render(<StickyNote />);
+
+    const editor = await screen.findByLabelText("便利贴内容");
+    await waitFor(() => {
+      expect(editor.textContent).toContain("[[img:手动内容]]");
+    });
+    expect(container.querySelector('img[data-note-img]')).toBeNull();
+  });
+
+  it("粘贴图片先落盘再插入令牌式 <img>", async () => {
+    setMockWindow({ label: "sticky-note-note-1750000000000-1" });
+    mockGetNote(
+      noteWith({ id: "note-1750000000000-1", content: "", colorId: "yellow" }),
+    );
+    const { container } = render(<StickyNote />);
+    const editor = await screen.findByLabelText("便利贴内容");
+    await waitFor(() => expect(editor).toBeTruthy());
+
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "get_sticky_note") return Promise.resolve(noteWith({ content: "" }));
+      if (command === "get_sticky_note_images_dir")
+        return Promise.resolve("C:/data/levitaire/sticky-images");
+      if (command === "save_sticky_note_image")
+        return Promise.resolve("note-1750000000000-1/img_pasted_1.png");
+      return Promise.resolve();
+    });
+
+    const img = new File([new Uint8Array([0xff, 0xd8, 0xff])], "pasted.png", {
+      type: "image/png",
+    });
+    const clipboardData = {
+      items: [
+        {
+          kind: "file",
+          type: "image/png",
+          getAsFile: () => img,
+        },
+      ],
+    };
+    fireEvent.paste(editor, { clipboardData });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "save_sticky_note_image",
+        expect.objectContaining({ noteId: "note-1750000000000-1" }),
+      );
+    });
+    await waitFor(() => {
+      const pasted = container.querySelector(
+        'img[data-note-img="note-1750000000000-1/img_pasted_1.png"]',
+      );
+      expect(pasted).toBeTruthy();
     });
   });
 });

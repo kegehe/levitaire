@@ -72,8 +72,12 @@ export function charCount(text: string): CharCountResult {
     .map((s) => s.trim())
     .filter((s) => s.length > 0).length;
 
-  // 句子数：按中英文句末标点计（连续标点算一句）
-  const sentences = countMatches(text, /[。！？.!?]+/g);
+  // 句子数：按中英文句末标点计（连续标点算一句）。
+  // 数字内部的小数点（如 3.14、v1.2.3）非句末标点，先剔除后再统计，避免句子数虚高
+  const sentences = countMatches(
+    text.replace(/\d(?:\.\d)+/g, (m) => m.replace(/\./g, "")),
+    /[。！？.!?]+/g
+  );
 
   // UTF-8 字节数
   const bytes = new Blob([text]).size;
@@ -81,8 +85,11 @@ export function charCount(text: string): CharCountResult {
   // 数字串数：连续数字段
   const digits = countMatches(text, /[0-9]+/g);
 
-  // 标点数：中文标点（全角符号区 U+3001–U+303F、U+FF00–U+FFEF，排除 U+3000 全角空格）+ 通用标点（破折号 U+2014、间隔号 U+00B7、省略号 U+2026）+ ASCII 常见标点
-  const punctuation = countMatches(text, /[、-〿＀-￯—·…]|[.,!?;:'"()\[\]{}\-]/g);
+  // 标点数：中文标点（CJK 符号/标点区 U+3001–U+303F，排除 U+3000 全角空格）
+  // + 全角 ASCII 标点（U+FF01–U+FF0F、U+FF1A–U+FF20、U+FF3B–U+FF40、U+FF5B–U+FF5E，
+  //   避开全角数字 U+FF10–U+FF19 与全角字母 U+FF21–U+FF3A / U+FF41–U+FF5A）
+  // + 通用标点（破折号 U+2014、间隔号 U+00B7、省略号 U+2026）+ ASCII 常见标点
+  const punctuation = countMatches(text, /[、-〿！-／：-＠［-｀｛-～]|[.,!?;:'"()\[\]{}\-—·…]/g);
 
   // 英文字母数
   const letters = countMatches(text, /[A-Za-z]/g);

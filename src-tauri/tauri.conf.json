@@ -56,11 +56,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: http://asset.localhost asset:; connect-src 'self'",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://asset.localhost asset:; media-src 'self' blob: http://asset.localhost asset:; connect-src 'self'",
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$TEMP/levitaire-recording/**"
+          "$TEMP/levitaire-recording/**",
+          "$APPDATA/sticky-images/**"
         ]
       }
     }
@@ -83,8 +84,6 @@
       }
     },
     "resources": {
-      "binaries/ffmpeg.exe": "ffmpeg.exe",
-      "libs/onnxruntime.dll": "onnxruntime.dll",
       "resources/ocr/*": "ocr/"
     },
     "icon": [

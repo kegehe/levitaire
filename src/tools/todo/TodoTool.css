@@ -25,6 +25,8 @@
 .todo-filters { display: flex; gap: 4px; padding: 3px; border-radius: 7px; background: var(--color-bg-sunken); }
 .todo-filters button { flex: 1; height: 26px; border: 0; border-radius: 5px; color: var(--color-fg-muted); background: transparent; cursor: pointer; font: inherit; }
 .todo-filters button.is-active { color: var(--color-fg); background: var(--color-bg-elevated); box-shadow: 0 1px 3px rgb(0 0 0 / 12%); }
+.todo-tag-filter { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 7px; border: 1px solid var(--color-border); border-radius: 5px; color: var(--color-fg-muted); background: var(--color-bg-sunken); }
+.todo-tag-filter select { min-width: 0; flex: 1; height: 26px; padding: 0; border: 0; outline: 0; color: var(--color-fg); background: transparent; font: inherit; font-size: 11px; }
 .todo-sort-row { display: flex; align-items: center; gap: 5px; color: var(--color-fg-subtle); font-size: 10px; }
 .todo-sort-row button { padding: 3px 7px; border: 1px solid transparent; border-radius: 4px; color: var(--color-fg-muted); background: transparent; cursor: pointer; font: inherit; }
 .todo-sort-row button.is-active { color: var(--color-fg); border-color: var(--color-border); background: var(--color-bg-sunken); }

@@ -97,6 +97,10 @@ pub struct AppConfig {
     /// 悬浮工具栏启用的功能 ID 列表（如 ["copy","search",...]）。空表示使用默认全量
     #[serde(default)]
     pub toolbar_features: Vec<String>,
+    /// 工具栏功能按钮顺序 ID 列表（全量有序，如 ["copy","search",...]）。空表示使用默认顺序。
+    /// 与 toolbar_features（启用子集）相互独立：禁用功能不删除其排序位置
+    #[serde(default)]
+    pub toolbar_feature_order: Vec<String>,
     /// 文字工具栏「搜索」使用的搜索引擎 ID（如 "bing"/"google"/"baidu"）。空串表示使用默认 Bing
     #[serde(default)]
     pub search_engine: String,
@@ -319,6 +323,7 @@ impl Default for AppConfig {
             screenshot_enabled: default_screenshot_enabled(),
             text_toolbar_enabled: default_text_toolbar_enabled(),
             toolbar_features: Vec::new(),
+            toolbar_feature_order: Vec::new(),
             search_engine: String::new(),
             dedup_mode: String::new(),
             md5_length: String::new(),
@@ -768,6 +773,26 @@ impl ConfigManager {
                 .lock()
                 .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.toolbar_features = features;
+        }
+        self.save_config()
+    }
+
+    /// 获取工具栏功能按钮顺序 ID 列表
+    pub fn get_toolbar_feature_order(&self) -> Result<Vec<String>, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.toolbar_feature_order.clone())
+    }
+
+    /// 更新工具栏功能按钮顺序 ID 列表并持久化
+    pub fn update_toolbar_feature_order(&self, order: Vec<String>) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.toolbar_feature_order = order;
         }
         self.save_config()
     }

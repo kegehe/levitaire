@@ -617,6 +617,99 @@
   display: none;
 }
 
+/* ── 工具栏按钮顺序（可拖拽） ────────────────────────────── */
+.toolbar-order-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+  max-width: 420px;
+}
+
+.toolbar-order-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1-5) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  cursor: grab;
+  user-select: none;
+}
+
+/* 拖拽排序进行中：被拖拽行半透明虚边，避免与普通行混淆 */
+.toolbar-order-row.is-dragging {
+  opacity: 0.5;
+  border-style: dashed;
+  cursor: grabbing;
+}
+
+.toolbar-order-grip {
+  display: flex;
+  align-items: center;
+  color: var(--color-fg-muted);
+  flex-shrink: 0;
+}
+
+.toolbar-order-feature-icon {
+  flex-shrink: 0;
+  color: var(--color-fg);
+}
+
+.toolbar-order-label {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--color-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar-feature-switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--settings-border);
+  border-radius: 999px;
+  background: var(--settings-input-bg);
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.toolbar-feature-switch.is-on {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+}
+
+.toolbar-feature-switch:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.toolbar-feature-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-fg-muted);
+  transition:
+    transform var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.toolbar-feature-switch.is-on .toolbar-feature-switch-thumb {
+  transform: translateX(16px);
+  background: var(--color-fg-on-accent);
+}
+
 /* ── Divider ──────────────────────────────────────────────── */
 .settings-divider {
   border: none;
@@ -783,6 +876,22 @@
   border-radius: var(--radius-md);
   background: var(--color-bg-elevated);
   cursor: grab;
+}
+
+/* 剪贴板历史行：不支持拖拽排序，显示普通光标 */
+.qi-history-row {
+  cursor: default;
+}
+
+/* 已收藏的历史行：内容与星标以强调色呈现 */
+.qi-history-row.is-favorite .qi-snippet-text {
+  color: var(--color-fg);
+}
+
+.qi-history-row .settings-toggle-btn-sm.is-active {
+  color: #eab308;
+  border-color: rgb(234 179 8 / 0.45);
+  background: rgb(234 179 8 / 0.12);
 }
 
 /* 拖拽排序进行中：被拖拽行半透明虚边，隐藏操作按钮避免误触（含 hover/focus 变体，覆盖下方操作按钮显示规则） */

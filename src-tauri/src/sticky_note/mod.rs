@@ -335,6 +335,82 @@ pub fn destroy_note_window(app: &tauri::AppHandle, id: &str) {
     }
 }
 
+// ── 图片支持 ─────────────────────────────────────────────────────────────────
+// 便利贴正文仍以纯文本存于 notes.json；粘贴/截图拷入的图片落盘为独立文件，
+// 正文中以令牌 `[[img:相对路径]]` 引用（相对路径相对 images 根目录，
+// 形如 <noteId>/img_*.png）。渲染时前端用 convertFileSrc 把令牌转成 asset: URL
+// 显示，故存放目录必须在 tauri.conf.json 的 assetProtocol scope 内；此处与 scope
+// 的 $APPDATA 宏一致地使用 app.path().app_data_dir()（= dirs::data_dir()/{bundle_identifier}）。
+
+/// 单张便利贴图片体积上限（字节），避免异常剪贴板数据把磁盘撑爆
+pub const IMAGE_MAX_BYTES: usize = 32 * 1024 * 1024;
+/// 图片根目录名（位于 app 数据目录下），与 tauri.conf.json asset scope 同步
+pub const IMAGES_REL_ROOT: &str = "sticky-images";
+/// 单调序号：同毫秒连续粘贴多张图时用于区分文件名
+static IMG_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// app 数据目录 → 便利贴图片根目录的绝对路径
+pub fn images_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join(IMAGES_REL_ROOT))
+        .map_err(|e| format!("获取应用数据目录失败: {e}"))
+}
+
+/// 保存一张剪贴板粘贴的图片，返回正文令牌中的相对路径。
+/// 相对路径相对 [images_dir]（images 根目录），形如 `<noteId>/img_*.png`；
+/// 前端用 `images_dir + "/" + rel` 交给 convertFileSrc 解析。
+pub fn save_image(
+    app: &tauri::AppHandle,
+    note_id: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("图片内容为空".into());
+    }
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Err(format!("图片不能超过 {}MB", IMAGE_MAX_BYTES / (1024 * 1024)));
+    }
+    let subdir = images_dir(app)?.join(note_safe_dir(note_id));
+    fs::create_dir_all(&subdir).map_err(|e| format!("创建图片目录失败: {e}"))?;
+    let filename = format!(
+        "img_{}_{}.png",
+        Utc::now().timestamp_millis(),
+        IMG_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    fs::write(subdir.join(&filename), bytes).map_err(|e| format!("写入图片文件失败: {e}"))?;
+    Ok(format!("{}/{}", note_safe_dir(note_id), filename))
+}
+
+/// 彻底删除便签时清理其图片目录，避免留下孤儿文件。失败仅记录，不阻断删除。
+pub fn delete_images(app: &tauri::AppHandle, note_id: &str) {
+    let dir = match images_dir(app) {
+        Ok(dir) => dir.join(note_safe_dir(note_id)),
+        Err(_) => return,
+    };
+    if dir.exists() {
+        crate::utils::logger::log(
+            "sticky_note",
+            &format!("removing note images dir: {}", dir.display()),
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// 把 note id 清洗成安全的目录名（note id 由本模块生成，全为安全字符，此处兜底）。
+/// 单段结果若为 "." 或 ".."（可能指向 images 根目录/其父级）一律回退 unknown。
+fn note_safe_dir(id: &str) -> String {
+    let clean: String = id
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    if clean.is_empty() || clean == "." || clean == ".." {
+        "unknown".to_string()
+    } else {
+        clean
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +505,17 @@ mod tests {
         let ids: Vec<_> = notes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec![first.id.as_str(), second.id.as_str()]);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn note_safe_dir_strips_path_separators_and_falls_back() {
+        assert_eq!(note_safe_dir("note-1-2"), "note-1-2");
+        assert_ne!(note_safe_dir("../evil/.."), "../evil/..");
+        assert!(!note_safe_dir("../evil/..").contains('/'));
+        assert!(!note_safe_dir("a\\b:c*?\"<>|").contains('\\'));
+        assert_eq!(note_safe_dir("///"), "unknown");
+        // 单段 "." / ".." 可能越过 images 根目录，必须回退
+        assert_eq!(note_safe_dir("."), "unknown");
+        assert_eq!(note_safe_dir(".."), "unknown");
     }
 }

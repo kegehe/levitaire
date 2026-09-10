@@ -3,6 +3,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import Icon from "./Icon";
+import { subscribeThemePreferences } from "../styles/themePreferences";
 import "./UpdatePrompt.css";
 
 interface UpdateInfo {
@@ -55,6 +56,23 @@ function UpdatePrompt() {
     init().catch(console.error);
     return () => {
       unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    // 应用当前主题配色，并在窗口显示期间跟随主题变更
+    let disposeTheme: (() => void) | undefined;
+    let disposed = false;
+    subscribeThemePreferences().then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        disposeTheme = unlisten;
+      }
+    });
+    return () => {
+      disposed = true;
+      disposeTheme?.();
     };
   }, []);
 

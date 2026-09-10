@@ -4,13 +4,14 @@ import type { CSSProperties } from "react";
 export type ToolIconName =
   | "Sparkles"
   | "Camera"
+  | "Clock"
   | "Mic"
   | "Activity"
   | "Video"
   | "X"
   | "Rocket"
   | "Compass"
-  | "Timer"
+  | "Tomato"
   | "Pencil"
   | "Palette"
   | "Scroll"
@@ -99,6 +100,16 @@ function ToolIcon({ name, size = 20, className = "", style }: ToolIconProps) {
         </svg>
       );
 
+    // 时钟、倒计时、秒表与日历 — 圆表盘 + 时/分指针
+    case "Clock":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 12V7.5" />
+          <path d="m12 12 3.4 2.4" />
+        </svg>
+      );
+
     // 语音输入 — 麦克风
     case "Mic":
       return (
@@ -156,7 +167,7 @@ function ToolIcon({ name, size = 20, className = "", style }: ToolIconProps) {
       );
 
     // 番茄钟 — 番茄（主体圆 + 顶部叶瓣 + 蒂）
-    case "Timer":
+    case "Tomato":
       return (
         <svg {...common}>
           <circle cx="12" cy="13.5" r="6.5" />

@@ -40,6 +40,17 @@ interface ContextMenuItem {
 type TrayUpdateStatus =
   "idle" | "checking" | "up-to-date" | "available" | "error" | "install-error";
 
+// Every right-click on the tray icon shows this menu, which used to trigger a
+// live update check each time. Cache the last result for a while so frequent
+// tray clicks do not fire a flood of network requests (and a slow/offline
+// network does not leave the menu stuck on "正在检查更新...").
+const TRAY_UPDATE_CACHE_TTL_MS = 5 * 60 * 1000;
+// A check request that is still in flight gets a much shorter reuse window:
+// it only coalesces quick successive right-clicks (no second request while the
+// first is pending) without letting a hung request block the menu for the full
+// cache TTL.
+const TRAY_UPDATE_IN_FLIGHT_WINDOW_MS = 10 * 1000;
+
 const MENUS: Record<ContextMenuSource, ContextMenuItem[][]> = {
   pin: [
     [
@@ -88,20 +99,49 @@ function ContextMenu() {
   const [trayUpdate, setTrayUpdate] = useState<Update | null>(null);
   const hideTimer = useRef<number | null>(null);
   const trayCheckGeneration = useRef(0);
+  // 是否有在线检查正在进行：任一菜单打开期间，只要存在进行中的检查就合并复用，
+  // 避免慢请求（耗时超过 in-flight 窗口）被误判为「已结束」而并发重复发起。
+  const trayCheckInFlightRef = useRef(false);
+  const lastTrayUpdateCacheRef = useRef<{
+    time: number;
+    status: TrayUpdateStatus;
+    update: Update | null;
+  } | null>(null);
 
   const checkTrayUpdate = useCallback(async () => {
     const generation = ++trayCheckGeneration.current;
+    // Publish the pending state immediately so a menu opened while this request
+    // is still running reuses "checking" instead of starting another check().
+    lastTrayUpdateCacheRef.current = {
+      time: Date.now(),
+      status: "checking",
+      update: null,
+    };
     setTrayUpdateStatus("checking");
     setTrayUpdate(null);
+    trayCheckInFlightRef.current = true;
     try {
       const update = await check();
       if (generation !== trayCheckGeneration.current) return;
+      const status = update ? "available" : "up-to-date";
+      lastTrayUpdateCacheRef.current = { time: Date.now(), status, update };
       setTrayUpdate(update);
-      setTrayUpdateStatus(update ? "available" : "up-to-date");
+      setTrayUpdateStatus(status);
     } catch (error) {
       if (generation !== trayCheckGeneration.current) return;
       console.error("tray update check failed:", error);
+      lastTrayUpdateCacheRef.current = {
+        time: Date.now(),
+        status: "error",
+        update: null,
+      };
       setTrayUpdateStatus("error");
+    } finally {
+      // 仅当仍是当前请求时才清标记：若期间有更新的重试请求发起，
+      // in-flight 标记由后者接管，此处不得误清覆盖。
+      if (generation === trayCheckGeneration.current) {
+        trayCheckInFlightRef.current = false;
+      }
     }
   }, []);
 
@@ -114,17 +154,22 @@ function ContextMenu() {
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<{ pinId: number; text?: string; error?: string }>("pin-ocr-result", async (event) => {
-      try {
-        const window = await ensurePinOcrWindow();
-        await emitTo("pin-ocr", "pin-ocr-show", event.payload);
-        await window.show();
-        await window.setFocus();
-      } catch (error) {
-        console.error("show pin OCR result failed:", error);
-      }
-    });
-    return () => { unlisten.then((fn) => fn()); };
+    const unlisten = listen<{ pinId: number; text?: string; error?: string }>(
+      "pin-ocr-result",
+      async (event) => {
+        try {
+          const window = await ensurePinOcrWindow();
+          await emitTo("pin-ocr", "pin-ocr-show", event.payload);
+          await window.show();
+          await window.setFocus();
+        } catch (error) {
+          console.error("show pin OCR result failed:", error);
+        }
+      },
+    );
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   useEffect(() => {
@@ -167,6 +212,35 @@ function ContextMenu() {
 
   useEffect(() => {
     if (request?.source !== "tray") return;
+    const cached = lastTrayUpdateCacheRef.current;
+    // A fresh result is within the TTL window: reuse it instead of checking
+    // online again. A pending check is only coalesced for the short in-flight
+    // window. The explicit "检查更新/重试" item still bypasses all of this by
+    // calling checkTrayUpdate() directly.
+    if (trayCheckInFlightRef.current && cached?.status === "checking") {
+      const age = Date.now() - cached.time;
+      // 仅合并仍在 in-flight 窗口内的进行中检查（快速连续右键复用，避免并发重复发起）。
+      // 若超过窗口仍未返回，视作挂起请求：放行下面发起新检查，由新 generation 接管
+      // in-flight 标记；旧请求即使稍后返回也会因 generation 不匹配而被忽略，
+      // 避免托盘菜单永远停在禁用的「正在检查更新...」。
+      if (age < TRAY_UPDATE_IN_FLIGHT_WINDOW_MS) {
+        setTrayUpdateStatus(cached.status);
+        setTrayUpdate(cached.update);
+        return;
+      }
+    }
+    if (cached) {
+      const age = Date.now() - cached.time;
+      const fresh =
+        cached.status === "checking"
+          ? age < TRAY_UPDATE_IN_FLIGHT_WINDOW_MS
+          : age < TRAY_UPDATE_CACHE_TTL_MS;
+      if (fresh) {
+        setTrayUpdateStatus(cached.status);
+        setTrayUpdate(cached.update);
+        return;
+      }
+    }
     void checkTrayUpdate();
   }, [request, checkTrayUpdate]);
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Icon from "../../components/Icon";
@@ -9,7 +9,7 @@ import {
   subscribeThemePreferences,
 } from "../../styles/themePreferences";
 import { persistWindowPositionOnMove } from "../../utils/windowPosition";
-import { getNoteColor } from "./constants";
+import { getNoteColor, stripImgTokens } from "./constants";
 import "./StickyNoteManager.css";
 
 interface StickyNote {
@@ -32,6 +32,32 @@ function formatTime(iso?: string): string {
 function StickyNoteManager() {
   const [notes, setNotes] = useState<StickyNote[]>([]);
   const [loading, setLoading] = useState(true);
+  // 删除二次确认：记录当前待确认删除的便利贴 id，3 秒内再次点击才真正删除
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const confirmTimerRef = useRef<number | null>(null);
+
+  /** 退出删除确认态（清理倒计时） */
+  const cancelConfirmDelete = useCallback(() => {
+    if (confirmTimerRef.current !== null) {
+      window.clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = null;
+    }
+    setConfirmDeleteId(null);
+  }, []);
+
+  // 卸载时清理倒计时
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current !== null) window.clearTimeout(confirmTimerRef.current);
+    };
+  }, []);
+
+  // 列表刷新后目标已不存在（如在便签窗被删）时，兜底退出确认态
+  useEffect(() => {
+    if (confirmDeleteId !== null && !notes.some((note) => note.id === confirmDeleteId)) {
+      cancelConfirmDelete();
+    }
+  }, [notes, confirmDeleteId, cancelConfirmDelete]);
 
   // 独立窗口：手动应用并订阅主题
   useLayoutEffect(() => {
@@ -73,27 +99,37 @@ function StickyNoteManager() {
   }, [refresh]);
 
   const createNote = () => {
+    cancelConfirmDelete();
     void invoke("create_sticky_note", { colorId: "yellow" }).catch((err) =>
       console.error("新建便利贴失败:", err),
     );
   };
 
   const showNote = (id: string) => {
-    void invoke("show_sticky_note", { id }).catch((err) =>
-      console.error("唤出便利贴失败:", err),
-    );
+    cancelConfirmDelete();
+    void invoke("show_sticky_note", { id }).catch((err) => console.error("唤出便利贴失败:", err));
   };
 
   const collectNote = (id: string) => {
+    cancelConfirmDelete();
     void invoke("collect_sticky_note", { id }).catch((err) =>
       console.error("收起便利贴失败:", err),
     );
   };
 
+  // 删除需二次确认（与单张便签一致）：首次点击进入待确认态并 3 秒超时复位，
+  // 超时前再次点击同一行才真正删除。
   const deleteNote = (id: string) => {
-    void invoke("delete_sticky_note", { id }).catch((err) =>
-      console.error("删除便利贴失败:", err),
-    );
+    if (confirmDeleteId === id) {
+      cancelConfirmDelete();
+      void invoke("delete_sticky_note", { id }).catch((err) =>
+        console.error("删除便利贴失败:", err),
+      );
+      return;
+    }
+    cancelConfirmDelete();
+    setConfirmDeleteId(id);
+    confirmTimerRef.current = window.setTimeout(() => setConfirmDeleteId(null), 3000);
   };
 
   const pinnedCount = notes.filter((note) => note.visible).length;
@@ -116,6 +152,7 @@ function StickyNoteManager() {
               aria-label="收起全部便利贴"
               disabled={pinnedCount === 0}
               onClick={() => {
+                cancelConfirmDelete();
                 void invoke("collect_all_notes").catch((err) =>
                   console.error("收起全部失败:", err),
                 );
@@ -129,6 +166,7 @@ function StickyNoteManager() {
               title="隐藏本窗口（便签仍保留）"
               aria-label="隐藏管理窗"
               onClick={() => {
+                cancelConfirmDelete();
                 void invoke("hide_sticky_notes_manager").catch(() => {});
               }}
             >
@@ -156,12 +194,13 @@ function StickyNoteManager() {
           <ul className="snm-list">
             {notes.map((note) => {
               const color = getNoteColor(note.colorId);
-              const preview = note.content.trim().split("\n")[0] || "空白便利贴";
-              const empty = note.content.trim().length === 0;
+              const firstLine = stripImgTokens(note.content.trim()).split("\n")[0] || "";
+              const preview = firstLine || "空白便利贴";
+              const empty = stripImgTokens(note.content.trim()).length === 0;
               return (
                 <li
                   key={note.id}
-                  className={`snm-item ${note.visible ? "" : "is-hidden"}`}
+                  className={`snm-item ${note.visible ? "" : "is-hidden"} ${confirmDeleteId === note.id ? "is-confirming" : ""}`}
                 >
                   <button
                     type="button"
@@ -178,9 +217,12 @@ function StickyNoteManager() {
                       <span className={`snm-preview ${empty ? "is-placeholder" : ""}`}>
                         {empty ? "空白便签" : preview}
                       </span>
-                      <span className="snm-meta">
-                        {note.visible ? "已贴在桌面" : "已收起"}
-                        {note.updatedAt ? ` · ${formatTime(note.updatedAt)}` : ""}
+                      <span
+                        className={`snm-meta ${confirmDeleteId === note.id ? "is-danger-text" : ""}`}
+                      >
+                        {confirmDeleteId === note.id
+                          ? "再点一次确认删除"
+                          : `${note.visible ? "已贴在桌面" : "已收起"}${note.updatedAt ? ` · ${formatTime(note.updatedAt)}` : ""}`}
                       </span>
                     </span>
                   </button>
@@ -208,9 +250,9 @@ function StickyNoteManager() {
                     )}
                     <button
                       type="button"
-                      className="snm-icon-btn is-danger"
-                      title="彻底删除"
-                      aria-label="删除该便签"
+                      className={`snm-icon-btn is-danger ${confirmDeleteId === note.id ? "is-confirm" : ""}`}
+                      title={confirmDeleteId === note.id ? "再点一次确认删除" : "彻底删除"}
+                      aria-label={confirmDeleteId === note.id ? "确认删除该便签" : "删除该便签"}
                       onClick={() => deleteNote(note.id)}
                     >
                       <Icon name="Trash2" size={14} />

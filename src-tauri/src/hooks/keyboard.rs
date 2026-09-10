@@ -33,7 +33,7 @@ static KB_STATE: KeyboardState = KeyboardState {
 /// 剪贴板文本最大字符数（1: 防止损坏数据越界）
 const MAX_CLIPBOARD_U16: usize = 1024 * 1024;
 const MAX_CLIPBOARD_DIB_BYTES: usize = 48 * 1024 * 1024;
-/// CF_UNICODETEXT 甯搁噺
+/// CF_UNICODETEXT 常量
 const CF_UNICODETEXT: u32 = 13;
 
 /// 安装全局键盘钩子，监听 Ctrl+C 后读取剪贴板并触发选区事件。
@@ -393,7 +393,7 @@ mod tests {
     fn test_processing_flag_initial_false() {
         let _guard = PROCESSING_STATE_TEST_LOCK.lock().unwrap();
         KB_STATE.processing.store(false, Ordering::SeqCst);
-        // KB_STATE.processing 鏄?AtomicBool锛屽垵濮嬩负 false
+        // KB_STATE.processing 是 AtomicBool，初始为 false
         assert!(!KB_STATE.processing.load(Ordering::SeqCst));
     }
 
@@ -401,7 +401,7 @@ mod tests {
     fn test_processing_flag_debounce() {
         let _guard = PROCESSING_STATE_TEST_LOCK.lock().unwrap();
         KB_STATE.processing.store(false, Ordering::SeqCst);
-        // 妯℃嫙 compare_exchange 琛屼负
+        // 模拟 compare_exchange 行为
         // 第一次应成功（false → true）
         let first =
             KB_STATE
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn test_image_formats_equal_same() {
         assert!(image_formats_equal(&[8, 2], &[8, 2]));
-        assert!(image_formats_equal(&[8, 2], &[2, 8])); // 蹇界暐椤哄簭
+        assert!(image_formats_equal(&[8, 2], &[2, 8])); // 忽略顺序
     }
 
     #[test]
@@ -598,7 +598,7 @@ fn handle_ctrl_c(
         let _ = win.show();
         // 同步鼠标钩子的工具栏可见状态，确保点击外部可以正确隐藏
         crate::hooks::set_toolbar_visible(true);
-        // 鏇存柊绐楀彛鍙ユ焺缂撳瓨
+        // 更新窗口句柄缓存
         if let Ok(hwnd) = win.hwnd() {
             crate::hooks::mouse::update_toolbar_hwnd(hwnd.0);
         }
@@ -625,7 +625,7 @@ fn image_formats_equal(old: &[u32], new_formats: &[u32]) -> bool {
 }
 
 /// 检查当前剪贴板是否包含图片格式
-/// 鍦?OpenClipboard 鐘舵€佷笅璋冪敤
+/// 在 OpenClipboard 状态下调用
 unsafe fn clipboard_has_image_inner() -> bool {
     let mut fmt = 0u32;
     loop {
@@ -682,7 +682,7 @@ unsafe fn read_clipboard_image_data() -> (Option<Vec<u8>>, bool) {
 }
 
 /// 读取当前剪贴板的文本内容（1: 带长度上限保护）
-/// 蹇呴』鍦?OpenClipboard 鐘舵€佷笅璋冪敤
+/// 必须在 OpenClipboard 状态下调用
 unsafe fn read_clipboard_text_inner() -> Option<String> {
     let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
     if handle.is_invalid() {

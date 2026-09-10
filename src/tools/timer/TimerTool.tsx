@@ -25,6 +25,12 @@ interface TimerItem {
   laps: number[];
 }
 interface TimersPayload { timers: TimerItem[]; }
+/** 用户自定义的倒计时预设：名称可空，空名时按分钟数生成默认标签。 */
+interface CountdownPreset {
+  id: string;
+  name: string;
+  minutes: number;
+}
 interface CalendarCell { date: Date; isCurrentMonth: boolean; }
 
 const LUNAR_DAY_NAMES = [
@@ -36,9 +42,16 @@ const LUNAR_DAY_NAMES = [
 const RING_RADIUS = 50;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 const CLOCK_FACE_KEY = "levitaire-timer-clock-style";
+/** 记住上次停留的页签（时钟/倒计时/秒表/日历），重开工具时直接恢复 */
+const TIMER_VIEW_KEY = "levitaire-timer-view";
+const TIMER_VIEWS: View[] = ["clock", "countdown", "stopwatch", "calendar"];
 const CLOCK_FACE_CENTER = 60;
 /** 鼠标移出工具区域后，延迟收起顶部工具条的时间（避免划过边缘时闪烁） */
 const CHROME_COLLAPSE_DELAY_MS = 200;
+/** 倒计时自定义预设的本地存储键 */
+const COUNTDOWN_PRESETS_KEY = "levitaire-timer-presets";
+/** 倒计时允许的最大分钟数（与设定按钮的 24 小时上限保持一致） */
+const COUNTDOWN_MAX_MINUTES = 1440;
 
 function formatLunarDate(date: Date): string {
   try {
@@ -105,6 +118,45 @@ function formatTime(seconds: number): string {
   return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}` : `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+function genId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `p_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+}
+
+/** 把分钟数限制到倒计时允许的 [1, 1440] 范围。 */
+function clampCountdownMinutes(value: number): number {
+  const rounded = Math.round(value);
+  return Math.min(COUNTDOWN_MAX_MINUTES, Math.max(1, rounded));
+}
+
+/** 预设芯片展示文本：有名称时“名称 N分”，否则退化为“N 分钟”。 */
+function presetChipLabel(name: string, minutes: number): string {
+  const trimmed = name.trim();
+  return trimmed ? `${trimmed} ${minutes}分` : `${minutes} 分钟`;
+}
+
+/** 读取本地保存的倒计时预设，忽略损坏/越界条目，保证其余数据可用。 */
+function loadCountdownPresets(): CountdownPreset[] {
+  try {
+    const raw = localStorage.getItem(COUNTDOWN_PRESETS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const candidate = item as Partial<CountdownPreset>;
+      const minutes = Number(candidate.minutes);
+      if (!Number.isFinite(minutes) || minutes < 1 || minutes > COUNTDOWN_MAX_MINUTES) return [];
+      const name = typeof candidate.name === "string" ? candidate.name.trim().slice(0, 24) : "";
+      return [{ id: typeof candidate.id === "string" && candidate.id ? candidate.id : genId(), name, minutes: clampCountdownMinutes(minutes) }];
+    });
+  } catch {
+    return [];
+  }
+}
+
 /** 表盘刻度/数字的极坐标换算：0° 指向 12 点方向，角度顺时针递增。 */
 function facePoint(radius: number, deg: number): { x: number; y: number } {
   const rad = (deg * Math.PI) / 180;
@@ -162,7 +214,10 @@ function AnalogFace({ now }: { now: Date }) {
 
 function TimerTool() {
   const win = useMemo(() => getCurrentWebviewWindow(), []);
-  const [view, setView] = useState<View>("clock");
+  const [view, setView] = useState<View>(() => {
+    const stored = localStorage.getItem(TIMER_VIEW_KEY) as View | null;
+    return stored && TIMER_VIEWS.includes(stored) ? stored : "clock";
+  });
   const [chromeOpen, setChromeOpen] = useState(false);
   const [display, setDisplay] = useState<Display>(() => localStorage.getItem("levitaire-timer-display") === "ring" ? "ring" : "compact");
   const [clockFace, setClockFace] = useState<ClockFace>(() => localStorage.getItem(CLOCK_FACE_KEY) === "analog" ? "analog" : "digital");
@@ -172,6 +227,10 @@ function TimerTool() {
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState("");
   const [customMinutes, setCustomMinutes] = useState("5");
+  const [savedPresets, setSavedPresets] = useState<CountdownPreset[]>(loadCountdownPresets);
+  const [addingPreset, setAddingPreset] = useState(false);
+  const [presetNameDraft, setPresetNameDraft] = useState("");
+  const [presetMinutesDraft, setPresetMinutesDraft] = useState("5");
   const [lunarEnabled, setLunarEnabled] = useState(true);
   const [visibleMonth, setVisibleMonth] = useState(() => {
     const date = new Date();
@@ -181,6 +240,10 @@ function TimerTool() {
   const followsTodayRef = useRef(true);
   const lastCalendarDayRef = useRef(dateKey(new Date()));
   const creatingStopwatchRef = useRef(false);
+  const timersHydratedRef = useRef(false);
+  /** 本次挂载的初始页签：仅在打开即落在秒表页时自动补齐，避免用户已切走仍后台补建 */
+  const initialViewRef = useRef<View>(view);
+  const viewRef = useRef<View>(view);
   const shellRef = useRef<HTMLDivElement>(null);
   const chromeCloseTimer = useRef<number | null>(null);
 
@@ -250,8 +313,24 @@ function TimerTool() {
   }, [now]);
   useEffect(() => {
     const applyPayload = (payload: TimersPayload) => {
+      const nextStopwatch = payload.timers.find((item) => item.kind === "stopwatch") ?? null;
       setTimer(payload.timers.find((item) => item.kind === "countdown") ?? null);
-      setStopwatch(payload.timers.find((item) => item.kind === "stopwatch") ?? null);
+      setStopwatch(nextStopwatch);
+      // 仅首次数据到达时处理“秒表页签恢复”：
+      // 记忆页签为秒表但后端尚无秒表时自动补齐，否则开始/分段等操作会因缺少计时器而静默失效。
+      if (timersHydratedRef.current) return;
+      timersHydratedRef.current = true;
+      // 与手动点击“秒表”页签共用同一把创建锁，避免首屏数据未到时并发创建重复实例。
+      if (initialViewRef.current !== "stopwatch" || viewRef.current !== "stopwatch" || nextStopwatch || creatingStopwatchRef.current) return;
+      creatingStopwatchRef.current = true;
+      void invoke<TimersPayload>("create_timer", { input: { kind: "stopwatch", label: "秒表", durationSecs: 0 } })
+        .then((created) => {
+          if (!created) return;
+          setTimer(created.timers.find((item) => item.kind === "countdown") ?? null);
+          setStopwatch(created.timers.find((item) => item.kind === "stopwatch") ?? null);
+        })
+        .catch(() => {})
+        .finally(() => { creatingStopwatchRef.current = false; });
     };
     let changedSinceMount = false;
     let cancelled = false;
@@ -290,6 +369,11 @@ function TimerTool() {
   }, [view, win]);
   useEffect(() => { localStorage.setItem("levitaire-timer-display", display); }, [display]);
   useEffect(() => { localStorage.setItem(CLOCK_FACE_KEY, clockFace); }, [clockFace]);
+  useEffect(() => { localStorage.setItem(COUNTDOWN_PRESETS_KEY, JSON.stringify(savedPresets)); }, [savedPresets]);
+  useEffect(() => {
+    viewRef.current = view;
+    localStorage.setItem(TIMER_VIEW_KEY, view);
+  }, [view]);
 
   const value = timer?.remainingSecs ?? 0;
   const lunarDate = useMemo(() => formatLunarDate(now), [now]);
@@ -338,6 +422,50 @@ function TimerTool() {
     });
   }, [stopwatch]);
 
+  /** 套用某个分钟数：同步到自定义输入框再写入倒计时，保证书签保存时默认值与生效时长一致。 */
+  const applyDurationMinutes = (minutes: number) => {
+    setCustomMinutes(String(minutes));
+    if (timer) void mutateTimer(timer, "set_timer_duration", { seconds: minutes * 60 });
+  };
+  const applyPreset = (preset: CountdownPreset) => {
+    applyDurationMinutes(preset.minutes);
+  };
+  /** 打开“存为预设”编辑行：以自定义框或当前倒计时时长作为默认分钟数。 */
+  const startAddPreset = () => {
+    if (addingPreset) return;
+    const fallback = timer && timer.durationSecs > 0 ? clampCountdownMinutes(timer.durationSecs / 60) : 5;
+    const typed = Number(customMinutes);
+    const initial = Number.isInteger(typed) && typed >= 1 ? Math.min(COUNTDOWN_MAX_MINUTES, typed) : fallback;
+    setPresetNameDraft("");
+    setPresetMinutesDraft(String(initial));
+    setAddingPreset(true);
+  };
+  const commitAddPreset = () => {
+    const rawMinutes = presetMinutesDraft.trim();
+    if (!rawMinutes) return; // 空分钟数视为无效，保持编辑状态，避免静默保存成 1 分钟
+    const minutes = clampCountdownMinutes(Number(rawMinutes));
+    const name = presetNameDraft.trim().slice(0, 24);
+    setSavedPresets((current) => {
+      // 同名预设视为同一个方案：重复保存仅更新时长；未命名预设按分钟数归并。
+      const key = name ? `name:${name}` : `time:${minutes}`;
+      const existingIndex = current.findIndex((preset) => (preset.name ? `name:${preset.name}` : `time:${preset.minutes}`) === key);
+      if (existingIndex >= 0) {
+        const next = [...current];
+        next[existingIndex] = { ...next[existingIndex], name, minutes };
+        return next;
+      }
+      return [...current, { id: genId(), name, minutes }];
+    });
+    setAddingPreset(false);
+  };
+  const cancelAddPreset = () => {
+    setAddingPreset(false);
+    setPresetNameDraft("");
+  };
+  const removePreset = (id: string) => {
+    setSavedPresets((current) => current.filter((preset) => preset.id !== id));
+  };
+
   // 顶部工具条收展：鼠标悬浮到工具区域时展开，移开后延迟收起。
   const openChrome = () => {
     if (chromeCloseTimer.current) {
@@ -381,7 +509,19 @@ function TimerTool() {
     </main> : view === "countdown" ? <main className={`timer-countdown-view${timer?.completed ? " is-complete" : ""}`}>
       <span className="timer-eyebrow">倒计时</span>
       {display === "ring" ? <div className="timer-ring-view"><svg viewBox="0 0 120 120" aria-hidden><circle className="timer-ring-bg" cx="60" cy="60" r={RING_RADIUS} />{progress > 0 && <circle className="timer-ring-fg" cx="60" cy="60" r={RING_RADIUS} style={{ strokeDasharray: RING_CIRCUMFERENCE, strokeDashoffset: RING_CIRCUMFERENCE * (1 - progress) }} />}</svg><strong>{formatTime(value)}</strong></div> : <strong className="timer-primary-value">{formatTime(value)}</strong>}
-      {timer && !timer.running && <div className="timer-presets">{[1, 5, 10, 25].map((minutes) => <button key={minutes} onClick={() => void mutateTimer(timer, "set_timer_duration", { seconds: minutes * 60 })}>{minutes}分</button>)}<input aria-label="自定义分钟数" inputMode="numeric" value={customMinutes} onChange={(event) => setCustomMinutes(event.target.value.replace(/[^0-9]/g, "").slice(0, 4))} /><button disabled={!customMinutes} onClick={() => void mutateTimer(timer, "set_timer_duration", { seconds: Math.min(1440, Math.max(1, Number(customMinutes))) * 60 })}>设定</button></div>}
+      {timer && !timer.running && <div className="timer-presets">{[1, 5, 10, 25].map((minutes) => <button key={minutes} onClick={() => applyDurationMinutes(minutes)}>{minutes}分</button>)}<input aria-label="自定义分钟数" inputMode="numeric" value={customMinutes} onChange={(event) => setCustomMinutes(event.target.value.replace(/[^0-9]/g, "").slice(0, 4))} /><button disabled={!customMinutes} onClick={() => void mutateTimer(timer, "set_timer_duration", { seconds: clampCountdownMinutes(Number(customMinutes)) * 60 })}>设定</button><button type="button" className="timer-preset-save" aria-label="保存为预设" data-tooltip="存为预设" onClick={startAddPreset}><Icon name="Bookmark" size={12} /></button></div>}
+      {timer && !timer.running && (savedPresets.length > 0 || addingPreset) && <div className="timer-my-presets">
+        {addingPreset && <div className="timer-preset-editor">
+          <input autoFocus className="timer-preset-name" aria-label="预设名称" placeholder="名称，如 学习" value={presetNameDraft} maxLength={24} onChange={(event) => setPresetNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") commitAddPreset(); if (event.key === "Escape") cancelAddPreset(); }} />
+          <span className="timer-preset-duration"><input aria-label="预设分钟数" inputMode="numeric" value={presetMinutesDraft} onChange={(event) => setPresetMinutesDraft(event.target.value.replace(/[^0-9]/g, "").slice(0, 4))} onKeyDown={(event) => { if (event.key === "Enter") commitAddPreset(); if (event.key === "Escape") cancelAddPreset(); }} /><em>分</em></span>
+          <button type="button" aria-label="保存预设" data-tooltip="保存" disabled={!presetMinutesDraft} onClick={commitAddPreset}><Icon name="Check" size={12} /></button>
+          <button type="button" aria-label="取消保存" data-tooltip="取消" onClick={cancelAddPreset}><Icon name="X" size={12} /></button>
+        </div>}
+        {savedPresets.map((preset) => <span key={preset.id} className="timer-preset-chip">
+          <button type="button" title={`应用预设：${presetChipLabel(preset.name, preset.minutes)}`} onClick={() => applyPreset(preset)}>{presetChipLabel(preset.name, preset.minutes)}</button>
+          <button type="button" className="timer-preset-remove" aria-label={`删除${presetChipLabel(preset.name, preset.minutes)}`} onClick={() => removePreset(preset.id)}><Icon name="X" size={10} /></button>
+        </span>)}
+      </div>}
       <div className="timer-controls"><button className="timer-play" onClick={() => void mutateTimer(timer, timer?.running ? "pause_timer" : "start_timer")}><Icon name={timer?.running ? "Pause" : "Play"} size={16} />{timer?.running ? "暂停" : "开始"}</button><button aria-label="增加一分钟" data-tooltip="增加一分钟" onClick={() => void mutateTimer(timer, "add_timer_seconds", { seconds: 60 })}><Icon name="Plus" size={16} /></button><button aria-label="重置倒计时" data-tooltip="重置" onClick={() => void mutateTimer(timer, "reset_timer")}><Icon name="RotateCcw" size={15} /></button></div>
     </main> : view === "stopwatch" ? <main className="timer-stopwatch-view">
       {editingLabel ? <input className="timer-label-input" autoFocus value={labelDraft} maxLength={60} onChange={(event) => setLabelDraft(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") commitRename(); if (event.key === "Escape") { setLabelDraft(stopwatch?.label ?? ""); setEditingLabel(false); } }} /> : <button type="button" className="timer-eyebrow timer-label" title="双击重命名" onDoubleClick={startRename}><Icon name="Pencil" size={11} />{stopwatch?.label ?? "秒表"}</button>}

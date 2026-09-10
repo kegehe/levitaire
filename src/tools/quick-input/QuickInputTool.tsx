@@ -20,6 +20,8 @@ interface WheelItem {
   text: string;
   /** 是否为剪贴板历史项（历史项用不同颜色区分） */
   isHistory: boolean;
+  /** 是否为收藏的历史项（收藏项固定在历史区最前，用星标区分） */
+  isFavorite?: boolean;
 }
 
 /** 后端 quick-input-start / quick-input-mouse-move 事件 payload */
@@ -266,7 +268,9 @@ function QuickInputTool() {
   const refreshItems = async () => {
     const [snippetsJson, history, snippetsEnabled] = await Promise.all([
       invoke<string>("get_quick_input_snippets").catch(() => ""),
-      invoke<Array<{ preview: string; text: string }>>("get_quick_input_history").catch(() => []),
+      invoke<Array<{ preview: string; text: string; favorite?: boolean }>>(
+        "get_quick_input_history",
+      ).catch(() => []),
       invoke<boolean>("get_quick_input_snippets_enabled").catch(() => true),
     ]);
     const next: WheelItem[] = [];
@@ -283,10 +287,15 @@ function QuickInputTool() {
         /* 忽略解析错误 */
       }
     }
-    // 剪贴板历史（最新在前）
+    // 剪贴板历史（收藏项已在后端排到最前）
     for (const h of history) {
       if (h.text) {
-        next.push({ label: h.preview || h.text.slice(0, 30), text: h.text, isHistory: true });
+        next.push({
+          label: h.preview || h.text.slice(0, 30),
+          text: h.text,
+          isHistory: true,
+          isFavorite: !!h.favorite,
+        });
       }
     }
     setItems(next);
@@ -644,14 +653,17 @@ function QuickInputTool() {
             >
               {s.label}
             </text>
-            {/* 类型标记：预设词=书签、历史=时钟，与底色差异共同区分两类条目 */}
+            {/* 类型标记：预设词=书签、历史=时钟、收藏历史=星标；与底色差异共同区分条目类型 */}
             <g
               transform={`translate(${s.ix - s.iconSize / 2} ${s.iy - s.iconSize / 2})`}
               className="quick-input-type-icon"
               data-history={s.item.isHistory ? "true" : "false"}
+              data-favorite={s.item.isFavorite ? "true" : "false"}
               pointerEvents="none"
             >
-              {s.item.isHistory ? (
+              {s.item.isFavorite ? (
+                <Icon name="Star" size={s.iconSize} />
+              ) : s.item.isHistory ? (
                 <Icon name="History" size={s.iconSize} />
               ) : (
                 <Icon name="Bookmark" size={s.iconSize} />

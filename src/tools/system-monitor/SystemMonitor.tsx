@@ -33,6 +33,7 @@ interface MonitorStats {
   net: { name: string; rx_rate: number; tx_rate: number }[];
   disks: { mount_point: string; total: number; available: number; kind: string }[];
   disk_io: { read_rate: number; write_rate: number } | null;
+  gpu: { has_gpu: boolean; usage: number; memory_used: number; memory_total: number };
   battery: { has_battery: boolean; percent: number; charging: boolean };
 }
 
@@ -150,6 +151,7 @@ function SystemMonitor() {
   const memHistRef = useRef<number[]>([]);
   const netHistRef = useRef<number[]>([]);
   const diskIoHistRef = useRef<number[]>([]);
+  const gpuHistRef = useRef<number[]>([]);
   const monitorBodyRef = useRef<HTMLDivElement>(null);
 
   const pushSample = (s: MonitorStats) => {
@@ -168,6 +170,8 @@ function SystemMonitor() {
     netHistRef.current = push(netHistRef.current, totalNet);
     const totalDiskIo = s.disk_io ? s.disk_io.read_rate + s.disk_io.write_rate : 0;
     diskIoHistRef.current = push(diskIoHistRef.current, totalDiskIo);
+    // 防御：旧版后端可能暂缺 gpu 字段，避免运行时崩溃
+    gpuHistRef.current = push(gpuHistRef.current, s.gpu?.usage ?? 0);
   };
 
   // 独立 WebView 需要自行初始化主题和透明背景，避免首帧闪烁。
@@ -477,6 +481,27 @@ function SystemMonitor() {
                   : undefined
               }
             />
+            {stats?.gpu?.has_gpu && (
+              <MetricCard
+                label="GPU"
+                value={stats?.gpu ? `${stats.gpu.usage.toFixed(0)}%` : "--"}
+                data={gpuHistRef.current}
+                max={100}
+                color="var(--color-chart-gpu)"
+                showTrend={!isMini}
+                extra={
+                  stats?.gpu && stats.gpu.memory_total > 0
+                    ? isMini
+                      ? `${formatBytes(stats.gpu.memory_used)}`
+                      : `${formatBytes(stats.gpu.memory_used)} / ${formatBytes(
+                          stats.gpu.memory_total,
+                        )} 显存`
+                    : isMini
+                      ? `显存 ${formatBytes(stats?.gpu?.memory_used ?? 0)}`
+                      : undefined
+                }
+              />
+            )}
           </div>
 
           {/* 磁盘 */}

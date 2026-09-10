@@ -146,6 +146,11 @@
   color: var(--color-brand);
 }
 
+/* 收藏历史项：金色星标，与普通历史(时钟)区分 */
+.quick-input-type-icon[data-favorite="true"] {
+  color: #eab308;
+}
+
 /* 高亮扇区的类型图标：随标签一起反白，保证在 accent 底上清晰可读 */
 .quick-input-sector-active ~ .quick-input-type-icon {
   color: var(--color-fg-on-accent);

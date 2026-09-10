@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    # 仓库默认分支为 master；同时覆盖 main，避免分支改名后 CI 静默失效
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend · typecheck / lint / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test
+
+  backend:
+    name: Backend · clippy / test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # clippy 只作为提示（不启用 -D warnings）：避免 Rust 工具链升级引入新 lint
+      # 时 CI 意外翻红。真正阻断合并的是下面的单元测试。
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml

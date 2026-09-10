@@ -3,6 +3,8 @@ import { vi } from "vitest";
 // Mock @tauri-apps/api/core
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
+  // 便利贴等组件用 convertFileSrc 把本地路径转成 asset: URL 预览；测试环境直接透传。
+  convertFileSrc: vi.fn((path: string) => `asset://localhost/${String(path).replace(/\\/g, "/")}`),
 }));
 
 // Mock @tauri-apps/api/event

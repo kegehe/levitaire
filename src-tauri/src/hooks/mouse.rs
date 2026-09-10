@@ -24,6 +24,10 @@ struct HookState {
     orb_hwnd: AtomicPtr<std::ffi::c_void>,
     utility_hub_hwnd: AtomicPtr<std::ffi::c_void>,
     toolbar_visible: AtomicBool,
+    /// 悬浮球窗口是否可见。隐藏后即使 orb_hwnd 仍存在
+    /// （GetWindowRect 对隐藏窗口也返回其矩形），也不再把该区域点击
+    /// 当作悬浮球交互，避免隐藏状态下点击原位置仍弹出工具面板。
+    orb_visible: AtomicBool,
     /// 二维码预览模式：为 true 时点击工具栏外部不隐藏窗口
     qrcode_preview: AtomicBool,
     /// 截图模式：为 true 时跳过选区检测，避免截图遮罩上的拖拽误触发文字工具栏
@@ -75,6 +79,7 @@ static STATE: HookState = HookState {
     orb_hwnd: AtomicPtr::new(std::ptr::null_mut()),
     utility_hub_hwnd: AtomicPtr::new(std::ptr::null_mut()),
     toolbar_visible: AtomicBool::new(false),
+    orb_visible: AtomicBool::new(true),
     qrcode_preview: AtomicBool::new(false),
     screenshot_mode: AtomicBool::new(false),
     smart_screenshot_mode: AtomicBool::new(false),
@@ -564,7 +569,10 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     crate::scroll_navigation::remember_foreground_snapshot(&app, foreground);
 
                     let orb_hwnd = STATE.orb_hwnd.load(Ordering::SeqCst);
-                    let on_orb = is_point_on_orb(orb_hwnd, x, y);
+                    // 悬浮球隐藏时（GetWindowRect 仍会返回其矩形），不把该位置点击
+                    // 当作悬浮球交互，否则隐藏状态下点击原位置会触发 orb-mouseup 弹面板
+                    let on_orb = STATE.orb_visible.load(Ordering::SeqCst)
+                        && is_point_on_orb(orb_hwnd, x, y);
                     STATE.mouse_down_on_orb.store(on_orb, Ordering::SeqCst);
                     // 圆形热区精确判定：仅落在视觉球内才在 mouseup 触发 orb 交互，
                     // 避免点击透明留白/角落误弹面板
@@ -713,6 +721,13 @@ pub fn stop_hook() {
 /// 供外部模块调用，同步工具栏可见状态
 pub fn set_toolbar_visible(visible: bool) {
     STATE.toolbar_visible.store(visible, Ordering::SeqCst);
+}
+
+/// 供外部模块调用，同步悬浮球可见状态：
+/// 隐藏后鼠标钩子不再把原位置点击当作悬浮球交互
+pub fn set_orb_visible(visible: bool) {
+    STATE.orb_visible.store(visible, Ordering::SeqCst);
+    crate::utils::logger::log("mouse", &format!("orb_visible = {}", visible));
 }
 
 /// Cache the utility hub HWND so the low-level mouse callback does not call

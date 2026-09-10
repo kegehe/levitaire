@@ -75,6 +75,38 @@ describe("TodoTool", () => {
     expect(document.querySelector(".todo-item-details")).not.toBeInTheDocument();
   });
 
+  it("filters tasks by the selected tag", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_todos") return Promise.resolve([
+        { ...item, id: "todo-work", title: "工作任务", tags: ["工作"] },
+        { ...item, id: "todo-life", title: "生活任务", tags: ["生活"] },
+      ]);
+      return Promise.resolve([]);
+    });
+    render(<TodoTool />);
+    await waitFor(() => expect(screen.getByText("工作任务")).toBeInTheDocument());
+    const tagFilter = screen.getByRole("combobox", { name: "按标签筛选" });
+    expect(screen.getByRole("option", { name: "工作" })).toBeInTheDocument();
+    fireEvent.change(tagFilter, { target: { value: "工作" } });
+    expect(screen.getByText("工作任务")).toBeInTheDocument();
+    expect(screen.queryByText("生活任务")).not.toBeInTheDocument();
+  });
+
+  it("normalizes imported tag whitespace when filtering", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_todos") return Promise.resolve([
+        { ...item, id: "todo-imported", title: "导入的任务", tags: [" 工作 "] },
+        { ...item, id: "todo-other", title: "其他任务", tags: ["生活"] },
+      ]);
+      return Promise.resolve([]);
+    });
+    render(<TodoTool />);
+    await waitFor(() => expect(screen.getByRole("option", { name: "工作" })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox", { name: "按标签筛选" }), { target: { value: "工作" } });
+    expect(screen.getByText("导入的任务")).toBeInTheDocument();
+    expect(screen.queryByText("其他任务")).not.toBeInTheDocument();
+  });
+
   it("offers undo after deleting a task and restores the same item", async () => {
     mockInvoke.mockImplementation((command) => {
       if (command === "get_todos") return Promise.resolve([item]);
@@ -222,6 +254,15 @@ describe("TodoTool", () => {
     act(() => emitMockEvent("todo-reminder", { item }));
     fireEvent.click(await screen.findByRole("button", { name: "10分" }));
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("snooze_todo", { id: item.id, minutes: 10 }));
+  });
+
+  it("clears an active reminder when the todo tool is disabled", async () => {
+    render(<TodoTool />);
+    await act(async () => { await Promise.resolve(); });
+    act(() => emitMockEvent("todo-reminder", { item }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    act(() => emitMockEvent("todo-reminders-silenced", {}));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
   });
 
   it("snoozes to tomorrow 9:00 through an absolute remind_at update", async () => {

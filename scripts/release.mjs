@@ -102,12 +102,45 @@ if (bumpOnly) {
 
 /* ── 2. 打包（复用现有 build：frontend + resources + tauri build --bundles nsis）── */
 if (!noBuild) {
-  console.log("开始打包（npm run tauri build -- --bundles nsis）…");
-  execFileSync("npm", ["run", "tauri", "build", "--", "--bundles", "nsis"], {
-    cwd: repoRoot,
-    stdio: "inherit",
-    shell: process.platform === "win32",
-  });
+  // 预检：ffmpeg.exe / onnxruntime.dll 体积大、未纳入 Git（见 .gitignore），
+  // 但发版必须打进安装包。缺失时在这里给出明确指引，而不是等 tauri build 报晦涩错误。
+  const requiredBinaries = [
+    {
+      path: join(repoRoot, "src-tauri/binaries/ffmpeg.exe"),
+      hint: "MP4 录制依赖。放到 src-tauri/binaries/ffmpeg.exe",
+    },
+    {
+      path: join(repoRoot, "src-tauri/libs/onnxruntime.dll"),
+      hint: "PaddleOCR 依赖。放到 src-tauri/libs/onnxruntime.dll",
+    },
+  ];
+  const missing = requiredBinaries.filter((b) => !existsSync(b.path));
+  if (missing.length > 0) {
+    const lines = missing.map((b) => `  · ${b.path}\n      ${b.hint}`).join("\n");
+    throw new Error(
+      `发版所需的二进制资源缺失：\n${lines}\n\n这些文件未纳入 Git（体积原因），请先补齐再发版。`,
+    );
+  }
+
+  console.log("开始打包（npm run tauri build -- --bundles nsis --config src-tauri/tauri.bundle.conf.json）…");
+  execFileSync(
+    "npm",
+    [
+      "run",
+      "tauri",
+      "build",
+      "--",
+      "--bundles",
+      "nsis",
+      "--config",
+      "src-tauri/tauri.bundle.conf.json",
+    ],
+    {
+      cwd: repoRoot,
+      stdio: "inherit",
+      shell: process.platform === "win32",
+    },
+  );
 }
 
 /* ── 3. 定位 NSIS 安装包并签名 ─────────────────────────── */
@@ -181,7 +214,7 @@ console.log(`  git push origin v${nextVersion}`);
 console.log(
   `  gh release create v${nextVersion} "${installer}" "release/latest.json" --notes "${notes.replace(/\\n/g, "\n")}"`,
 );
-console.log("\n然后把仓库根的 latest.json 提交并推到 main，GitHub Pages 会自动更新（当前 endpoints 指向 kegehe.github.io/levitaire/latest.json）。");
+console.log("\n然后把仓库根的 latest.json 提交并推到 master，GitHub Pages 会自动更新（当前 endpoints 指向 kegehe.github.io/levitaire/latest.json）。");
 
 /** 解析 git remote origin 得到 owner/repo，用于拼 release 下载地址。 */
 function readRemote() {

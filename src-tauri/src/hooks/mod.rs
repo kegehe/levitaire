@@ -35,3 +35,7 @@ pub fn set_toolbar_visible(visible: bool) {
 pub fn is_toolbar_visible() -> bool {
     mouse::is_toolbar_visible()
 }
+
+pub fn set_orb_visible(visible: bool) {
+    mouse::set_orb_visible(visible);
+}

@@ -41,14 +41,116 @@ function OverlaySwitcher() {
   const [mode, setMode] = useState<"screenshot" | "recording">("screenshot");
 
   // Keep a native liveness signal so a renderer crash/reload cannot leave a
-  // full-screen WebView error page visible indefinitely.
+  // full-screen WebView error page visible indefinitely. The watchdog that
+  // consumes this heartbeat only runs while a capture/recording session is
+  // active, so the interval is gated on session state instead of firing every
+  // 500ms for the lifetime of the always-resident (often hidden) overlay.
   useEffect(() => {
     const heartbeat = () => {
       void invoke("mark_screenshot_overlay_heartbeat").catch(() => {});
     };
+    // 立即上报一次存活：wait_for_screenshot_overlay_ready 依赖首个心跳确认
+    // 渲染器已挂载，会话激活后不能只依赖事件驱动的心跳补充。
     heartbeat();
-    const timer = window.setInterval(heartbeat, 500);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    // 并发守卫：active 事件可能密集触发（与初次补偿查询并存），start 内 await 期间
+    // 若第二个调用也通过 `timer === undefined` 检查，会让两个心跳 interval 并存且
+    // 只有一个 id 被记录，另一个永久泄漏。用 starting 锁串行化启动流程。
+    let starting = false;
+    // 查询在途期间若又收到 active 信号，先记下来；当本次查询恰落在会话激活之前的
+    // 过期快照上而返回 false 时，不直接放弃启动，而是补查一次接住那次被起始守卫
+    // 吞掉的激活——否则心跳永不启动，原生 watchdog 会误拆一个仍活跃的截图会话。
+    let pendingStart = false;
+    // stop() 递增。查询在途时若会话已结束（inactive 先一步到达，而 interval 尚未创建、
+    // 无法被 stop 清理），代次变化会让本次查询立即作废，避免事后落下一个空跑到
+    // 下一次会话结束的常驻心跳。
+    let epoch = 0;
+    const start = async () => {
+      if (timer !== undefined) return;
+      if (starting) {
+        pendingStart = true;
+        return;
+      }
+      starting = true;
+      let startedEpoch = epoch;
+      try {
+        while (true) {
+          if (disposed) return;
+          if (epoch !== startedEpoch) {
+            // 查询期间发生过 stop：本次尝试已作废。但若期间又收到 active 信号
+            // （pendingStart），说明会话已重新激活——重新锚定到新 epoch 再查一次，
+            // 不能把那次激活吞掉，否则心跳永不启动、原生 watchdog 会误拆活跃会话。
+            if (pendingStart) {
+              pendingStart = false;
+              startedEpoch = epoch;
+              continue;
+            }
+            return;
+          }
+          // 启动心跳前二次确认后端会话确实仍活跃：防止「挂载查询快照 stale」
+          // 导致会话已结束却仍启动常驻定时器（空转 IPC）。.catch 兜底使 starting 必复位。
+          const active = await invoke<boolean>("is_capture_session_active").catch(() => false);
+          // await 期间组件可能已卸载（disposed/stop 已清 timer），此时不可再启动，
+          // 否则新 interval 不在清理范围内、逃逸成常驻心跳。
+          if (disposed) return;
+          if (epoch !== startedEpoch) {
+            if (pendingStart) {
+              pendingStart = false;
+              startedEpoch = epoch;
+              continue;
+            }
+            return;
+          }
+          if (timer !== undefined) {
+            pendingStart = false;
+            return;
+          }
+          if (!active) {
+            // 无活跃会话。若本次查询期间收到过 active 信号（pendingStart），
+            // 说明快照已过期，补查一次以接住那次激活。
+            if (pendingStart) {
+              pendingStart = false;
+              continue;
+            }
+            return;
+          }
+          pendingStart = false;
+          timer = window.setInterval(heartbeat, 500);
+          return;
+        }
+      } finally {
+        starting = false;
+      }
+    };
+    const stop = () => {
+      epoch += 1;
+      if (timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+    };
+
+    // 先注册事件监听、再查询当前状态：确保 active/inactive 信号在查询落地前已就绪，
+    // 避免「查询判活跃 → start() 之后、inactive 监听生效前」这一窗口内会话结束，
+    // 导致 inactive 事件丢失、stop 永不调用而留下常驻心跳。
+    let disposed = false;
+    const unlistens: Array<Promise<() => void>> = [];
+    async function init() {
+      unlistens.push(listen("capture-session-active", start));
+      unlistens.push(listen("capture-session-inactive", stop));
+      await Promise.all([unlistens[0], unlistens[1]]);
+      if (disposed) return;
+      // 弥补挂载前会话已激活（active 事件已发出）时的事件丢失；
+      // start 内部会二次确认当前活跃状态，查询结果 stale 也不会误启动。
+      void start();
+    }
+    void init();
+
+    return () => {
+      disposed = true;
+      stop();
+      for (const u of unlistens) void u.then((fn) => fn());
+    };
   }, []);
 
   // 挂载时查询后端当前是否处于录制选区模式。

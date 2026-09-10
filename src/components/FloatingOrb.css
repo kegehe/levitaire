@@ -76,14 +76,18 @@
 }
 
 /* ── Breathing animation ──────────────────────────────── */
-/* 只动 transform，box-shadow 交给 transition 处理，避免动画屏蔽过渡 */
+/* 呼吸只动 opacity，不动 transform：orb 是透明置顶窗口且 .orb-inner 带
+   backdrop-filter，若对玻璃层做无限 scale 动画，毛玻璃采样区域会逐帧改变，
+   合成器每帧都要对桌面背景重新做高斯模糊（软件合成/虚拟机/远程桌面下直接
+   烧 CPU）。opacity 只影响层合成、不改变 backdrop 采样区域，不触发重采样，
+   视觉上保留轻微“呼吸”感。box-shadow 仍交给 transition，避免动画屏蔽过渡。 */
 @keyframes orb-breathe {
   0%,
   100% {
-    transform: scale(1);
+    opacity: 1;
   }
   50% {
-    transform: scale(1.03);
+    opacity: 0.93;
   }
 }
 

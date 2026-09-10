@@ -1,6 +1,7 @@
 //! General time tools: independently managed countdowns and stopwatches.
 
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -49,11 +50,12 @@ struct LegacyTimer { duration_secs: u64, remaining_secs: u64, running: bool, com
 
 fn default_version() -> u8 { 3 }
 struct StateData { next_id: u64, timers: Vec<TimerData> }
-pub struct TimerState { data: Mutex<StateData>, file_path: Option<PathBuf> }
+pub struct TimerState { data: Mutex<StateData>, file_path: Option<PathBuf>, wake: Mutex<mpsc::Sender<()>> }
 
 impl Default for TimerState {
     fn default() -> Self {
-        Self { data: Mutex::new(StateData { next_id: 2, timers: vec![countdown("timer-1".to_string(), "倒计时".to_string(), 300)] }), file_path: None }
+        let (wake, _) = mpsc::channel();
+        Self { data: Mutex::new(StateData { next_id: 2, timers: vec![countdown("timer-1".to_string(), "倒计时".to_string(), 300)] }), file_path: None, wake: Mutex::new(wake) }
     }
 }
 
@@ -111,6 +113,10 @@ impl TimerState {
                     timer.last_lap_elapsed_secs = timer.laps.iter().copied().sum();
                 }
                 restore_timer(timer);
+                // 兼容旧版本：运行中加时只顺延 deadline、未同步满量程，恢复时保证
+                // duration 至少覆盖剩余时间（且不越过 24h 上限），
+                // 避免进度环在 remaining > duration 时卡在 100%。
+                timer.duration_secs = timer.duration_secs.max(timer.remaining_secs.min(MAX_DURATION_SECS));
             }
             let mut data = state.data.lock().expect("timer state poisoned");
             data.next_id = saved.next_id.max(2);
@@ -180,7 +186,7 @@ impl TimerState {
     }
 
     pub fn start(&self, id: &str) -> Result<TimersPayload, String> {
-        self.with_timer(id, |timer| {
+        let result = self.with_timer(id, |timer| {
             if timer.running { return Ok(()); }
             let now = now_ms();
             match timer.kind {
@@ -188,7 +194,10 @@ impl TimerState {
                 TimerKind::Stopwatch => timer.started_unix_ms = Some(now),
             }
             timer.running = true; Ok(())
-        })
+        });
+        // 唤醒空闲的后台调度线程，使其立即转入按 500ms 周期推进倒计时。
+        if result.is_ok() { self.knock(); }
+        result
     }
 
     pub fn pause(&self, id: &str) -> Result<TimersPayload, String> {
@@ -214,9 +223,21 @@ impl TimerState {
     pub fn add_seconds(&self, id: &str, seconds: u64) -> Result<TimersPayload, String> {
         self.with_timer(id, |timer| {
             if timer.kind != TimerKind::Countdown { return Err("只能为倒计时加时".to_string()); }
-            let amount = seconds.clamp(1, 60 * 60);
-            if timer.running { timer.deadline_unix_ms = timer.deadline_unix_ms.map(|deadline| deadline.saturating_add(amount as i64 * 1000)); }
-            else { timer.remaining_secs = timer.remaining_secs.saturating_add(amount).min(MAX_DURATION_SECS); timer.duration_secs = timer.duration_secs.max(timer.remaining_secs); timer.completed = false; }
+            // 加时与满量程同步抬升：运行中顺延 deadline，其余状态直接增加剩余时间，
+            // 同时让 duration_secs（进度环满量程/重置基准）等额增长，
+            // 保证 remaining <= duration，避免进度环顶在 100% 或重置丢失刚加的时间。
+            if timer.running { update_running_timer(timer); }
+            let amount = seconds.clamp(1, 60 * 60).min(MAX_DURATION_SECS.saturating_sub(timer.remaining_secs));
+            if timer.running {
+                timer.deadline_unix_ms = timer.deadline_unix_ms.map(|deadline| deadline.saturating_add(amount as i64 * 1000));
+                update_running_timer(timer);
+            } else {
+                timer.remaining_secs = timer.remaining_secs.saturating_add(amount);
+                timer.completed = false;
+            }
+            // 满量程与加时等额增长，并保证 remaining <= duration <= MAX_DURATION_SECS；
+            // max 再取 min 的次序确保遗留的 over-MAX 脏状态也不会把 duration 顶出上限。
+            timer.duration_secs = timer.duration_secs.saturating_add(amount).max(timer.remaining_secs).min(MAX_DURATION_SECS);
             Ok(())
         })
     }
@@ -246,6 +267,14 @@ impl TimerState {
         let timer = data.timers.iter_mut().find(|timer| timer.id == id).ok_or_else(|| "计时器不存在".to_string())?;
         operation(timer)?; self.persist(&data); Ok(TimersPayload { timers: data.timers.iter().map(payload).collect() })
     }
+
+    /// 接收后台调度线程持有的唤醒通道发送端；启动计时后用于立即唤醒空闲线程。
+    fn set_wake(&self, tx: mpsc::Sender<()>) { *self.wake.lock().expect("timer wake poisoned") = tx; }
+
+    /// 通知后台调度线程有计时器开始运行（非阻塞，无接收端时静默）。
+    fn knock(&self) { let _ = self.wake.lock().expect("timer wake poisoned").send(()); }
+
+    fn has_running(&self) -> bool { self.data.lock().expect("timer state poisoned").timers.iter().any(|timer| timer.running) }
 
     fn tick(&self) -> (bool, Vec<String>) {
         let mut data = self.data.lock().expect("timer state poisoned");
@@ -281,8 +310,19 @@ fn update_running_timer(timer: &mut TimerData) {
 }
 
 pub fn start_scheduler(app: AppHandle) {
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        // 后台调度专用的唤醒通道：空闲时阻塞等待，仅在有运行中计时器时才周期唤醒。
+        let (wake_tx, wake_rx) = mpsc::channel::<()>();
         if let Some(state) = app.try_state::<TimerState>() {
+            state.set_wake(wake_tx);
+        }
+        loop {
+            // 有计时器运行时每 500ms 唤醒推进倒计时；空闲时在唤醒通道上阻塞，
+            // 直到某个计时器经 start() 唤醒，期间不再轮询扫描、加锁。
+            let running = app.try_state::<TimerState>().map(|s| s.has_running()).unwrap_or(false);
+            let wait = if running { Duration::from_millis(500) } else { Duration::from_secs(60) };
+            let _ = wake_rx.recv_timeout(wait);
+            let Some(state) = app.try_state::<TimerState>() else { continue };
             let (changed, completed) = state.tick();
             if changed { let _ = app.emit("timers-changed", state.payload()); }
             if !completed.is_empty() {
@@ -299,7 +339,6 @@ pub fn start_scheduler(app: AppHandle) {
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(500));
     });
 }
 
@@ -309,6 +348,61 @@ mod tests {
     #[test] fn default_has_one_idle_countdown() { let state = TimerState::default(); let payload = state.payload(); assert_eq!(payload.timers.len(), 1); assert_eq!(payload.timers[0].remaining_secs, 300); }
     #[test] fn create_supports_stopwatch_and_countdown() { let state = TimerState::default(); state.create(CreateTimerInput { kind: TimerKind::Stopwatch, label: "Study".to_string(), duration_secs: 0 }).unwrap(); let payload = state.payload(); assert_eq!(payload.timers.len(), 2); assert_eq!(payload.timers[1].kind, TimerKind::Stopwatch); }
     #[test] fn countdown_reset_restores_configured_duration() { let state = TimerState::default(); state.set_duration("timer-1", 42).unwrap(); state.start("timer-1").unwrap(); state.reset("timer-1").unwrap(); assert_eq!(state.payload().timers[0].remaining_secs, 42); }
+    #[test]
+    fn idle_add_seconds_extends_remaining_and_full_scale() {
+        let state = TimerState::default();
+        state.add_seconds("timer-1", 60).unwrap();
+        let timer = &state.payload().timers[0];
+        assert_eq!(timer.remaining_secs, 360);
+        assert_eq!(timer.duration_secs, 360);
+        state.reset("timer-1").unwrap();
+        assert_eq!(state.payload().timers[0].remaining_secs, 360);
+    }
+    #[test]
+    fn adding_seconds_after_completion_then_reset_keeps_added_time() {
+        let state = TimerState::default();
+        { let mut data = state.data.lock().unwrap(); let timer = &mut data.timers[0]; timer.remaining_secs = 0; timer.completed = true; }
+        state.add_seconds("timer-1", 60).unwrap();
+        let after_add = state.payload();
+        assert_eq!(after_add.timers[0].remaining_secs, 60);
+        assert_eq!(after_add.timers[0].duration_secs, 360);
+        state.reset("timer-1").unwrap();
+        assert_eq!(state.payload().timers[0].remaining_secs, 360);
+    }
+    #[test]
+    fn add_seconds_repairs_a_state_where_remaining_exceeded_full_scale() {
+        // 旧版本“运行中加时未同步满量程”可能在暂停/加载后留下 remaining > duration 的状态，
+        // 再次加时必须把满量程抬到覆盖剩余时间，否则进度环仍会卡在 100%。
+        let state = TimerState::default();
+        { let mut data = state.data.lock().unwrap(); let timer = &mut data.timers[0]; timer.remaining_secs = 400; timer.duration_secs = 300; timer.running = false; timer.completed = false; }
+        let timer = &state.add_seconds("timer-1", 60).unwrap().timers[0];
+        assert_eq!(timer.remaining_secs, 460);
+        assert!(timer.duration_secs >= timer.remaining_secs, "full scale must catch up to remaining");
+        state.reset("timer-1").unwrap();
+        assert_eq!(state.payload().timers[0].remaining_secs, 460);
+    }
+    #[test]
+    fn add_seconds_keeps_full_scale_within_max_for_over_max_remaining() {
+        // 旧版本可在已满 24h 的运行中继续加时，使 deadline 指向超过上限的剩余时间；
+        // 加时绝不能把满量程顶出 MAX_DURATION_SECS。
+        let state = TimerState::default();
+        { let mut data = state.data.lock().unwrap(); let timer = &mut data.timers[0]; timer.remaining_secs = MAX_DURATION_SECS + 1; timer.duration_secs = MAX_DURATION_SECS; timer.running = false; timer.completed = false; }
+        let timer = &state.add_seconds("timer-1", 60).unwrap().timers[0];
+        assert_eq!(timer.duration_secs, MAX_DURATION_SECS);
+    }
+    #[test]
+    fn running_add_seconds_keeps_remaining_within_full_scale() {
+        let state = TimerState::default();
+        state.start("timer-1").unwrap();
+        let base = state.payload().timers[0].remaining_secs;
+        let timer = &state.add_seconds("timer-1", 60).unwrap().timers[0];
+        assert!(timer.remaining_secs > base, "remaining should grow beyond the original duration");
+        assert!(timer.remaining_secs <= timer.duration_secs, "remaining must never exceed the ring full scale");
+        assert_eq!(timer.duration_secs, 360, "full scale should grow with the deadline");
+        state.reset("timer-1").unwrap();
+        let reset = &state.payload().timers[0];
+        assert_eq!(reset.remaining_secs, 360, "reset must re-arm the extended full scale, not discard the added minute");
+    }
     #[test] fn cannot_delete_the_only_timer() { let state = TimerState::default(); assert!(state.delete("timer-1").is_err()); }
     #[test] fn lap_requires_a_running_stopwatch() {
         let state = TimerState::default();

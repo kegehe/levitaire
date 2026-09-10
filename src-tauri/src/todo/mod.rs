@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc, Weekday};
@@ -15,6 +15,22 @@ use tauri_plugin_notification::NotificationExt;
 const MAX_TITLE_CHARS: usize = 500;
 const INBOX_LIST_ID: &str = "inbox";
 const MAX_LIST_NAME_CHARS: usize = 80;
+
+/// 待办变更 → 调度线程的唤醒通道。调度线程空闲时最长沉睡 60s，
+/// 若此时新建/修改了「近时到期的提醒」，写入路径会 send 一记唤醒信号，
+/// 让线程立即重算 next_reminder_in，避免提醒延迟触发最多 60s。
+fn scheduler_wake() -> &'static Mutex<Option<mpsc::Sender<()>>> {
+    static WAKE: std::sync::OnceLock<Mutex<Option<mpsc::Sender<()>>>> = std::sync::OnceLock::new();
+    WAKE.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn wake_scheduler() {
+    if let Ok(guard) = scheduler_wake().lock() {
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(());
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -662,6 +678,47 @@ impl TodoStore {
         Ok(due)
     }
 
+    /// 把指定 id 的到期提醒还原为“未触发”。调度线程在播报中途被禁用时调用，
+    /// 撤销 due_reminders 已批量打上的 reminder_fired_at，避免未播报提醒被吞掉。
+    pub fn unmark_reminders_fired(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut data = self.data.lock().map_err(|e| e.to_string())?;
+        let previous = data.clone();
+        let stamp = Utc::now().to_rfc3339();
+        let mut changed = false;
+        for item in &mut data.items {
+            if ids.contains(&item.id) && item.reminder_fired_at.is_some() {
+                item.reminder_fired_at = None;
+                item.updated_at = stamp.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_with_rollback(&mut data, previous)?;
+        }
+        Ok(())
+    }
+
+    /// 距离下一个「将来才到期」的提醒还剩多久；若没有未触发的未来提醒则返回 None，
+    /// 供后台调度线程据此精确阻塞，避免空闲时每 15 秒轮询扫描。
+    fn next_reminder_in(&self, now: DateTime<Utc>) -> Result<Option<Duration>, ()> {
+        let data = self.data.lock().map_err(|_| ())?;
+        let mut earliest: Option<DateTime<Utc>> = None;
+        for item in &data.items {
+            if item.deleted_at.is_some() || item.status != TodoStatus::Active || item.reminder_fired_at.is_some() {
+                continue;
+            }
+            let Some(remind) = item.remind_at.as_deref().and_then(|value| DateTime::parse_from_rfc3339(value).ok()) else { continue };
+            let remind = remind.with_timezone(&Utc);
+            if remind > now && earliest.is_none_or(|next| remind < next) { earliest = Some(remind); }
+        }
+        // to_std 对超出 std::time::Duration 范围的巨远期提醒返回 None，
+        // 此时返回 None 让调度线程回退到空闲等待，避免 sleep(0) 造成忙轮询。
+        Ok(earliest.and_then(|next| (next - now).to_std().ok()))
+    }
+
     fn save_locked(&self, data: &TodoFile) -> Result<(), String> {
         let content = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
         let temp = self
@@ -671,7 +728,11 @@ impl TodoStore {
         fs::rename(&temp, &self.file_path).map_err(|e| {
             let _ = fs::remove_file(&temp);
             format!("保存待办文件失败: {}", e)
-        })
+        })?;
+        // 任何待办写入都可能改变最近的提醒时间，唤醒后台调度线程及时重算，
+        // 避免它仍处于最长 60s 的空闲沉睡，导致新建/修改的近时提醒延迟触发。
+        wake_scheduler();
+        Ok(())
     }
 
     fn save_with_rollback(&self, data: &mut TodoFile, previous: TodoFile) -> Result<(), String> {
@@ -851,39 +912,104 @@ fn parse_datetime_value(value: serde_json::Value) -> Result<Option<String>, Stri
 }
 
 pub fn start_scheduler(app: AppHandle) {
-    std::thread::spawn(move || loop {
-        if let Some(state) = app.try_state::<TodoStore>() {
-            let tool_enabled = app
+    std::thread::spawn(move || {
+        const IDLE_WAIT: Duration = Duration::from_secs(60);
+        // 变更唤醒通道：空闲时阻塞等待，仅在待办写入（save_locked → wake_scheduler）
+        // 或下一个提醒临近时被唤醒，取代固定轮询，兼顾提示及时性与空闲功耗。
+        let (wake_tx, wake_rx) = mpsc::channel::<()>();
+        if let Ok(mut guard) = scheduler_wake().lock() {
+            *guard = Some(wake_tx);
+        }
+        loop {
+            let busy = app
                 .try_state::<crate::config::ConfigManager>()
-                .and_then(|config| config.get_todo_enabled().ok())
+                .map(|config| {
+                    config.get_todo_enabled().unwrap_or(false)
+                        && config.get_todo_reminders_enabled().unwrap_or(true)
+                })
                 .unwrap_or(false);
-            let reminders_enabled = app
-                .try_state::<crate::config::ConfigManager>()
-                .and_then(|config| config.get_todo_reminders_enabled().ok())
-                .unwrap_or(true);
-            if tool_enabled && reminders_enabled {
-                if let Ok(items) = state.due_reminders(Utc::now()) {
-                    for item in items {
-                        let _ =
-                            app.emit("todo-reminder", TodoReminderPayload { item: item.clone() });
-                        let sound = app
-                            .try_state::<crate::config::ConfigManager>()
-                            .and_then(|config| config.get_todo_reminder_sound().ok())
-                            .unwrap_or_else(|| "tone".to_string());
-                        if sound != "none" {
-                            crate::sound::play_tone();
+            if busy {
+                if let Some(state) = app.try_state::<TodoStore>() {
+                    if let Ok(items) = state.due_reminders(Utc::now()) {
+                        // due_reminders 收集时会把所有到期项标记为已触发，因此若在逐条
+                        // 播报中途被禁用而中断，必须把尚未播报的尾部项还原为未触发，
+                        // 否则这些提醒会被永久吞掉（重新启用后也不会补发）。
+                        let mut shown = 0usize;
+                        while shown < items.len() {
+                            let item = &items[shown];
+                            // The tool can be disabled between the loop-level check and
+                            // due_reminders(). Re-check immediately before emitting any
+                            // user-visible reminder so disabling the tool silences it at once.
+                            let enabled = app
+                                .try_state::<crate::config::ConfigManager>()
+                                .map(|config| {
+                                    config.get_todo_enabled().unwrap_or(false)
+                                        && config.get_todo_reminders_enabled().unwrap_or(true)
+                                })
+                                .unwrap_or(false);
+                            if !enabled {
+                                break;
+                            }
+                            // 通过启用检查即视为“已播报”：先推进 shown 再发送，
+                            // 这样发送后若被禁用，中断只影响后续项，本条不会重复补发。
+                            shown += 1;
+                            let _ =
+                                app.emit("todo-reminder", TodoReminderPayload { item: item.clone() });
+                            let still_enabled = app
+                                .try_state::<crate::config::ConfigManager>()
+                                .map(|config| {
+                                    config.get_todo_enabled().unwrap_or(false)
+                                        && config.get_todo_reminders_enabled().unwrap_or(true)
+                                })
+                                .unwrap_or(false);
+                            if !still_enabled {
+                                break;
+                            }
+                            let sound = app
+                                .try_state::<crate::config::ConfigManager>()
+                                .and_then(|config| config.get_todo_reminder_sound().ok())
+                                .unwrap_or_else(|| "tone".to_string());
+                            if sound != "none" {
+                                crate::sound::play_tone();
+                            }
+                            let still_enabled = app
+                                .try_state::<crate::config::ConfigManager>()
+                                .map(|config| {
+                                    config.get_todo_enabled().unwrap_or(false)
+                                        && config.get_todo_reminders_enabled().unwrap_or(true)
+                                })
+                                .unwrap_or(false);
+                            if !still_enabled {
+                                break;
+                            }
+                            let _ = app
+                                .notification()
+                                .builder()
+                                .title("待办提醒")
+                                .body(&item.title)
+                                .show();
                         }
-                        let _ = app
-                            .notification()
-                            .builder()
-                            .title("待办提醒")
-                            .body(&item.title)
-                            .show();
+                        if shown < items.len() {
+                            let unshown: Vec<String> =
+                                items[shown..].iter().map(|item| item.id.clone()).collect();
+                            let _ = state.unmark_reminders_fired(&unshown);
+                        }
                     }
                 }
             }
+            // 提醒未启用时无需精确计时，直接阻塞空闲等待；
+            // 启用时才精确等到下一个提醒到期时间，无待触发提醒时也回退空闲等待。
+            // recv_timeout 不持有 scheduler_wake 锁；变更到达时立即返回、及时重算。
+            let wait = if busy {
+                app.try_state::<TodoStore>()
+                    .and_then(|state| state.next_reminder_in(Utc::now()).ok())
+                    .flatten()
+                    .unwrap_or(IDLE_WAIT)
+            } else {
+                IDLE_WAIT
+            };
+            let _ = wake_rx.recv_timeout(wait.min(IDLE_WAIT));
         }
-        std::thread::sleep(Duration::from_secs(15));
     });
 }
 
@@ -931,6 +1057,31 @@ mod tests {
             },
             path,
         )
+    }
+
+    #[test]
+    fn next_reminder_in_sleeps_only_until_future_reminders() {
+        let now = Utc::now();
+        let mut future = test_item("future", 0);
+        future.remind_at = Some((now + ChronoDuration::minutes(5)).to_rfc3339());
+        // 已触发过的提醒不应再计入等待时间。
+        let mut fired = test_item("fired", 1);
+        fired.remind_at = Some((now + ChronoDuration::minutes(1)).to_rfc3339());
+        fired.reminder_fired_at = Some(now.to_rfc3339());
+        let (store, _path) = test_store(vec![future, fired]);
+        let wait = store.next_reminder_in(now).unwrap().unwrap();
+        assert!(wait > Duration::from_secs(4 * 60), "wait should target the 5-min reminder");
+        assert!(wait <= Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn next_reminder_in_is_none_when_no_future_reminders() {
+        let now = Utc::now();
+        // 已到期/已完成的提醒若未触发，属于应立刻触发而非阻塞等待的场景，均不计入。
+        let mut past = test_item("past", 0);
+        past.remind_at = Some((now - ChronoDuration::minutes(1)).to_rfc3339());
+        let (store, _path) = test_store(vec![past]);
+        assert!(store.next_reminder_in(now).unwrap().is_none());
     }
 
     #[test]

@@ -160,6 +160,7 @@
   --color-chart-mem: var(--color-brand-hover);
   --color-chart-net: var(--color-brand);
   --color-chart-disk: var(--color-brand-hover);
+  --color-chart-gpu: var(--green-600);
 
   /* Focus ring */
   --color-focus-ring: var(--color-brand);
@@ -333,6 +334,7 @@
   --color-chart-mem: var(--color-brand-hover);
   --color-chart-net: var(--color-brand);
   --color-chart-disk: var(--color-brand-hover);
+  --color-chart-gpu: var(--green-400);
 
   --color-focus-ring: var(--color-brand);
   --color-scrollbar: var(--color-brand);
