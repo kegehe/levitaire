@@ -41,17 +41,69 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const FAILED_CHECK_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// 应用启动后首次延迟（秒），给应用/网络就绪留余量
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(5);
+/// 建立连接的超时：网络不可达、代理未启动时快速失败，避免长时间挂起
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 读空闲超时：相邻数据块间隔超过该值即判定连接已失效。
+/// 这里用 read_timeout 而非整体超时，避免大安装包在慢速链路上被误杀。
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 取锁时忽略 poison。
+///
+/// 本状态的临界区只是读写几个字段，不存在需要感知的中间态；若因别处 panic 令锁被
+/// poison，继续用 `lock().unwrap()` 会让此后**所有**更新命令连带 panic（update 状态
+/// 查询、忽略版本、下载安装全都会挂）。这里与 `sticky_note` 的取锁风格保持一致。
+fn lock_ignore_poison<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 impl UpdaterState {
     fn current_info(&self) -> Option<UpdateInfo> {
-        self.available.lock().unwrap().clone()
+        lock_ignore_poison(&self.available).clone()
     }
     fn set_available(&self, info: UpdateInfo) {
-        *self.available.lock().unwrap() = Some(info);
+        *lock_ignore_poison(&self.available) = Some(info);
     }
     fn clear_available(&self) {
-        *self.available.lock().unwrap() = None;
+        *lock_ignore_poison(&self.available) = None;
     }
+}
+
+/// 下载字节累加器。
+///
+/// `Update::download` 的 `on_chunk` 回调首参是「本次分块长度」，不是累计已接收
+/// 字节数。直接透传给前端会让百分比恒为 0（单块 16KB / 安装包 96MB ≈ 0%），
+/// 必须累加后再上报；此处集中承担该语义，避免再次出现理解偏差。
+#[derive(Default)]
+struct DownloadProgress {
+    received: u64,
+}
+
+impl DownloadProgress {
+    /// 累加一个分块，返回累计已接收字节数
+    fn push(&mut self, chunk_length: usize) -> u64 {
+        self.received = self.received.saturating_add(chunk_length as u64);
+        self.received
+    }
+}
+
+/// 构建带超时保护的 updater 实例。
+///
+/// tauri-plugin-updater 在构造 `Update` 时把 timeout 硬编码为 `None`，导致
+/// `UpdaterBuilder::timeout` 对 `download()` 不生效；下载一旦卡住（系统代理未
+/// 生效时的典型表现：连接已建立但响应体始终不来）就会无限等待且不报错。
+/// 这里统一通过 `configure_client` 注入连接超时与读空闲超时兜底。
+///
+/// 代理方面不在此处显式设置：`reqwest 0.13` 的 `system-proxy` 特性已在
+/// Cargo.toml 中开启，客户端会自动读取 Windows 系统代理设置。
+fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    app.updater_builder()
+        .configure_client(|builder| {
+            builder
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
+        })
+        .build()
+        .map_err(|e| format!("updater 初始化失败: {e}"))
 }
 
 /// 启动后台周期检测任务。调用方（main.rs setup）负责 app.manage(UpdaterState)。
@@ -71,9 +123,7 @@ pub fn start_periodic_check(app: AppHandle) {
 
 /// 检查一次远程是否有新版本；有且未忽略则记录、发事件、拉起提示窗口。
 async fn detect_and_notify(app: &AppHandle) -> Result<(), String> {
-    let updater = app
-        .updater()
-        .map_err(|e| format!("updater 初始化失败: {e}"))?;
+    let updater = build_updater(app)?;
     let update = match updater.check().await {
         Ok(opt) => opt,
         Err(e) => {
@@ -92,7 +142,7 @@ async fn detect_and_notify(app: &AppHandle) -> Result<(), String> {
     };
 
     let state = app.state::<UpdaterState>();
-    let dismissed = state.dismissed_version.lock().unwrap().clone();
+    let dismissed = lock_ignore_poison(&state.dismissed_version).clone();
     if dismissed.as_deref() == Some(update.version.as_str()) {
         return Ok(()); // 本周期已忽略该版本，不再弹
     }
@@ -174,7 +224,7 @@ pub fn get_update_status(state: tauri::State<'_, UpdaterState>) -> Option<Update
 #[tauri::command]
 pub fn dismiss_update(state: tauri::State<'_, UpdaterState>) {
     if let Some(info) = state.current_info() {
-        *state.dismissed_version.lock().unwrap() = Some(info.version);
+        *lock_ignore_poison(&state.dismissed_version) = Some(info.version);
         state.clear_available();
     }
 }
@@ -183,9 +233,7 @@ pub fn dismiss_update(state: tauri::State<'_, UpdaterState>) {
 #[tauri::command]
 #[allow(unreachable_code)]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
-    let updater = app
-        .updater()
-        .map_err(|e| format!("updater 初始化失败: {e}"))?;
+    let updater = build_updater(&app)?;
     let update = updater
         .check()
         .await
@@ -195,9 +243,11 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     crate::utils::logger::log("updater", &format!("开始下载 v{}", update.version));
 
     let app_for_emit = app.clone();
+    let mut progress = DownloadProgress::default();
     let bytes = update
         .download(
-            |received, total| {
+            |chunk_length, total| {
+                let received = progress.push(chunk_length);
                 let _ = app_for_emit.emit(
                     "update-progress",
                     &(serde_json::json!({
@@ -219,4 +269,45 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     crate::utils::logger::log("updater", "安装完成，重启应用");
     app.restart();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：进度必须是累计值，而非最后一次回调的分块长度
+    #[test]
+    fn test_progress_accumulates_chunk_lengths() {
+        let mut progress = DownloadProgress::default();
+        // 模拟连续三次分块回调
+        assert_eq!(progress.push(16_384), 16_384);
+        assert_eq!(progress.push(16_384), 32_768);
+        assert_eq!(progress.push(8_192), 40_960);
+        assert_eq!(progress.received, 40_960);
+    }
+
+    /// 回归：不能被误认为「单块长度即进度」——单块相对安装包极小，
+    /// 若透传则前端百分比长期为 0
+    #[test]
+    fn test_single_chunk_is_far_below_one_percent() {
+        let mut progress = DownloadProgress::default();
+        let received = progress.push(16_384);
+        // 0.1.4 安装包实测 96,023,891 字节
+        let total = 96_023_891u64;
+        assert_eq!(received * 100 / total, 0, "单块占比为 0%，故必须累加");
+        // 累加到一半时才应出现非零百分比
+        for _ in 0..(total / 2 / 16_384) {
+            progress.push(16_384);
+        }
+        assert!(progress.received * 100 / total > 40);
+    }
+
+    /// 累加溢出时饱和而非 panic（debug 构建下溢出会 panic）
+    #[test]
+    fn test_progress_saturates_on_overflow() {
+        let mut progress = DownloadProgress {
+            received: u64::MAX - 1,
+        };
+        assert_eq!(progress.push(1024), u64::MAX);
+    }
 }

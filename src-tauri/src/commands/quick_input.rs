@@ -15,8 +15,19 @@ pub fn get_quick_input_state() -> crate::quick_input::QuickInputState {
 }
 
 
+/// 启用/禁用快速输入转盘。
+///
+/// # 必须保持 `async`
+///
+/// 启用分支会调用 `quick_input::ensure_window()`，它会通过
+/// `WebviewWindowBuilder::build()` 创建 overlay 窗口（例如「启动时工具未启用 →
+/// 用户在工具面板打开」这条首次启用路径，窗口此时并不存在，必然走到 build）。
+/// 同步命令在 Windows 上会于主线程的 WebView2 IPC 回调内重入建窗而死锁，
+/// 冻结整个应用——与便利贴 `create_sticky_note` 是同一类问题。
+/// 参见 https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html
+/// 的 Known issues。改回 `pub fn` 会导致「首次启用快速输入即卡死」。
 #[tauri::command]
-pub fn set_quick_input_enabled(
+pub async fn set_quick_input_enabled(
     enabled: bool,
     app: tauri::AppHandle,
     config: State<'_, ConfigManager>,
@@ -232,8 +243,12 @@ pub fn quick_input_paste(text: String) -> Result<(), String> {
 /// 点击切换快速输入转盘：当前已激活则关闭（取消），否则打开并定位到鼠标处。
 /// 供前端（悬浮工具面板点击「快速输入」卡片）唤起转盘，语义与触发键单击一致。
 /// 打开前先确保 overlay 窗口已创建，避免运行时启用后立即点击唤起时窗口尚未就绪而静默失败。
+///
+/// 必须保持 `async`：`ensure_window` 会调用 `WebviewWindowBuilder::build()` 建窗，
+/// 同步命令在 Windows 上会在主线程的 WebView2 回调内重入建窗而死锁冻结整个应用；
+/// 平时窗口已在启动时预建、走不到 build 分支，但一旦被销毁后重新启用，同步版本必卡死。
 #[tauri::command]
-pub fn toggle_quick_input_wheel(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn toggle_quick_input_wheel(app: tauri::AppHandle) -> Result<(), String> {
     // 若窗口不存在则先创建（隐藏），保证 begin_wheel 的 emit_to 有目标可投递
     crate::quick_input::ensure_window(&app)?;
     crate::quick_input::toggle_wheel(&app);

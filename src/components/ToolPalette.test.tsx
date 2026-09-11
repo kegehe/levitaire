@@ -2,6 +2,7 @@ import { act, fireEvent, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { ensurePomodoroWindow } from "../utils/toolWindows";
+import { FLOATING_TOOLS } from "../tools/registry";
 import ToolPalette from "./ToolPalette";
 
 vi.mock("../utils/toolWindows", () => ({
@@ -93,5 +94,33 @@ describe("ToolPalette", () => {
     expect(
       container.querySelector('[data-tool-id="utility-hub"]')!.classList.contains("is-enabled"),
     ).toBe(true);
+  });
+
+  it("按类别分组渲染，且不丢任何工具", async () => {
+    const { container } = render(<ToolPalette />);
+    await act(flush);
+
+    const headings = Array.from(container.querySelectorAll(".palette-group-heading")).map(
+      (node) => node.textContent,
+    );
+    expect(headings).toEqual(["文字工具", "屏幕工具", "系统工具"]);
+
+    // 分组渲染后卡片总数必须仍等于注册表项数，避免工具被漏渲染
+    expect(container.querySelectorAll("[data-tool-id]")).toHaveLength(FLOATING_TOOLS.length);
+
+    // 分组归属正确：第一组是文字工具，不该混入屏幕工具
+    const textSection = container.querySelector(".palette-section")!;
+    expect(textSection.querySelector('[data-tool-id="text-toolbar"]')).not.toBeNull();
+    expect(textSection.querySelector('[data-tool-id="screenshot"]')).toBeNull();
+  });
+
+  it("把 registry 中的 description 渲染为卡片提示", async () => {
+    const { container } = render(<ToolPalette />);
+    await act(flush);
+
+    for (const tool of FLOATING_TOOLS) {
+      const card = container.querySelector(`[data-tool-id="${tool.id}"]`);
+      expect(card?.getAttribute("title")).toBe(`${tool.name}：${tool.description}`);
+    }
   });
 });

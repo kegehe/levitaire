@@ -112,8 +112,20 @@ pub fn set_sketch_enabled(
 }
 
 
+/// 捕获描稿背景：临时隐藏描稿窗后抓取整个显示器，返回 PNG base64。
+///
+/// # 必须保持 `async`，且编解码走 `spawn_blocking`
+///
+/// 前端传的是整个显示器尺寸，全屏 BitBlt + PNG 编码在高分屏上是数百毫秒到秒级的
+/// CPU/内存开销。同步命令会跑在主线程，这段开销会阻塞窗口事件循环，让整个应用
+/// （含所有 WebView 的 IPC）卡住；编码本身不依赖主线程，因此移到阻塞线程池。
+///
+/// 隐藏窗口仍必须落在主线程：`hide()` 在主线程是同步的 `ShowWindow(SW_HIDE)`，
+/// 跨线程调用只是投递消息。这里用 `is_visible()` 做同步屏障——它与 `hide()` 走
+/// 同一条事件循环消息队列（FIFO），返回即证明 `hide()` 已在主线程落地，
+/// 避免抓屏抓到尚未隐藏的描稿窗（原实现靠主线程直接 sleep 45ms，语义等价）。
 #[tauri::command]
-pub fn capture_sketch_background(
+pub async fn capture_sketch_background(
     app: tauri::AppHandle,
     left: i32,
     top: i32,
@@ -123,24 +135,36 @@ pub fn capture_sketch_background(
     if width <= 0 || height <= 0 {
         return Err("草稿背景尺寸无效".to_string());
     }
-    if let Some(window) = app.get_webview_window("sketch-overlay") {
+    let overlay = app.get_webview_window("sketch-overlay");
+    if let Some(window) = overlay.as_ref() {
         window
             .hide()
             .map_err(|e| format!("隐藏草稿窗口失败: {}", e))?;
-        std::thread::sleep(std::time::Duration::from_millis(45));
-        let result =
-            crate::screenshot::capture_screen_region(left, top, width as u32, height as u32)
-                .and_then(|bgra| {
-                    crate::screenshot::encode_png_base64(&bgra, width as u32, height as u32)
-                });
+        // 同步屏障：确认 hide 已在主线程生效（详见上方注释）
+        let _ = window.is_visible();
+    }
+    let has_overlay = overlay.is_some();
+
+    let result = tokio::task::spawn_blocking(move || {
+        if has_overlay {
+            // 等合成器真正把窗口移出画面后再抓屏（原实现在主线程 sleep，语义不变）
+            std::thread::sleep(std::time::Duration::from_millis(45));
+        }
+        crate::screenshot::capture_screen_region(left, top, width as u32, height as u32).and_then(
+            |bgra| crate::screenshot::encode_png_base64(&bgra, width as u32, height as u32),
+        )
+    })
+    .await
+    .map_err(|error| format!("描稿背景捕获任务失败: {}", error))?;
+
+    if let Some(window) = overlay.as_ref() {
         window
             .show()
             .map_err(|e| format!("恢复草稿窗口失败: {}", e))?;
         window
             .set_focus()
             .map_err(|e| format!("恢复草稿窗口焦点失败: {}", e))?;
-        return result;
     }
-    let bgra = crate::screenshot::capture_screen_region(left, top, width as u32, height as u32)?;
-    crate::screenshot::encode_png_base64(&bgra, width as u32, height as u32)
+
+    result
 }

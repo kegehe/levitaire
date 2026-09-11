@@ -259,11 +259,23 @@ pub fn count_words(text: String) -> Result<(usize, usize), String> {
 ### 最佳实践
 
 1. **保持轻量**：钩子回调与命令应快速返回，耗时操作放后台线程
-2. **错误处理**：命令返回 `Result<T, String>`，错误信息用中文，前端可直接展示
-3. **勿阻塞钩子**：不要在低级钩子回调里做耗时操作，否则会拖慢系统输入
-4. **状态管理**：新状态优先放进 Tauri `State`，避免继续新增模块级 `static`
-5. **配置读写**：新增配置项走 `config::ConfigManager`，它保证原子写入（临时文件 + rename）
-6. **提交前自检**：`npm run typecheck && npm run lint && npm run test`，以及 `cargo test`
+2. **建窗命令必须 `async`**：任何会调用 `WebviewWindowBuilder::build()` 的命令（含间接调用
+   `ensure_*_window` 这类辅助函数）都必须声明为 `pub async fn`，否则在 Windows 上会死锁并冻结
+   整个应用。非 `async` 命令由 Tauri 在主线程 inline 执行，而主线程此刻正处于 WebView2 的 IPC
+   回调内部，`build()` 需要主线程再处理一次窗口创建，永远等不到。见
+   [WebviewWindowBuilder 的 Known issues](https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html)。
+   前端用 JS `WebviewWindow` 建窗不受影响（走的是异步插件命令）。
+3. **更新下载统一走后端 `install_update`**：前端任何"下载并安装"入口都应
+   `invoke("install_update")` 并监听 `update-progress` 事件取进度，不要用 JS 插件
+   `update.downloadAndInstall()`。原因：`UpdaterBuilder::timeout` 对 `download()` 不生效
+   （插件在构造 `Update` 时把 timeout 硬编码为 `None`），后端是在 `configure_client` 里注入
+   **连接超时 + 读空闲超时**才兜住的；而 JS 侧只暴露「整体 timeout」，给 96MB 安装包设整体
+   超时会在慢速链路上误杀正常下载。`on_chunk` 的首参是**本次分块长度**，不是累计值，进度必须累加。
+4. **错误处理**：命令返回 `Result<T, String>`，错误信息用中文，前端可直接展示
+5. **勿阻塞钩子**：不要在低级钩子回调里做耗时操作，否则会拖慢系统输入
+6. **状态管理**：新状态优先放进 Tauri `State`，避免继续新增模块级 `static`
+7. **配置读写**：新增配置项走 `config::ConfigManager`，它保证原子写入（临时文件 + rename）
+8. **提交前自检**：`npm run typecheck && npm run lint && npm run test`，以及 `cargo test`
 
 ---
 

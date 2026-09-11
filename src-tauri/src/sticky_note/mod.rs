@@ -273,9 +273,34 @@ pub fn note_window_label(id: &str) -> String {
     format!("{}{}", NOTE_WINDOW_PREFIX, id)
 }
 
+/// 便签窗口「检查 + 创建」的串行锁。
+///
+/// 相关命令改为 `async` 后不再由主线程天然串行：启动预热（`FloatingOrb` 的
+/// `preloadEnabledToolWindows`）与打开管理窗都会调用 `restore_pinned_notes`，
+/// 用户点击唤出（`show_sticky_note`）也可能与之重叠。两个调用同时通过
+/// `get_webview_window` 的存在性检查后都会去 `build()` 同一个 label，
+/// 后者会拿到 "window label already exists" 错误。此处串行化整个检查+创建。
+///
+/// 锁内只做 `build()` 派发与窗口对象登记（非主线程调用不等待实际创建），
+/// 持有时间极短；`ensure_note_window` 内部不会回调自身，无重入死锁风险。
+static NOTE_WINDOW_INIT_LOCK: Mutex<()> = Mutex::new(());
+
 /// 获取（必要时创建）某张便签的悬浮窗。创建时不显示，由 show 逻辑统一摆位。
+///
+/// # 调用约束（Windows 死锁防护）
+///
+/// 本函数内部的 `WebviewWindowBuilder::build()` 绝不能在**同步** Tauri 命令里被触发。
+/// Tauri 在 Windows 上会把非 async 命令放在主线程上 inline 执行，而主线程此刻正处于
+/// WebView2 的 IPC 回调内部；`build()` 需要主线程再处理一次窗口创建，永远等不到，
+/// 导致整个应用死锁冻结。所有最终会走到这里的命令（commands/sticky.rs 的
+/// `create_sticky_note` / `show_sticky_note` / `restore_pinned_notes`）都必须保持 `async`。
+/// 参见 https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html
 pub fn ensure_note_window(app: &tauri::AppHandle, id: &str) -> Result<tauri::WebviewWindow, String> {
     let label = note_window_label(id);
+    // 存在性检查必须与创建同处锁内，否则并发调用会重复创建同名窗口
+    let _init_guard = NOTE_WINDOW_INIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(win) = app.get_webview_window(&label) {
         return Ok(win);
     }

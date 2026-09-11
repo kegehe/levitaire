@@ -38,7 +38,7 @@ export const FLOATING_TOOLS: FloatingTool[] = [
     id: "utility-hub",
     name: "通用工具",
     icon: "Grid3x3",
-    description: "打开取色、滚动导航等轻量小工具",
+    description: "内置取色器与滚动导航：拾取屏幕颜色、精确翻页长文档",
     category: "screen",
     defaultEnabled: true,
     loader: () => import("./utility-hub/UtilityHub"),

@@ -167,6 +167,20 @@
   background: transparent;
   cursor: pointer;
 }
+/* RGB 值：整行铺满，点击即复制。选择器必须带 .utility-color 前缀，
+   否则压不过 `.utility-color > button` 的 28px 固定尺寸。 */
+.utility-color > .utility-rgb {
+  grid-column: 1 / -1;
+  width: auto;
+  height: auto;
+  min-height: 24px;
+  padding: 3px 6px;
+  color: var(--color-fg-subtle);
+  font:
+    11px/1.2 "Cascadia Mono",
+    Consolas,
+    monospace;
+}
 .utility-recent {
   grid-column: 1 / -1;
   display: flex;

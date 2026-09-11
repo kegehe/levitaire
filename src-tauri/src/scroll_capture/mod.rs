@@ -371,18 +371,11 @@ impl LongCaptureState {
             .ok_or_else(|| "长截图结果不存在或已释放".to_string())
     }
 
-    pub fn preview(&self, result_id: u64) -> Result<String, String> {
-        let results = self.results.lock().map_err(|e| e.to_string())?;
-        let result = results
-            .get(&result_id)
-            .ok_or_else(|| "长截图结果不存在或已释放".to_string())?;
-        // The capture is already bounded by MAX_LONG_CAPTURE_PIXELS. Return
-        // the original pixels here so the preview never enlarges a blurry
-        // thumbnail; save/copy continue to use the same raw result.
-        let pixels = result.materialize();
-        crate::screenshot::encode_png_base64(&pixels, result.width, result.height)
-    }
-
+    /// 取出原始像素与尺寸（虚拟桌面物理坐标下的完整结果）。
+    /// 调用方自行释放锁后编码——`get_long_capture_preview` 正是据此把 PNG 编码
+    /// 移出主线程，避免大图编码阻塞窗口事件循环。
+    /// 结果已由 MAX_LONG_CAPTURE_PIXELS 约束，直接返回原始像素而非缩略图，
+    /// 预览/保存/复制共用同一份 raw 结果。
     pub fn raw(&self, result_id: u64) -> Result<(Vec<u8>, u32, u32), String> {
         let results = self.results.lock().map_err(|e| e.to_string())?;
         let result = results

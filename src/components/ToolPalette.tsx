@@ -13,9 +13,11 @@ import ToolIcon from "./ToolIcon";
 import {
   FLOATING_TOOLS,
   BACKEND_TOOLS,
+  CATEGORY_LABELS,
   getEnabledTools,
   setEnabledTools,
   type FloatingTool,
+  type ToolCategory,
 } from "../tools/registry";
 import {
   ensureScreenshotWindow,
@@ -43,6 +45,18 @@ const TOOL_COLORS: Record<string, string> = {
   "quick-input": "#1d9e75",
   "sticky-notes": "#d99a1b",
 };
+
+/** 面板分组顺序。
+ *
+ * 用 `Record<ToolCategory, number>` 而非数组常量：`ToolCategory` 将来新增成员时，
+ * 这里会**编译报错**并强制补上排序位。数组写法没有这层保护——漏加一个类别就会让
+ * 该类别下的工具在面板里静默消失。 */
+const CATEGORY_RANK: Record<ToolCategory, number> = {
+  text: 0,
+  screen: 1,
+  system: 2,
+};
+
 function ToolPalette() {
   const [enabledIds, setEnabledIds] = useState<string[]>(() => getEnabledTools());
   // ref 镜像最新 enabledIds，供异步失败回滚读取当前真值，避免闭包陈旧
@@ -92,6 +106,24 @@ function ToolPalette() {
         .filter((tool): tool is FloatingTool => Boolean(tool)),
     [toolOrder],
   );
+  // 工具 id → 类别：供分组渲染与「拖拽只允许同组」校验使用
+  const categoryById = useMemo(
+    () => new Map(FLOATING_TOOLS.map((tool) => [tool.id, tool.category])),
+    [],
+  );
+  // 按类别分组，组内沿用用户拖拽排序（toolOrder）的结果。
+  // 从工具自身推导分组（而不是遍历固定的类别列表），任何类别都不会被漏掉。
+  const groupedTools = useMemo(() => {
+    const byCategory = new Map<ToolCategory, FloatingTool[]>();
+    for (const tool of orderedTools) {
+      const list = byCategory.get(tool.category);
+      if (list) list.push(tool);
+      else byCategory.set(tool.category, [tool]);
+    }
+    return [...byCategory.entries()]
+      .map(([category, tools]) => ({ category, tools }))
+      .sort((a, b) => CATEGORY_RANK[a.category] - CATEGORY_RANK[b.category]);
+  }, [orderedTools]);
 
   // 同步主题（palette 是独立窗口）
   useLayoutEffect(() => {
@@ -307,6 +339,9 @@ function ToolPalette() {
 
   const moveTool = (fromId: string, toId: string) => {
     if (fromId === toId) return;
+    // 分组后面板按类别分段展示，跨类别拖拽会让工具在自身组内的相对位置变得不可预期
+    // （扁平 toolOrder 无法表达「插入到别的组的第几个」），故只允许同类别内排序。
+    if (categoryById.get(fromId) !== categoryById.get(toId)) return;
     setToolOrder((current) => {
       const next = [...current];
       const from = next.indexOf(fromId);
@@ -477,107 +512,121 @@ function ToolPalette() {
             {activateError}
           </button>
         )}
-        <div className="palette-grid">
-          {orderedTools.map((tool) => {
-            const enabled = enabledIds.includes(tool.id);
-            return (
-              <div
-                className={`palette-card ${enabled ? "is-enabled" : ""} ${activating ? "is-busy" : ""}${draggingToolId === tool.id ? " is-dragging" : ""}${dragOverToolId === tool.id && draggingToolId !== tool.id ? " is-drag-over" : ""}`}
-                key={tool.id}
-                data-tool-id={tool.id}
-                style={{ "--tool-color": TOOL_COLORS[tool.id] ?? "#1d9e75" } as CSSProperties}
-                onClick={() => {
-                  if (Date.now() - lastDragAt.current > 220) handleActivate(tool);
-                }}
-                role="button"
-                tabIndex={0}
-                onPointerDown={(e) => {
-                  if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
-                  pointerDrag.current = {
-                    pointerId: e.pointerId,
-                    fromId: tool.id,
-                    startX: e.clientX,
-                    startY: e.clientY,
-                    active: false,
-                  };
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                }}
-                onPointerMove={(e) => {
-                  const drag = pointerDrag.current;
-                  if (!drag || drag.pointerId !== e.pointerId) return;
-                  const distance = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY);
-                  if (!drag.active && distance < 6) return;
-                  drag.active = true;
-                  setDraggingToolId(drag.fromId);
-                  const target = document
-                    .elementFromPoint(e.clientX, e.clientY)
-                    ?.closest<HTMLElement>("[data-tool-id]");
-                  const targetId = target?.dataset.toolId;
-                  setDragOverToolId(targetId ?? null);
-                  if (targetId && targetId !== drag.fromId) moveTool(drag.fromId, targetId);
-                }}
-                onPointerUp={(e) => {
-                  const drag = pointerDrag.current;
-                  if (!drag || drag.pointerId !== e.pointerId) return;
-                  if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-                    e.currentTarget.releasePointerCapture(e.pointerId);
-                  }
-                  if (drag.active) lastDragAt.current = Date.now();
-                  pointerDrag.current = null;
-                  setDraggingToolId(null);
-                  setDragOverToolId(null);
-                }}
-                onPointerCancel={(e) => {
-                  const drag = pointerDrag.current;
-                  if (!drag || drag.pointerId !== e.pointerId) return;
-                  if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-                    e.currentTarget.releasePointerCapture(e.pointerId);
-                  }
-                  pointerDrag.current = null;
-                  lastDragAt.current = Date.now();
-                  setDraggingToolId(null);
-                  setDragOverToolId(null);
-                }}
-                onLostPointerCapture={(e) => {
-                  const drag = pointerDrag.current;
-                  if (!drag || drag.pointerId !== e.pointerId) return;
-                  pointerDrag.current = null;
-                  lastDragAt.current = Date.now();
-                  setDraggingToolId(null);
-                  setDragOverToolId(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.target !== e.currentTarget || e.repeat) return;
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    handleActivate(tool);
-                  }
-                }}
-              >
-                <span className="palette-grip" aria-hidden="true">
-                  <ToolIcon name="GripVertical" size={14} />
-                </span>
-                <div className="palette-card-icon">
-                  <ToolIcon name={tool.icon} size={22} />
-                </div>
-                <div className="palette-card-name">{tool.name}</div>
-                <button
-                  className={`palette-toggle ${enabled ? "is-on" : ""}`}
-                  aria-label={enabled ? "禁用" : "启用"}
-                  role="switch"
-                  aria-checked={enabled}
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleEnabled(tool.id);
-                  }}
-                >
-                  {enabled && <ToolIcon name="Check" size={11} />}
-                </button>
-              </div>
-            );
-          })}
-        </div>
+        {groupedTools.map(({ category, tools }) => (
+          <section
+            className="palette-section"
+            key={category}
+            aria-labelledby={`palette-group-${category}`}
+          >
+            <h3 className="palette-group-heading" id={`palette-group-${category}`}>
+              {CATEGORY_LABELS[category]}
+            </h3>
+            <div className="palette-grid">
+              {tools.map((tool) => {
+                const enabled = enabledIds.includes(tool.id);
+                return (
+                  <div
+                    className={`palette-card ${enabled ? "is-enabled" : ""} ${activating ? "is-busy" : ""}${draggingToolId === tool.id ? " is-dragging" : ""}${dragOverToolId === tool.id && draggingToolId !== tool.id ? " is-drag-over" : ""}`}
+                    key={tool.id}
+                    data-tool-id={tool.id}
+                    title={`${tool.name}：${tool.description}`}
+                    style={{ "--tool-color": TOOL_COLORS[tool.id] ?? "#1d9e75" } as CSSProperties}
+                    onClick={() => {
+                      if (Date.now() - lastDragAt.current > 220) handleActivate(tool);
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onPointerDown={(e) => {
+                      if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+                      pointerDrag.current = {
+                        pointerId: e.pointerId,
+                        fromId: tool.id,
+                        startX: e.clientX,
+                        startY: e.clientY,
+                        active: false,
+                      };
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                    }}
+                    onPointerMove={(e) => {
+                      const drag = pointerDrag.current;
+                      if (!drag || drag.pointerId !== e.pointerId) return;
+                      const distance = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY);
+                      if (!drag.active && distance < 6) return;
+                      drag.active = true;
+                      setDraggingToolId(drag.fromId);
+                      const target = document
+                        .elementFromPoint(e.clientX, e.clientY)
+                        ?.closest<HTMLElement>("[data-tool-id]");
+                      const targetId = target?.dataset.toolId;
+                      const sameCategory =
+                        !!targetId && categoryById.get(targetId) === categoryById.get(drag.fromId);
+                      setDragOverToolId(sameCategory ? targetId : null);
+                      if (sameCategory && targetId !== drag.fromId) moveTool(drag.fromId, targetId);
+                    }}
+                    onPointerUp={(e) => {
+                      const drag = pointerDrag.current;
+                      if (!drag || drag.pointerId !== e.pointerId) return;
+                      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                        e.currentTarget.releasePointerCapture(e.pointerId);
+                      }
+                      if (drag.active) lastDragAt.current = Date.now();
+                      pointerDrag.current = null;
+                      setDraggingToolId(null);
+                      setDragOverToolId(null);
+                    }}
+                    onPointerCancel={(e) => {
+                      const drag = pointerDrag.current;
+                      if (!drag || drag.pointerId !== e.pointerId) return;
+                      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                        e.currentTarget.releasePointerCapture(e.pointerId);
+                      }
+                      pointerDrag.current = null;
+                      lastDragAt.current = Date.now();
+                      setDraggingToolId(null);
+                      setDragOverToolId(null);
+                    }}
+                    onLostPointerCapture={(e) => {
+                      const drag = pointerDrag.current;
+                      if (!drag || drag.pointerId !== e.pointerId) return;
+                      pointerDrag.current = null;
+                      lastDragAt.current = Date.now();
+                      setDraggingToolId(null);
+                      setDragOverToolId(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget || e.repeat) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handleActivate(tool);
+                      }
+                    }}
+                  >
+                    <span className="palette-grip" aria-hidden="true">
+                      <ToolIcon name="GripVertical" size={14} />
+                    </span>
+                    <div className="palette-card-icon">
+                      <ToolIcon name={tool.icon} size={22} />
+                    </div>
+                    <div className="palette-card-name">{tool.name}</div>
+                    <button
+                      className={`palette-toggle ${enabled ? "is-on" : ""}`}
+                      aria-label={enabled ? "禁用" : "启用"}
+                      role="switch"
+                      aria-checked={enabled}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleEnabled(tool.id);
+                      }}
+                    >
+                      {enabled && <ToolIcon name="Check" size={11} />}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ))}
       </div>
       <div className="palette-footer">
         <span className="palette-count">

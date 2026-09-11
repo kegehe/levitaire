@@ -171,13 +171,26 @@ pub fn get_screenshot_monitor_bounds() -> Result<serde_json::Value, String> {
 /// 返回全屏缓存的 PNG base64（不带 data: 前缀），供前端放大镜铺底取像素。
 /// 缓存由 start_screenshot 在 overlay 显示前截取，为纯净桌面画面。
 /// 缓存未就绪时返回 Err，前端降级为仅显示十字线。
+///
+/// # 必须保持 `async`，且编码走 `spawn_blocking`
+///
+/// 这是整屏级别的 PNG 编码（缓存上限 `MAX_SCREENSHOT_PIXELS`，最坏约 128MB BGRA），
+/// 同步命令会跑在主线程，编码期间阻塞窗口事件循环、冻结整个应用。
+/// 这里先在 async 线程上取出像素并立即释放缓存锁，再交给阻塞线程池编码——
+/// 主线程与缓存锁都不参与编码，与 `capture_from_cache`「锁内取数据、锁外处理」
+/// 的既有做法一致（该处同样把 PNG 编码放在 spawn_blocking 里）。
 #[tauri::command]
-pub fn get_screen_cache_png(
+pub async fn get_screen_cache_png(
     cache: tauri::State<'_, crate::screenshot::ScreenCache>,
 ) -> Result<String, String> {
-    let guard = cache.pixels.lock().map_err(|e| e.to_string())?;
-    let c = guard.as_ref().ok_or_else(|| "截图缓存未就绪".to_string())?;
-    crate::screenshot::encode_png_base64(&c.bgra, c.width, c.height)
+    let (bgra, width, height) = {
+        let guard = cache.pixels.lock().map_err(|e| e.to_string())?;
+        let c = guard.as_ref().ok_or_else(|| "截图缓存未就绪".to_string())?;
+        (c.bgra.clone(), c.width, c.height)
+    };
+    tokio::task::spawn_blocking(move || crate::screenshot::encode_png_base64(&bgra, width, height))
+        .await
+        .map_err(|error| format!("截图缓存编码任务失败: {}", error))?
 }
 
 

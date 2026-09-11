@@ -16,11 +16,43 @@ type HubMode = "tools" | "color" | "scroll";
 
 const TOOLTIP_TOP_GUTTER_PX = 26;
 
+const RECENT_COLORS_KEY = "levitaire-utility-recent-colors";
+const HEX_PATTERN = /^#[0-9A-F]{6}$/;
+
+/** 读取历史配色：过滤非法值、去重、最多 6 个；存储不可用或数据损坏时返回空数组 */
+function readRecentColors(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(RECENT_COLORS_KEY) ?? "null");
+    if (!Array.isArray(parsed)) return [];
+    const valid = parsed.filter(
+      (item): item is string => typeof item === "string" && HEX_PATTERN.test(item),
+    );
+    return [...new Set(valid)].slice(0, 6);
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentColors(colors: string[]): void {
+  try {
+    localStorage.setItem(RECENT_COLORS_KEY, JSON.stringify(colors));
+  } catch {
+    /* 存储不可用（隐私模式 / 配额耗尽）时降级为仅内存保存 */
+  }
+}
+
+/** #RRGGBB → "rgb(r, g, b)"；非法输入返回 null */
+function toRgbText(hex: string): string | null {
+  const match = /^#([0-9A-Fa-f]{2})([0-9A-Fa-f]{2})([0-9A-Fa-f]{2})$/.exec(hex);
+  if (!match) return null;
+  return `rgb(${parseInt(match[1], 16)}, ${parseInt(match[2], 16)}, ${parseInt(match[3], 16)})`;
+}
+
 function UtilityHub() {
   const [mode, setMode] = useState<HubMode>("tools");
   const [color, setColor] = useState("#EAB308");
   const [draft, setDraft] = useState("#EAB308");
-  const [recent, setRecent] = useState<string[]>([]);
+  const [recent, setRecent] = useState<string[]>(() => readRecentColors());
   const [message, setMessage] = useState<string | null>(null);
   const hubRef = useRef<HTMLElement>(null);
   const lastSizeRef = useRef("");
@@ -40,6 +72,11 @@ function UtilityHub() {
       unlisten.then((stop) => stop());
     };
   }, []);
+
+  // 历史配色落盘：应用重启后仍可复用（仅在 recent 变化时写入）
+  useEffect(() => {
+    writeRecentColors(recent);
+  }, [recent]);
 
   useEffect(() => {
     const picked = listen<string>("utility-color-picked", async (event) => {
@@ -101,9 +138,16 @@ function UtilityHub() {
     setDraft(next);
     if (/^#[0-9A-F]{6}$/.test(next)) setColor(next);
   };
+  const rgbText = toRgbText(color);
   const copyColor = async () => {
     await invoke("copy_text", { text: color });
-    setMessage("已复制");
+    setMessage("已复制 HEX");
+    window.setTimeout(() => setMessage(null), 1200);
+  };
+  const copyRgb = async () => {
+    if (!rgbText) return;
+    await invoke("copy_text", { text: rgbText });
+    setMessage("已复制 RGB");
     window.setTimeout(() => setMessage(null), 1200);
   };
 
@@ -166,9 +210,9 @@ function UtilityHub() {
           <button
             type="button"
             onClick={() => void copyColor()}
-            aria-label="复制颜色"
-            data-tooltip="复制颜色"
-            title="复制颜色"
+            aria-label="复制 HEX"
+            data-tooltip="复制 HEX"
+            title="复制 HEX"
           >
             <Icon name="Copy" size={14} />
           </button>
@@ -182,6 +226,18 @@ function UtilityHub() {
             }}
             aria-label="调整颜色"
           />
+          {rgbText && (
+            <button
+              className="utility-rgb"
+              type="button"
+              onClick={() => void copyRgb()}
+              aria-label="复制 RGB 值"
+              data-tooltip="复制 RGB"
+              title="复制 RGB"
+            >
+              {rgbText}
+            </button>
+          )}
           {recent.length > 0 && (
             <div className="utility-recent">
               {recent.map((item) => (

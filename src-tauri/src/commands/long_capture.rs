@@ -44,6 +44,12 @@ pub fn start_long_capture(
         {
             return Err("截图会话已取消".into());
         }
+        // NOTE: 以下「隐藏全部 UI → 沉降等待 → 同步抓首帧」是有意留在主线程的，勿贸然
+        // 异步化。主线程下 `hide()` 是同步的 `ShowWindow(SW_HIDE)`，固定等待即可认为 UI
+        // 已消失；一旦挪到工作线程，hide 退化为消息投递、等待长度失去保证，首帧会混入
+        // Levitaire 自己的工具栏/浮球，且 `SetForegroundWindow` 的前台语义也会改变。
+        // 如需异步化，必须先给每处隐藏加 `is_visible()` 同步屏障，并为前台切换加生效校验
+        // （屏障写法见 commands/sketch.rs::capture_sketch_background）。
         // The first frame must be captured after the overlay and all Levitaire
         // UI have disappeared; otherwise the selection mask becomes part of it.
         overlay.hide().map_err(|e| e.to_string())?;
@@ -297,12 +303,24 @@ pub fn get_long_capture_status(
 }
 
 
+/// 取长截图结果的预览图（PNG base64）。
+///
+/// # 必须保持 `async`，且编码走 `spawn_blocking`
+///
+/// 长截图结果上限为 `MAX_LONG_CAPTURE_PIXELS`（3000 万像素，原始 BGRA 约 120MB），
+/// 对它做 PNG 编码是数百毫秒到秒级的开销。同步命令会跑在主线程，这段编码会阻塞
+/// 窗口事件循环、冻结整个应用——而此刻用户正在等待截图结果窗出现。
+/// 这里先用 `raw` 取出像素（同时释放 results 锁），再交给阻塞线程池编码，
+/// 与 `preview` 原语义一致（都是返回原始像素而非缩略图），但不再占用主线程与锁。
 #[tauri::command]
-pub fn get_long_capture_preview(
+pub async fn get_long_capture_preview(
     state: tauri::State<'_, crate::scroll_capture::LongCaptureState>,
     result_id: u64,
 ) -> Result<String, String> {
-    state.preview(result_id)
+    let (pixels, width, height) = state.raw(result_id)?;
+    tokio::task::spawn_blocking(move || crate::screenshot::encode_png_base64(&pixels, width, height))
+        .await
+        .map_err(|error| format!("长截图预览编码任务失败: {}", error))?
 }
 
 

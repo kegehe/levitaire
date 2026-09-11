@@ -21,6 +21,18 @@ rfd = "0.17"
 base64 = "0.22"
 chrono = "0.4"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"], default-features = false }
+# tauri-plugin-updater 内部使用 reqwest 0.13，但关闭了其默认特性（仅 json / stream /
+# rustls-no-provider）。reqwest 0.13 的 `system-proxy` 特性位于 default 中，未开启时
+# 客户端只读取 HTTP_PROXY / HTTPS_PROXY 环境变量，不读取 Windows 系统代理设置，
+# 会导致开局域网代理（Clash / v2ray 等系统代理模式）后更新检查与下载仍走直连而卡住。
+# 通过 Cargo 特性合并为同一份 reqwest 0.13 补开该特性；代码中不直接引用此别名。
+# 维护提示：特性按 major 版本合并，若将来 tauri-plugin-updater 改用 reqwest 0.14+，
+# 此处版本号需同步上调，否则该特性会落到一份废弃的 reqwest 上而静默失效
+# （症状：系统代理再次不生效）。验证方式：cargo tree -e features -i reqwest@<版本>
+# 应能看到 system-proxy。
+reqwest-0-13 = { package = "reqwest", version = "0.13", default-features = false, features = [
+    "system-proxy",
+] }
 tokio = { version = "1", features = ["rt", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"

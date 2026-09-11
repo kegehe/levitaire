@@ -50,8 +50,18 @@ pub fn get_sticky_note(
 
 
 /// 新建一张便签并立即在桌面显示聚焦（方便直接输入）。
+///
+/// # 必须保持 `async`
+///
+/// 本命令经 `show_note_window` 调用 `WebviewWindowBuilder::build()` 创建窗口。
+/// Tauri 在 Windows 上禁止在**同步**命令里建窗：非 async 命令在主线程上 inline
+/// 执行，而主线程此刻正处在 WebView2 的 IPC 回调内部，`build()` 所需的主线程
+/// 再次调度永远无法执行，整个应用会死锁冻结。
+/// 参见 https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html
+/// 的 Known issues（"On Windows, this function deadlocks when used in a synchronous
+/// command..."）。改回 `pub fn` 会重现「新建便利贴后应用卡死」。
 #[tauri::command]
-pub fn create_sticky_note(
+pub async fn create_sticky_note(
     app: tauri::AppHandle,
     color_id: Option<String>,
     x: Option<i32>,
@@ -107,8 +117,11 @@ pub fn set_sticky_note_position(
 
 
 /// 唤出某张（可能已收起）便签：标记 visible=true 并重建/聚焦窗口。
+///
+/// 必须保持 `async`：会经 `show_note_window` → `WebviewWindowBuilder::build()` 建窗，
+/// 与 `create_sticky_note` 同理，同步命令在 Windows 上会死锁。
 #[tauri::command]
-pub fn show_sticky_note(
+pub async fn show_sticky_note(
     app: tauri::AppHandle,
     id: String,
     store: State<'_, crate::sticky_note::NoteStore>,
@@ -205,8 +218,15 @@ pub fn save_sticky_note_image(
 
 /// 应用启动/管理窗挂载时调用：把所有已钉在桌面的便签窗口重建出来。
 /// 仅在工具启用时生效；不抢焦点。
+///
+/// # 必须保持 `async`
+///
+/// 这是「重启后整个应用卡死」的直接原因：本命令由 `preloadEnabledToolWindows()`
+/// 在启动时调用，循环里对每张 `visible` 便签执行 `WebviewWindowBuilder::build()`。
+/// 一旦改回同步命令，Windows 上每次启动都会死锁（浮球、托盘、右键菜单全部无响应），
+/// 且因为便签已落盘 `visible: true`，该状态会自我延续、每次启动复现。
 #[tauri::command]
-pub fn restore_pinned_notes(
+pub async fn restore_pinned_notes(
     app: tauri::AppHandle,
     store: State<'_, crate::sticky_note::NoteStore>,
     config_manager: State<'_, ConfigManager>,
@@ -217,9 +237,18 @@ pub fn restore_pinned_notes(
     let notes = store.list()?;
     let mut count = 0;
     for note in &notes {
-        if note.visible {
-            crate::sticky_note::show_note_window(&app, note, false)?;
-            count += 1;
+        if !note.visible {
+            continue;
+        }
+        // 单张便签重建失败不应中断其余便签的恢复。改 async 后本命令可能与管理窗
+        // 挂载时的另一次恢复并发，个别窗口会因竞态返回错误；若用 `?` 直接上抛，
+        // 一张便签的失败会让排在其后的所有已钉便签都恢复不出来。
+        match crate::sticky_note::show_note_window(&app, note, false) {
+            Ok(()) => count += 1,
+            Err(error) => crate::utils::logger::log(
+                "sticky_note",
+                &format!("恢复便签 {} 失败: {}", note.id, error),
+            ),
         }
     }
     Ok(count)

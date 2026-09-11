@@ -14,6 +14,7 @@ describe("UtilityHub", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearMockListeners();
+    localStorage.removeItem("levitaire-utility-recent-colors");
     mockInvoke.mockImplementation((command) => {
       if (command === "get_scroll_navigation_state") {
         return Promise.resolve({ precise: false, percent: null, fallbackAvailable: true });
@@ -82,5 +83,46 @@ describe("UtilityHub", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /关闭/ }));
     expect(mockInvoke).toHaveBeenCalledWith("hide_utility_hub");
+  });
+
+  it("shows the picked color as rgb and copies that value", async () => {
+    render(<UtilityHub />);
+    fireEvent.click(screen.getByRole("button", { name: /取色/ }));
+    emitMockEvent("utility-color-picked", "#123ABC");
+    await screen.findByDisplayValue("#123ABC");
+
+    const rgbButton = screen.getByRole("button", { name: "复制 RGB 值" });
+    expect(rgbButton).toHaveTextContent("rgb(18, 58, 188)");
+
+    fireEvent.click(rgbButton);
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("copy_text", { text: "rgb(18, 58, 188)" }),
+    );
+  });
+
+  it("persists picked colors so the history survives a remount", async () => {
+    const first = render(<UtilityHub />);
+    fireEvent.click(screen.getByRole("button", { name: /取色/ }));
+    emitMockEvent("utility-color-picked", "#123ABC");
+    await screen.findByDisplayValue("#123ABC");
+
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem("levitaire-utility-recent-colors") ?? "null")).toEqual(
+        ["#123ABC"],
+      );
+    });
+    first.unmount();
+
+    // 重挂载后历史仍在，切到取色面板即可看到色块
+    render(<UtilityHub />);
+    fireEvent.click(screen.getByRole("button", { name: /取色/ }));
+    expect(await screen.findByRole("button", { name: "选择 #123ABC" })).toBeInTheDocument();
+  });
+
+  it("ignores a corrupted color history instead of crashing", () => {
+    localStorage.setItem("levitaire-utility-recent-colors", "{not json");
+    render(<UtilityHub />);
+    fireEvent.click(screen.getByRole("button", { name: /取色/ }));
+    expect(screen.queryByRole("button", { name: /^选择 #/ })).toBeNull();
   });
 });
