@@ -1,11 +1,11 @@
 {
-  "version": "0.1.4",
-  "notes": "新增文字工具栏简繁转换与按钮自定义排序，便利贴支持插入图片，系统监控新增GPU负载与显存；增强钉图OCR、计时、待办与语音朗读；优化悬浮球、右键菜单与设置页交互",
-  "pub_date": "2026-09-10T07:34:38.297Z",
+  "version": "0.1.5",
+  "notes": "修复便利贴新建后卡死与重启后整个应用无响应；修复快速输入重新启用时的同类死锁；截图与描稿大图编码移出主线程，界面不再卡顿；修正在线更新下载进度恒为0%并补充下载超时与系统代理支持；悬浮工具面板支持按类别分组与工具说明，取色新增RGB复制",
+  "pub_date": "2026-09-11T07:24:50.908Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMCsyRGt3WWp1VURQaC9Tbmd4REtUTnpYaHlNZVJiYWYwVTh3THdEUkU4OWRlb0x3VTFEMUpQZ1BqL2kzNGVFL1RaeXVQTjlQeUVtcDZQQktsbUF3U2dJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MDI1Njc4CWZpbGU6TGV2aXRhaXJlXzAuMS40X3g2NC1zZXR1cC5leGUKQXdHelR1S1l5a2lZQ0I3VWRsZ085OUhNdUNjSUJTOThmbTJqUHNpRTh5dkxEUEVLRGdLckQ3TFFkRjVmY0ZuSHFzM2hDZHV4UHpZM3RETzZnNUhuQlE9PQo=",
-      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.4/Levitaire_0.1.4_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDRxNVJ3YWI1WmMyMlRJcUQ3elJVeGtTVlFXSllyUjIweS9EMnp1dmdFejFyd203VWIvNVR5WmpxQklsWVhvQ0p4UG81aXFHUVFxZHc1Zi9OL0g3RUFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MTExNDkwCWZpbGU6TGV2aXRhaXJlXzAuMS41X3g2NC1zZXR1cC5leGUKdk1ISFVaRVJLOC9XRFQzQy9rL05qVHdTV2dUS2xqS0M2UUUyNFJQNTRMbVJGMVlHaFVRc2ltWVlyeTcxWHZrVE1xSTdYTDZHK3BmbE1saXJQQ2YrQkE9PQo=",
+      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.5/Levitaire_0.1.5_x64-setup.exe"
     }
   }
 }
