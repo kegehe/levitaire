@@ -1,11 +1,11 @@
 {
-  "version": "0.1.5",
-  "notes": "修复便利贴新建后卡死与重启后整个应用无响应；修复快速输入重新启用时的同类死锁；截图与描稿大图编码移出主线程，界面不再卡顿；修正在线更新下载进度恒为0%并补充下载超时与系统代理支持；悬浮工具面板支持按类别分组与工具说明，取色新增RGB复制",
-  "pub_date": "2026-09-11T07:24:50.908Z",
+  "version": "0.1.6",
+  "notes": "新增窗口置顶工具；番茄钟并入时间工具，时钟/倒计时/番茄钟/秒表/月历收拢为同一悬浮窗；系统监控新增多套布局与 Sparkline 曲线；全屏录制新增原生指示层，指示框不会被录进成片；在线更新重做为后台静默下载、就绪后点击即装，支持断网续用与静默安装；修复剪贴板回滚覆盖用户刚复制内容、悬浮球透明区吞点击、浮窗跑出屏幕、截图遮罩自激渲染等一批浮窗缺陷",
+  "pub_date": "2026-09-16T08:26:08.401Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDRxNVJ3YWI1WmMyMlRJcUQ3elJVeGtTVlFXSllyUjIweS9EMnp1dmdFejFyd203VWIvNVR5WmpxQklsWVhvQ0p4UG81aXFHUVFxZHc1Zi9OL0g3RUFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MTExNDkwCWZpbGU6TGV2aXRhaXJlXzAuMS41X3g2NC1zZXR1cC5leGUKdk1ISFVaRVJLOC9XRFQzQy9rL05qVHdTV2dUS2xqS0M2UUUyNFJQNTRMbVJGMVlHaFVRc2ltWVlyeTcxWHZrVE1xSTdYTDZHK3BmbE1saXJQQ2YrQkE9PQo=",
-      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.5/Levitaire_0.1.5_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDh4R01ZdjdzQ0s3Z1pZcE83MEJkdFA0eXNtSjl5K1BIWDM1MkhQdUJLTGdibjZvWnF1YnZmNFVoM0hLU25yWUtWUGxRWWxDdmVWTjVUK3JqakNHb1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTQ3MTY4CWZpbGU6TGV2aXRhaXJlXzAuMS42X3g2NC1zZXR1cC5leGUKUGxEOSs2ZXd2Uk5kRCt6ZG02Tlg4VzdmTVIrWFhOVGZzdVg1cjFlNWE4VWxpWmxDZlJZTGY1eVF5QlRrT0QzcVp6OXhrQ0JqZnNHNXBlS2g3VWlLQ2c9PQo=",
+      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.6/Levitaire_0.1.6_x64-setup.exe"
     }
   }
 }
