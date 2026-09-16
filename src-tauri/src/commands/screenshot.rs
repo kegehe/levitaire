@@ -88,6 +88,9 @@ pub fn set_screenshot_enabled(
     crate::hooks::hotkey::set_screenshot_enabled(enabled);
     if !enabled {
         cleanup_screenshot_session(&app);
+        // 贴图窗是独立原生窗口，会话清理不会碰它们。截图工具被禁用（含 palette 的
+        // 「全部关闭」）时把桌面上钉的图一并收起，否则会留下「关了但窗口还在」的观感。
+        crate::screenshot::pin::close_all_pins(&app);
     }
     Ok(())
 }
@@ -492,18 +495,22 @@ pub async fn save_image(
         // 配置的目录不存在，回退到对话框模式
     }
 
-    // 将原生保存对话框绑定到截图 overlay。Windows 会以 owner 窗口关系把
-    // 对话框置于截图与标注工具之上，同时保留截图画面，行为与 Snipaste 一致。
-    // 文字工具栏是独立置顶窗口，临时取消置顶以免压过该模态对话框。
-    if let Some(win) = app.get_webview_window("toolbar") {
-        let _ = win.set_always_on_top(false);
-    }
+    // 原生保存对话框的 owner 与置顶处理：
+    // - 截图/标注流程：owner = 可见的 screenshot-overlay，Windows 会把对话框置于
+    //   截图画面之上并保留画面，行为与 Snipaste 一致；
+    // - 草稿流程（SketchTool 也调本命令）：overlay 通常不存在，owner 退回可见的
+    //   sketch-overlay —— 否则对话框无 owner，会被全屏置顶的草稿窗**完全盖住**
+    //   （实测：置顶窗压住无主对话框，SetForegroundWindow 也抬不上来），表现为
+    //   「点保存后没有任何反应」。
+    // DialogTopmostGuard 还会临时取消**所有可见自有置顶窗**的置顶并在 Drop 时恢复：
+    // 只设 owner 挡不住「另一扇前台置顶窗」，实测过。
+    let guard = DialogTopmostGuard::suspend(&app, &["screenshot-overlay", "sketch-overlay"]);
 
     let mut dialog = rfd::FileDialog::new()
         .set_file_name(&filename)
         .add_filter("PNG 图片", &["png"]);
-    if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
-        dialog = dialog.set_parent(&overlay);
+    if let Some(owner) = guard.owner() {
+        dialog = dialog.set_parent(owner);
     }
 
     let result = tokio::task::spawn_blocking(move || {
@@ -517,12 +524,10 @@ pub async fn save_image(
             None => Ok(false),
         }
     })
-    .await; // 不在此处用 ? 提前返回，确保下方 always-on-top 恢复
+    .await; // 不在此处用 ? 提前返回，确保下方置顶状态恢复
 
-    // 无论任务结果如何（含 panic/取消），都恢复独立工具栏的置顶状态。
-    if let Some(win) = app.get_webview_window("toolbar") {
-        let _ = win.set_always_on_top(true);
-    }
+    // 无论任务结果如何（含 panic/取消），都恢复被临时取消的置顶。
+    drop(guard);
 
     result.map_err(|e| format!("任务执行失败: {}", e))?
 }

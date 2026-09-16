@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { IconName } from "../components/Icon";
+import { decodeSelection, encodeSelection } from "./selectionPersistence";
 
 /** 清除项 ID（与 src/utils/clearText.ts 的 switch 分支一一对应） */
 export type ClearOptionId =
@@ -36,29 +37,37 @@ export const DEFAULT_CLEAR_IDS: string[] = CLEAR_OPTIONS.map((o) => o.id);
 /**
  * 从后端配置加载启用的清除项 ID 列表。
  * 配置跨窗口共享（持久化于 config.json），克服各 WebView localStorage 隔离问题。
- * 空列表或含未知 ID 时回退为默认全量；否则原样返回，尊重用户已取消勾选的项。
+ * - 从未设置过（空列表）→ 默认全量；
+ * - 用户主动全部取消勾选（存的是哨兵）→ 空列表，**不再被当成"从未设置"**；
+ * - 含已移除的旧 ID → 结构已变，重置为默认全量；
+ * - 否则原样返回，尊重用户已取消勾选的项。
  */
 export async function fetchClearOptions(): Promise<string[]> {
   const allIds = DEFAULT_CLEAR_IDS;
   try {
     const stored = await invoke<string[]>("get_clear_options");
-    if (!stored || stored.length === 0) {
+    const selected = decodeSelection(stored);
+    if (selected === null) {
       return [...allIds];
+    }
+    if (selected.length === 0) {
+      // 用户把每一项都关掉了：这是有效状态，别回退默认（否则永远关不掉）
+      return [];
     }
     const allIdSet = new Set(allIds);
     // 含已移除的旧 ID：结构已变，重置为默认全量
-    if (stored.some((id) => !allIdSet.has(id))) {
+    if (selected.some((id) => !allIdSet.has(id))) {
       await invoke("set_clear_options", { options: allIds });
       return [...allIds];
     }
     // 原样返回。不自动追加新增项——否则用户主动取消勾选的项会被当作"新增"补回。
-    return stored;
+    return selected;
   } catch {
     return [...allIds];
   }
 }
 
-/** 保存启用的清除项 ID 列表到后端配置 */
+/** 保存启用的清除项 ID 列表到后端配置（空选会编码成哨兵，见 selectionPersistence）。 */
 export async function saveClearOptions(ids: string[]): Promise<void> {
-  await invoke("set_clear_options", { options: ids });
+  await invoke("set_clear_options", { options: encodeSelection(ids) });
 }

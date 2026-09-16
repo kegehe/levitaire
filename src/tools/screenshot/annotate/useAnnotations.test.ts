@@ -110,4 +110,69 @@ describe("useAnnotations", () => {
     expect(result.current.committed).toHaveLength(1);
     expect(result.current.draft).toBeNull();
   });
+
+  it("translate 按各 kind 的坐标语义整体平移，且不进入撤销栈", () => {
+    const { result } = renderHook(() => useAnnotations());
+    const brush: Annotation = {
+      id: "brush",
+      kind: "brush",
+      color: "#000000",
+      strokeWidth: 3,
+      points: [
+        { x: 1, y: 2 },
+        { x: 3, y: 4 },
+      ],
+    };
+    const arrow: Annotation = {
+      id: "arrow",
+      kind: "arrow",
+      color: "#000000",
+      strokeWidth: 3,
+      x1: 10,
+      y1: 20,
+      x2: 30,
+      y2: 40,
+    };
+    act(() => result.current.commit(makeRect("r")));
+    act(() => result.current.commit(brush));
+    act(() => result.current.commit(arrow));
+
+    act(() => result.current.translate(5, -7));
+
+    const [r, b, a] = result.current.committed as [
+      Extract<Annotation, { kind: "rect" }>,
+      Extract<Annotation, { kind: "brush" }>,
+      Extract<Annotation, { kind: "arrow" }>,
+    ];
+    expect([r.x, r.y]).toEqual([5, -7]);
+    expect(b.points).toEqual([
+      { x: 6, y: -5 },
+      { x: 8, y: -3 },
+    ]);
+    expect([a.x1, a.y1, a.x2, a.y2]).toEqual([15, 13, 35, 33]);
+    // 平移是坐标系换算，不是用户编辑：撤销栈深度不变
+    expect(result.current.committed).toHaveLength(3);
+    expect(result.current.canUndo).toBe(true);
+    act(() => result.current.undo());
+    expect(result.current.committed).toHaveLength(2);
+  });
+
+  it("translate 也作用于 redo 尾巴，撤销后重做不会跳回旧位置", () => {
+    const { result } = renderHook(() => useAnnotations());
+    act(() => result.current.commit(makeRect("a")));
+    act(() => result.current.commit(makeRect("b")));
+    act(() => result.current.undo());
+    act(() => result.current.translate(10, 10));
+    act(() => result.current.redo());
+    const tail = result.current.committed[1] as Extract<Annotation, { kind: "rect" }>;
+    expect([tail.x, tail.y]).toEqual([10, 10]);
+  });
+
+  it("translate(0, 0) 不产生新状态对象（避免无谓重渲染）", () => {
+    const { result } = renderHook(() => useAnnotations());
+    act(() => result.current.commit(makeRect("a")));
+    const before = result.current.state.items;
+    act(() => result.current.translate(0, 0));
+    expect(result.current.state.items).toBe(before);
+  });
 });

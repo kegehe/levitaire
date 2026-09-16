@@ -95,10 +95,9 @@ pub fn set_text_toolbar_enabled(
     }
     crate::hooks::mouse::set_text_toolbar_enabled(enabled);
     if !enabled {
-        if let Some(toolbar) = app.get_webview_window("toolbar") {
-            let _ = toolbar.hide();
-        }
-        crate::hooks::set_toolbar_visible(false);
+        // 走统一入口：同时复位 qrcode_preview 标志并通知前端。只 hide 会留下
+        // 「重新启用后工具栏弹出、点外部却关不掉」的残留状态。
+        crate::commands::hide_toolbar_and_reset_state(&app);
     }
     Ok(())
 }

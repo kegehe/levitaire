@@ -64,6 +64,8 @@ mod tts;
 mod timer;
 mod updater;
 mod utils;
+mod webview_hardening;
+mod window_pin;
 
 use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
@@ -413,7 +415,8 @@ fn main() {
             app.manage(recording::RecordingState::default());
 
             // 初始化在线更新状态，并启动后台周期检测：
-            // 首次延迟检查 + 每 24h 复检，检测到新版本时由 update-prompt 窗口询问
+            // 首次延迟检查 + 每 24h 复检；检测到新版本时**静默下载**，下载完成
+            // 才由 update-prompt 窗口提示「已就绪，点击即装」（见 updater/mod.rs）。
             app.manage(updater::UpdaterState::default());
             updater::start_periodic_check(app.handle().clone());
 
@@ -456,6 +459,10 @@ fn main() {
                         }
                         "quit" => {
                             crate::hooks::mouse::stop_color_pick();
+                            crate::hooks::mouse::stop_window_pin();
+                            // 置顶状态写在**目标窗口**身上：不主动撤销的话，进程退出后
+                            // 会留下几扇「永远在最前」的窗口，用户还查不到是谁干的。
+                            crate::window_pin::cleanup();
                             app.exit(0);
                         }
                         _ => {}
@@ -660,6 +667,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_selection,
             commands::copy_text,
+            commands::clipboard_read_text,
             commands::copy_selection,
             commands::get_toolbar_position,
             commands::show_toolbar,
@@ -667,17 +675,21 @@ fn main() {
             commands::show_orb,
             commands::hide_orb,
             commands::toggle_orb,
+            commands::harden_webview_window,
             commands::show_palette,
             commands::hide_palette,
             commands::start_scroll_navigation,
             commands::hide_scroll_navigation,
             commands::get_scroll_navigation_state,
             commands::set_scroll_navigation_percent,
+            commands::recapture_scroll_target,
             commands::navigate_scroll,
             commands::start_utility_hub,
             commands::show_utility_hub,
             commands::stop_utility_color_pick,
             commands::hide_utility_hub,
+            commands::get_utility_hub_enabled,
+            commands::set_utility_hub_enabled,
             commands::start_utility_color_pick,
             commands::show_sketch_window,
             commands::hide_sketch_window,
@@ -718,6 +730,7 @@ fn main() {
             commands::call_ai_stream,
             commands::cancel_ai_stream,
             updater::get_update_status,
+            updater::check_for_updates,
             updater::dismiss_update,
             updater::install_update,
             commands::get_ai_config,
@@ -731,6 +744,7 @@ fn main() {
             commands::open_url,
             commands::save_image,
             commands::set_qrcode_preview,
+            commands::clamp_window_to_workarea,
             commands::get_screenshot_hotkey,
             commands::set_screenshot_hotkey,
             commands::check_hotkey_conflicts,
@@ -771,16 +785,12 @@ fn main() {
             commands::set_system_monitor_enabled,
             commands::get_system_monitor_config,
             commands::set_system_monitor_config,
-            commands::show_pomodoro_window,
-            commands::hide_pomodoro_window,
             commands::get_pomodoro_state,
             commands::start_pomodoro,
             commands::start_pomodoro_for_todo,
             commands::pause_pomodoro,
             commands::reset_pomodoro,
             commands::skip_pomodoro,
-            commands::get_pomodoro_enabled,
-            commands::set_pomodoro_enabled,
             commands::get_pomodoro_config,
             commands::set_pomodoro_config,
             commands::show_timer_window,
@@ -841,6 +851,7 @@ fn main() {
             commands::show_sticky_note,
             commands::collect_sticky_note,
             commands::collect_all_notes,
+            commands::show_all_notes,
             commands::delete_sticky_note,
             commands::save_sticky_note_image,
             commands::get_sticky_note_images_dir,
@@ -852,6 +863,7 @@ fn main() {
             commands::start_recording_select,
             commands::start_recording,
             commands::show_recording_controls,
+            commands::show_recording_indicator,
             commands::finish_recording_controls,
             commands::pause_recording,
             commands::resume_recording,
@@ -911,6 +923,11 @@ fn main() {
             commands::ensure_quick_input_window,
             commands::toggle_quick_input_wheel,
             commands::cancel_quick_input_wheel,
+            commands::start_window_pin_pick,
+            commands::stop_window_pin_pick,
+            commands::get_pinned_windows,
+            commands::unpin_window,
+            commands::unpin_all_windows,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

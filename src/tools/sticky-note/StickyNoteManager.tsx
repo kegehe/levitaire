@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
 import ToolIcon from "../../components/ToolIcon";
 import {
@@ -9,8 +11,28 @@ import {
   subscribeThemePreferences,
 } from "../../styles/themePreferences";
 import { persistWindowPositionOnMove } from "../../utils/windowPosition";
+import { clampWindowToWorkArea } from "../../utils/panelWindow";
 import { getNoteColor, stripImgTokens } from "./constants";
 import "./StickyNoteManager.css";
+
+/**
+ * 管理窗几何：面板定宽，高度随内容。
+ *
+ * ⚠️ 两侧必须同步（改动一处就要改另一处）：
+ *   1. CSS `.snm-window { padding: 14px 14px 28px }`（= 下面三个留白）；
+ *   2. 本文件的常量（把面板实测高度换算成窗口高度）。
+ * 反面清单：Rust `commands/sticky.rs` 里**不能**再出现写死尺寸的 `set_size`（会把这里
+ * 算好的高度在显示瞬间打回固定值）；CSS 里**不能**给 `.snm-window` / `.snm-panel` 写
+ * `height: 100vh/100%`（面板撑满窗口 → 实测高度 = 窗口高度 → 越测越大）。
+ * 面板宽 332 = 窗口宽 360 − 左右留白各 14。
+ */
+const MANAGER_PANEL_WIDTH = 332;
+/** 投影留白：`.snm-panel` 的 box-shadow 是 `0 12px 28px` —— 左右各需 14，底部需要
+ *  12 + 14 = 26（取 28 留一点余量），顶部取与左右同值让面板在窗口里视觉居中。 */
+const MANAGER_MARGIN_X = 14;
+const MANAGER_MARGIN_TOP = 14;
+const MANAGER_MARGIN_BOTTOM = 28;
+const MANAGER_WINDOW_WIDTH = MANAGER_PANEL_WIDTH + MANAGER_MARGIN_X * 2;
 
 interface StickyNote {
   id: string;
@@ -30,6 +52,12 @@ function formatTime(iso?: string): string {
 }
 
 function StickyNoteManager() {
+  // getCurrentWebviewWindow() 每次调用返回新对象，仅取首次值保证拖拽回调引用稳定
+  const winRef = useRef(getCurrentWebviewWindow());
+  const win = winRef.current;
+  const panelRef = useRef<HTMLElement | null>(null);
+  // 已下发的窗口尺寸（w:h）。重复下发同一尺寸会让窗口反复重排，故先去重。
+  const lastWindowSizeRef = useRef("");
   const [notes, setNotes] = useState<StickyNote[]>([]);
   const [loading, setLoading] = useState(true);
   // 删除二次确认：记录当前待确认删除的便利贴 id，3 秒内再次点击才真正删除
@@ -70,8 +98,67 @@ function StickyNoteManager() {
     };
   }, []);
 
+  /**
+   * 窗口高度随内容走。
+   *
+   * 面板高度本来就是可变的：空状态只有图标 + 一行字 + 一个小按钮，便签多时由
+   * `.snm-list` 的 max-height 收口。窗口却是固定尺寸的无边框窗，所以必须把
+   * 「面板实测高度 + 上下投影留白」写回窗口 —— 否则内容少时窗口照旧很高，空状态
+   * 被 flex 居中推到一大片空白中央（旧版固定 560 就是这样）。
+   *
+   * 面板自身不能是 height: 100%（见 CSS）：那样测出来的高度就是窗口高度，窗口只会
+   * 越调越大。这里量的是面板的自然高度，窗口尺寸反过来不影响它，所以不会震荡。
+   * 用 ResizeObserver 而不是只跟着 notes 变化跑一次：便签预览换行、摘要行增减、
+   * 删除确认文案变长都会改高度。
+   *
+   * 加载态（只有一行「加载中…」）刻意不量：那时量出来会把窗口先压成一条窄窗，数据
+   * 一到再弹回来，开窗时能看见两次跳变。让窗口停在创建时的占位高度，只跳一次。
+   */
+  useLayoutEffect(() => {
+    if (loading) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const resizeToContent = () => {
+      const panelHeight = Math.ceil(panel.getBoundingClientRect().height);
+      // 0 = 还没布局（测试环境不做布局），此时下发会把窗口压成一条
+      if (panelHeight <= 0) return;
+      const windowHeight = panelHeight + MANAGER_MARGIN_TOP + MANAGER_MARGIN_BOTTOM;
+      const size = `${MANAGER_WINDOW_WIDTH}:${windowHeight}`;
+      if (size === lastWindowSizeRef.current) return;
+      lastWindowSizeRef.current = size;
+      win
+        .setSize(new LogicalSize(MANAGER_WINDOW_WIDTH, windowHeight))
+        .catch((err) => console.error("调整便利贴管理窗尺寸失败:", err));
+      // 便签数量变化会改窗口高度，贴屏幕下沿时要重新夹回工作区
+      clampWindowToWorkArea(MANAGER_WINDOW_WIDTH, windowHeight);
+    };
+
+    resizeToContent();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(resizeToContent);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, [win, loading, notes.length]);
+
   // 记忆窗口位置：拖拽后自动保存，重开恢复
   useEffect(() => persistWindowPositionOnMove("sticky-notes-manager"), []);
+
+  /**
+   * 按住标题栏拖动本窗。
+   *
+   * 管理窗是 `decorations: false` 的无边框窗，没有原生标题栏；此处不挂拖拽面时，
+   * 整窗**完全无法移动**（位置记忆也就永远只记得创建时的坐标）。用显式
+   * startDragging()，与便签窗一致，而不是 data-tauri-drag-region 属性——后者的
+   * 双击由 Tauri 转成 internal_toggle_maximize，会把这块定宽面板双击顶成整屏。
+   * 标题栏里的「新建 / 唤出全部 / 收起全部 / 隐藏」是点击目标，命中按钮时不拖。
+   * 失败要出声：静默吞掉异常时，「拖不动」在日志里查不到任何痕迹。
+   */
+  const startPanelDrag = (event: React.MouseEvent) => {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest("button")) return;
+    event.preventDefault();
+    win.startDragging().catch((err) => console.error("拖动便利贴管理窗失败:", err));
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -137,14 +224,39 @@ function StickyNoteManager() {
 
   return (
     <div className="snm-window">
-      <section className="snm-panel" aria-label="便利贴管理">
-        <header className="snm-header">
+      <section className="snm-panel" ref={panelRef} aria-label="便利贴管理">
+        <header className="snm-header" onMouseDown={startPanelDrag}>
           <div className="snm-title">
             <ToolIcon name="StickyNote" size={15} />
             <span>便利贴</span>
             {notes.length > 0 && <span className="snm-count">{notes.length}</span>}
           </div>
           <div className="snm-header-actions">
+            <button
+              type="button"
+              className="snm-icon-btn is-brand"
+              title="新建便利贴"
+              aria-label="新建便利贴"
+              onClick={createNote}
+            >
+              <Icon name="Plus" size={16} />
+            </button>
+            {/* 与「收起全部」成对：放出（Maximize2，箭头朝外）在前、收起（Minimize2，箭头
+                朝内）在后，两个图标互为反向，读起来就是一组「批量放出 / 批量收回」。
+                各自按「有没有对应目标的便签」置灰 —— 没有已收起的便签时放出是空操作。 */}
+            <button
+              type="button"
+              className="snm-icon-btn"
+              title="把所有已收起的便利贴贴回桌面"
+              aria-label="唤出全部便利贴"
+              disabled={hiddenCount === 0}
+              onClick={() => {
+                cancelConfirmDelete();
+                void invoke("show_all_notes").catch((err) => console.error("唤出全部失败:", err));
+              }}
+            >
+              <Icon name="Maximize2" size={15} />
+            </button>
             <button
               type="button"
               className="snm-icon-btn"
@@ -175,18 +287,24 @@ function StickyNoteManager() {
           </div>
         </header>
 
-        <div className="snm-summary">
-          桌面 {pinnedCount} 张{pinnedCount > 0 && hiddenCount > 0 ? " · " : ""}
-          {hiddenCount > 0 ? `已收起 ${hiddenCount} 张` : ""}
-        </div>
+        {/* 摘要行只在有便签时出现："桌面 0 张" 是纯噪声，还会把空状态顶下去 */}
+        {notes.length > 0 && (
+          <div className="snm-summary">
+            {/* 分隔符只跟随第二段：写成 `pinnedCount > 0 && hiddenCount > 0` 时，
+                全部收起（pinnedCount=0）会拼成「桌面 0 张已收起 3 张」的连读。 */}
+            桌面 {pinnedCount} 张{hiddenCount > 0 ? " · " : ""}
+            {hiddenCount > 0 ? `已收起 ${hiddenCount} 张` : ""}
+          </div>
+        )}
 
         {loading ? (
           <div className="snm-empty">加载中…</div>
         ) : notes.length === 0 ? (
           <div className="snm-empty">
-            <ToolIcon name="StickyNote" size={34} />
+            <ToolIcon name="StickyNote" size={24} />
             <p>还没有便利贴</p>
-            <button type="button" className="snm-primary-btn" onClick={createNote}>
+            <button type="button" className="snm-add-btn" onClick={createNote}>
+              <Icon name="Plus" size={14} />
               新建第一张
             </button>
           </div>
@@ -262,15 +380,6 @@ function StickyNoteManager() {
               );
             })}
           </ul>
-        )}
-
-        {notes.length > 0 && (
-          <footer className="snm-footer">
-            <button type="button" className="snm-primary-btn" onClick={createNote}>
-              <Icon name="Plus" size={15} />
-              新建便利贴
-            </button>
-          </footer>
         )}
       </section>
     </div>

@@ -1,16 +1,21 @@
 use image::GenericImageView;
 use std::io::Cursor;
-use windows::Win32::Foundation::{GlobalFree, HANDLE};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
+    SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
 const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 25_000_000;
+/// 一次读取剪贴板文本的字符上限（防损坏数据越界 / 超大文本灌进输入框）
+const MAX_TEXT_U16: usize = 1024 * 1024;
 
 pub struct ClipboardManager;
 
@@ -27,6 +32,18 @@ impl ClipboardManager {
 
     pub fn copy(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.set_clipboard(text)
+    }
+
+    /// 读取剪贴板中的 CF_UNICODETEXT。
+    /// 剪贴板为空、内容非文本、或被其他进程占用时返回空字符串。
+    /// 供应用自绘的文本右键菜单「粘贴」使用（见 src/utils/desktopShell.ts）。
+    pub fn get_text(&self) -> Result<String, Box<dyn std::error::Error>> {
+        unsafe {
+            OpenClipboard(None)?;
+            let result = read_text_inner();
+            let _ = CloseClipboard();
+            Ok(result.unwrap_or_default())
+        }
     }
 
     /// 将 PNG 字节解码后以 CF_DIB 格式写入剪贴板
@@ -182,6 +199,45 @@ impl ClipboardManager {
         }
         Ok(())
     }
+}
+
+/// 读取 CF_UNICODETEXT 文本。必须在已 OpenClipboard 的状态下调用。
+/// 内存句柄长度不可信，因此先按 GlobalSize 截断，再扫描到终止符，防止越界读。
+unsafe fn read_text_inner() -> Option<String> {
+    let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
+    if handle.is_invalid() {
+        return None;
+    }
+    let hmem = HGLOBAL(handle.0);
+    let ptr = GlobalLock(hmem);
+    if ptr.is_null() {
+        return None;
+    }
+    // GlobalSize == 0 说明句柄不可信（拿不到边界）。**不能**回退成「按 MAX_TEXT_U16
+    // 一路扫到 NUL」—— 那是拿一个未知边界去读最多 2MB 内存，越界就是访问违例。
+    // 合法的剪贴板文本句柄必然能取到大小，取不到即视为本次读取失败（调用方返回空串）。
+    let mem_size = GlobalSize(hmem);
+    if mem_size == 0 {
+        let _ = GlobalUnlock(hmem);
+        return None;
+    }
+    let max_u16 = (mem_size / 2).min(MAX_TEXT_U16);
+    let mut len = 0usize;
+    let mut cursor = ptr as *const u16;
+    while len < max_u16 && *cursor != 0 {
+        len += 1;
+        cursor = cursor.add(1);
+    }
+    let text = if len == 0 {
+        None
+    } else {
+        Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+            ptr as *const u16,
+            len,
+        )))
+    };
+    let _ = GlobalUnlock(hmem);
+    text
 }
 
 /// 将 RGBA 图像转为 Windows DIB 像素数据（BGR 字节序 + 自下而上的行序），返回 (像素数据, 宽, 高)

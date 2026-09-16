@@ -1,3 +1,18 @@
+/* ============================================================================
+   系统监控浮窗样式
+   ----------------------------------------------------------------------------
+   结构约定（改样式前先读这段）：
+   ① 标准模式有四套**结构完全不同的**样式（`is-layout-b/c/d/e`），由标题栏的样式按钮切换；
+      它们共用同一份视图模型（`MonitorLayouts.tsx` 只负责摆位置），所以这里只写"摆法"。
+   ② 头部（`.monitor-head`）**常驻 22px、任何状态下都不改变高度**。
+      旧版是常态 max-height:0、悬停展开 27px，而窗口高度自适应 effect 又跟着悬停重算，
+      于是鼠标一进窗口就整块长高 43px（实测 579 → 622）。现在悬停只改操作按钮的透明度。
+      守卫：tooltipDirection.test.ts「悬停不得改变头部高度」。
+   ③ `.monitor-body` 用 overflow:hidden 给圆角收边，所以**任何祖先都不得再设 overflow**，
+      否则向下弹的 tooltip 会被裁掉（历史上踩过：标题栏只有 27px 高又带 overflow:hidden，
+      按钮浮层 100% 被裁）。窗口自身的 padding box 足够大，不裁浮层。
+   ============================================================================ */
+
 .monitor-container {
   width: 100%;
   height: 100%;
@@ -14,76 +29,106 @@
   color: var(--color-fg);
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  /* 四周均匀留白 10px。标题栏按钮 tooltip 改为向下悬浮（见 .monitor-titlebar
-     的覆盖规则），无需再为 tooltip 向上弹出预留顶部大段空白，从而去除
-     full 模式顶部多余的空区域、给内容区腾出高度。
-     不用 box-shadow：.monitor-body 占满窗口，box-shadow 会被 body
-     overflow:hidden 裁切；改用 1px border 提供视觉边界，不被裁切。 */
-  padding: 10px;
+  /* 四周均匀留白 10px，上下略紧（9/8）—— 头部常驻后不再需要给悬停展开预留空间。
+     不用 box-shadow：.monitor-body 占满窗口，会被自己的 overflow:hidden 裁掉；
+     改用 1px border 提供视觉边界。 */
+  padding: 9px 10px 8px;
   box-sizing: border-box;
   font-size: 12px;
-  /* full 模式允许溢出：tooltip 向下落在内容区（padding box 内），
-     visible 不裁切它；内容滚动由 .monitor-content（overflow-y:auto）负责，
-     footer 固定在底部不会被滚走。mini 模式由 .is-mini 覆盖为 hidden。 */
-  overflow: visible;
+  overflow: hidden;
+  animation: monitor-window-enter 180ms ease-out both;
 }
 
-/* 可滚动内容区：metrics + sections。flex:1 占满 titlebar 与 footer 之间，
-   overflow-y:auto 处理多磁盘等极端溢出的兜底（正常机器在自适应窗口高度下不会滚动）。 */
+/**
+ * 可滚动内容区：为多磁盘、贴屏幕下沿被 clamp 夹短等极端情况兜底。
+ *
+ * `overflow-y: auto` 是**承重**的：窗口是无边框置顶窗、`resizable: false`，内容一旦被裁就
+ * 永远看不到也点不到，只有滚动能让用户拿到下面那截。实测（`monitor-preview.html?
+ * forceHeight=60`）：内容 246px 压进 13px 时 `scrollHeight` 仍 246、行高保持 19px、
+ * 出现滚动。守卫：SystemMonitor.layout.test.ts。
+ *
+ * 注：这些块的自动最小尺寸本来就等于内容高度（行高是定值），所以**不会**被 flex 压扁 ——
+ * 我一度加过 `.monitor-content > * { flex-shrink: 0 }`，用变异测试验过后发现去掉它行为完全
+ * 一致（150/100/60px 三档、含 GB/s 极端数据），属于"防一个不存在的 bug"，已撤掉。
+ */
 .monitor-content {
   flex: 1;
+  /* flex 子项 + overflow 组合下的常规保险（当前 overflow-y:auto 已让自动最小尺寸归零） */
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   overflow-y: auto;
 }
 
-/* mini 模式内容固定（仅 metrics，无 sections/footer），禁用滚动避免空滚动条 */
-.monitor-body.is-mini .monitor-content {
-  overflow: visible;
-}
+/* ── 头部：常驻 22px，悬停只改按钮透明度 ───────────────────────── */
 
-.monitor-titlebar {
+.monitor-head {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 0;
-  max-height: 0;
-  overflow: hidden;
-  padding-bottom: 0;
-  border-bottom: 0 solid transparent;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-4px);
-  transition:
-    max-height 160ms ease,
-    padding-bottom 160ms ease,
-    border-color 160ms ease,
-    opacity 120ms ease,
-    transform 160ms ease;
-}
-
-.monitor-body.is-controls-visible {
-  gap: 8px;
-}
-
-.monitor-body.is-controls-visible .monitor-titlebar {
-  max-height: 27px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid var(--color-border);
+  height: 22px;
   flex-shrink: 0;
-  cursor: default;
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
+  margin-bottom: 6px;
 }
 
 .monitor-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 13px;
+  font-size: 11.5px;
   font-weight: 600;
+  color: var(--color-fg-muted);
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+/* 样式切换按钮：常驻可见（标签就是当前样式名），点击轮换到下一个样式 */
+.monitor-style-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 17px;
+  padding: 0 5px;
+  border: none;
+  border-radius: 5px;
+  background: var(--color-bg-sunken);
+  color: var(--color-fg-muted);
+  font-size: 10px;
+  font-family: inherit;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.monitor-style-btn:hover {
+  background: var(--button-hover-bg);
+  color: var(--color-fg);
+}
+
+.monitor-style-btn:focus-visible,
+.monitor-icon-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* 尺寸/关闭：绝对定位覆盖在头部右侧，出现时**不推挤**其它元素（高度恒定） */
+.monitor-actions {
+  position: absolute;
+  right: 0;
+  top: 1px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+
+.monitor-body.is-controls-visible .monitor-actions {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .monitor-icon-btn {
@@ -91,8 +136,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border: none;
   border-radius: 6px;
@@ -110,14 +155,9 @@
   color: var(--color-fg);
 }
 
-.monitor-icon-btn:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 1px;
-}
-
-/* CSS-only tooltip — mirrors ToolbarButton.css convention。
-   full/mini 统一向下悬浮（titlebar 上方无需预留 tooltip 空间，去掉顶部空区）。 */
-.monitor-icon-btn[data-tooltip]::after {
+/* CSS-only tooltip — 与本项目其它浮层同约定，统一向下弹（头部在窗口顶部，向上会掉出窗口） */
+.monitor-icon-btn[data-tooltip]::after,
+.monitor-style-btn[data-tooltip]::after {
   content: attr(data-tooltip);
   position: absolute;
   top: calc(100% + 5px);
@@ -139,210 +179,566 @@
 }
 
 .monitor-icon-btn[data-tooltip]:hover::after,
-.monitor-icon-btn[data-tooltip]:focus-visible::after {
+.monitor-icon-btn[data-tooltip]:focus-visible::after,
+.monitor-style-btn[data-tooltip]:hover::after,
+.monitor-style-btn[data-tooltip]:focus-visible::after {
   opacity: 1;
-  display: block;
 }
 
-/* 标题栏按钮靠窗口右侧，居中定位的 tooltip 会溢出窗口右边缘被截断。
-   改为右对齐：tooltip 右边贴齐按钮右边，向左延伸，落在标题栏区域内。
-   right: 4px 让 tooltip 右边略内移，避开 .monitor-body 的 border-radius
-   圆角裁切区（padding box 圆角半径约 11px，按钮右边距 padding box 右
-   边约 10px，内移 4px 后距 14px > 11px，安全）。 */
-.monitor-titlebar .monitor-icon-btn[data-tooltip]::after {
+/* 按钮都靠窗口右侧，居中定位的 tooltip 会溢出窗口右边缘被截断 → 改为右对齐向左延伸。
+   right: 4px 避开圆角裁切区（padding box 圆角半径约 11px，按钮右边距右边约 10px）。 */
+.monitor-head .monitor-icon-btn[data-tooltip]::after,
+.monitor-head .monitor-style-btn[data-tooltip]::after {
   left: auto;
   right: 4px;
   transform: none;
 }
 
-/* 标题栏按钮依赖 CSS tooltip（data-tooltip）统一提示，full/mini 行为一致，
-   不单独禁用 mini：mini 的 overflow:hidden 只裁切 padding box 之外的
-   absolute 元素，向下悬浮的 tooltip 落在内容区内，不会被裁切。 */
+/* ── 公共小件：圆点 / 阈值条 / 磁盘行 / 底部行 ─────────────────── */
 
-.metrics {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.monitor-body.is-mini {
-  gap: 0;
-  padding-top: 8px;
-  padding-bottom: 8px;
-  overflow: hidden;
-}
-
-.monitor-body.is-mini.is-controls-visible {
-  gap: 6px;
-}
-
-.is-mini .metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.is-mini .metric-card {
-  min-width: 0;
-  gap: 3px;
-  padding: 6px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-bg-sunken);
-  align-self: stretch;
-}
-
-.is-mini .metric-value {
-  font-size: 15px;
-}
-
-.is-mini .metric-extra {
-  min-height: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.metric-card {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px 0;
-  min-width: 0;
-}
-
-.metric-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 6px;
-}
-
-.metric-label {
-  font-size: 11px;
-  color: var(--color-fg-muted);
-}
-
-.metric-value {
-  font-size: 14px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.metric-value-content {
-  display: inline-block;
-}
-
-.sparkline {
-  display: block;
-  height: 28px;
-}
-
-.metric-extra {
-  font-size: 10px;
-  color: var(--color-fg-subtle);
-  line-height: 1.3;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-top: 4px;
-  border-top: 1px solid var(--color-border);
-}
-
-.section-label {
-  font-size: 11px;
-  color: var(--color-fg-muted);
-}
-
-.disk-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  min-width: 0;
-}
-
-.disk-mount {
-  min-width: 36px;
-  max-width: 80px;
-  flex-shrink: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.disk-bar {
-  flex: 1;
-  min-width: 24px;
+.monitor-dot {
+  width: 6px;
   height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.monitor-level-bar {
+  display: block;
   border-radius: 3px;
   background: var(--color-bg-sunken);
   overflow: hidden;
 }
 
-.disk-bar-fill {
+.monitor-level-fill {
+  display: block;
   height: 100%;
-  background: var(--color-success);
-  transition: width 0.4s ease;
 }
 
-.disk-text {
-  flex-shrink: 1;
-  min-width: 0;
+/* 阈值色：磁盘占用越高越危险；电池余量越低越危险（档位由 TS 判定后写在 data-level 上） */
+.monitor-level-fill[data-level="ok"] {
+  background: var(--color-success);
+}
+
+.monitor-level-fill[data-level="warn"] {
+  background: var(--color-warning);
+}
+
+.monitor-level-fill[data-level="crit"] {
+  background: var(--color-danger);
+}
+
+.monitor-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.monitor-divider {
+  height: 1px;
+  background: var(--color-border);
+}
+
+.monitor-disk-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  color: var(--color-fg-muted);
+}
+
+.monitor-disk-mount {
+  width: 16px;
+  flex-shrink: 0;
+  color: var(--color-fg-muted);
+  /* Windows 挂载点是 "C:\"（≈13px）刚好放得下；长挂载点（Linux 的 "/home"、卷 GUID）
+     一律截断，不能溢出到占用条上 */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--color-fg-muted);
-  font-variant-numeric: tabular-nums;
 }
 
-.battery-row {
+.monitor-disk-bar {
+  flex: 1;
+  min-width: 24px;
+  height: 5px;
+  margin: 0 4px;
+}
+
+.monitor-disk-text {
+  width: 104px;
+  flex-shrink: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.monitor-foot-row {
   display: flex;
   align-items: center;
   gap: 6px;
+  font-size: 9.5px;
+  color: var(--color-fg-subtle);
 }
 
-.battery-bar {
-  width: 50px;
-  height: 8px;
-  border-radius: 4px;
-  background: var(--color-bg-sunken);
+.monitor-battery-bar {
+  width: 34px;
+  height: 6px;
+  flex-shrink: 0;
+}
+
+.monitor-battery-text,
+.monitor-uptime {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.monitor-foot-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/**
+ * 行内短文本一律不许被 flex 压扁：它们是 `nowrap` 的，被压只会让文字**溢出格子和邻居叠字**
+ * （而不是像带 ellipsis 的列那样优雅截断）。正常数据下都放得下，
+ * 给 `flex-shrink: 0` 是为了极端数据（超长挂载点、超大速率）下行为可预期。
+ */
+.monitor-tile-label,
+.monitor-legend-item,
+.monitor-battery-text,
+.monitor-uptime {
+  flex-shrink: 0;
+}
+
+/* ── 样式 B：紧凑行式（一行一指标，高度最小） ─────────────────── */
+
+.monitor-body.is-layout-b .monitor-content {
+  gap: 0;
+}
+
+.monitor-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.monitor-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 19px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.monitor-rows .monitor-row:last-child {
+  border-bottom: none;
+}
+
+.monitor-row-label {
+  width: 44px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+}
+
+.monitor-row-chart {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* 数值列宽度按**最坏取值**定："1024 MB/s"（≈60px，12px/numeric）也要放得下 ——
+   放不下时它是 `nowrap` + 无裁切，会直接压到隔壁的次要列上；这里的 ellipsis 只是最后一道网。 */
+.monitor-row-value {
+  width: 62px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.battery-bar-fill {
-  height: 100%;
-  background: var(--color-accent);
-  transition: width 0.4s ease;
+.monitor-row-extra {
+  width: 66px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 9.5px;
+  color: var(--color-fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.battery-text {
-  font-size: 11px;
+/* ── 样式 C：双列宫格（窗口 340 宽） ──────────────────────────── */
+
+.monitor-body.is-layout-c .monitor-content {
+  gap: 7px;
+}
+
+.monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.monitor-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 9px 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-sunken);
+}
+
+/* 指标个数为奇数时最后一格跨两列（GPU 缺失时是 4 格，正好 2×2，不会留孤格） */
+.monitor-tile.is-wide {
+  grid-column: span 2;
+}
+
+.monitor-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+}
+
+.monitor-tile-extra {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 9.5px;
+  color: var(--color-fg-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.monitor-tile-value {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
 }
 
-.footer {
-  flex-shrink: 0;
-  margin-top: auto;
-  padding-top: 4px;
-  border-top: 1px solid var(--color-border);
-  font-size: 10px;
+.monitor-tile-chart {
+  height: 20px;
+}
+
+/* ── 样式 D：焦点分层（CPU 主角 + 其余降级） ──────────────────── */
+
+.monitor-body.is-layout-d .monitor-content {
+  gap: 7px;
+}
+
+.monitor-hero {
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  background: var(--color-bg-sunken);
+  padding: 8px 10px 7px;
+}
+
+.monitor-hero-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.monitor-hero-label {
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+
+.monitor-hero-value {
+  font-size: 27px;
+  font-weight: 600;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-hero-value small {
+  font-size: 14px;
+  font-weight: 500;
+  opacity: 0.8;
+  margin-left: 1px;
+}
+
+.monitor-hero-chart {
+  height: 40px;
+  margin: 2px 0 3px;
+}
+
+.monitor-hero-foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9.5px;
   color: var(--color-fg-subtle);
   font-variant-numeric: tabular-nums;
 }
 
-.monitor-body {
-  animation: monitor-window-enter 180ms ease-out both;
+.monitor-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
 }
+
+/* GPU 缺失时只剩一张卡 → 铺满整行，不留半格空白 */
+.monitor-pair.is-single {
+  grid-template-columns: 1fr;
+}
+
+.monitor-mini-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 8px 5px;
+  min-width: 0;
+}
+
+.monitor-mini-card-label {
+  font-size: 10.5px;
+  color: var(--color-fg-muted);
+}
+
+.monitor-mini-card-value {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-mini-card-bar {
+  height: 4px;
+  margin: 3px 0;
+}
+
+.monitor-mini-card-extra {
+  font-size: 9.5px;
+  color: var(--color-fg-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-irow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+}
+
+.monitor-irow-label {
+  width: 56px;
+  flex-shrink: 0;
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+}
+
+.monitor-irow-chart {
+  flex: 1;
+  min-width: 0;
+  height: 14px;
+  display: flex;
+  align-items: center;
+}
+
+.monitor-irow-value {
+  width: 62px;
+  flex-shrink: 0;
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.monitor-irow-extra {
+  width: 70px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 9.5px;
+  color: var(--color-fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 样式 E：共享趋势图（多线同轴 + 电平表） ──────────────────── */
+
+.monitor-trend {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-sunken);
+  padding: 7px 9px 5px;
+}
+
+/* 多线共用一个坐标系：每一层绝对定位叠在同一块区域上 */
+.monitor-trend-chart {
+  position: relative;
+  height: 52px;
+}
+
+.monitor-trend-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.monitor-legend {
+  display: flex;
+  gap: 11px;
+  margin-top: 5px;
+}
+
+.monitor-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--color-fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.monitor-legend-item i {
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  display: inline-block;
+}
+
+.monitor-legend-item b {
+  color: var(--color-fg);
+  font-weight: 600;
+}
+
+.monitor-table {
+  display: flex;
+  flex-direction: column;
+}
+
+.monitor-trow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 19px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.monitor-table .monitor-trow:last-child {
+  border-bottom: none;
+}
+
+.monitor-trow-label {
+  width: 58px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+}
+
+.monitor-trow-bar {
+  flex: 1;
+  min-width: 0;
+  height: 5px;
+}
+
+.monitor-trow-value {
+  width: 62px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.monitor-trow-extra {
+  width: 62px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 9.5px;
+  color: var(--color-fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── mini：单行三格（CPU / 内存 / 网络，各带迷你折线） ─────────── */
+
+.monitor-body.is-mini {
+  padding: 7px 10px;
+}
+
+.monitor-body.is-mini .monitor-content {
+  gap: 5px;
+  overflow: visible;
+}
+
+.monitor-ministrip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.monitor-mini-cell {
+  min-width: 0;
+}
+
+.monitor-mini-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+}
+
+.monitor-mini-label .monitor-dot {
+  width: 5px;
+  height: 5px;
+}
+
+.monitor-mini-value {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  /* 单格只有约 87px 宽："1024 MB/s" 已接近上限，超了要截断而不是压到隔壁格 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.monitor-mini-chart {
+  height: 14px;
+  margin-top: 1px;
+}
+
+/* ── 折线 ─────────────────────────────────────────────────────── */
+
+/* 宽度由容器决定（width:100% + viewBox 拉伸），高度由组件按样式传进来 */
+.monitor-spark {
+  display: block;
+  width: 100%;
+}
+
+/* ── 入场动画 ─────────────────────────────────────────────────── */
+
 @keyframes monitor-window-enter {
   from {
     opacity: 0;
@@ -353,6 +749,7 @@
     transform: translateY(0) scale(1);
   }
 }
+
 @media (prefers-reduced-motion: reduce) {
   .monitor-body {
     animation: none;

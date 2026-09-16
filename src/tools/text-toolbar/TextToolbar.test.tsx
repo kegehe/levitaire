@@ -4097,3 +4097,34 @@ describe("FloatingToolbar 按钮顺序", () => {
     expect(labels).toEqual(["复制"]);
   });
 });
+
+describe("FloatingToolbar 窗口几何", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation(() => Promise.resolve());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  /**
+   * 工具栏/二维码预览的落点由后端按选区算出、**不夹工作区**，而尺寸是前端量完内容才定的。
+   * 屏幕下半部或右侧选中文字时，扩窗（二维码预览高 560）会让整扇窗大半跑到屏幕外：
+   * 二维码被裁、按钮点不到，而该状态下鼠标钩子忽略「点击外部」，只剩 Esc 能退。
+   * 因此每次下发尺寸后都必须再调一次夹工作区。
+   */
+  it("下发窗口尺寸后调用 clamp_window_to_workarea 夹回工作区", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar();
+
+    await waitFor(() => {
+      // label 由 Tauri 自动注入调用方窗口，前端只传尺寸
+      expect(mockInvoke).toHaveBeenCalledWith("clamp_window_to_workarea", {
+        width: expect.any(Number),
+        height: expect.any(Number),
+      });
+    });
+  });
+});

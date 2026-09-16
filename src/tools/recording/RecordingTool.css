@@ -273,6 +273,45 @@
   font-size: 13px;
 }
 
+/* 悬停窗口项时贴在目标窗口位置的呼吸预览框。与录制选区框同一视觉语言
+   （绿色虚线 + 呼吸动画），outline 向外绘制，不占窗口内部空间。 */
+.rec-window-hint {
+  position: absolute;
+  box-sizing: border-box;
+  outline: 2px dashed var(--green-500);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 15;
+  animation: rec-window-hint-breathe 1.4s ease-in-out infinite;
+}
+
+/* 边框与光晕一起呼吸，窗口底色深浅不一也能看清范围 */
+@keyframes rec-window-hint-breathe {
+  0%,
+  100% {
+    outline-color: rgba(34, 197, 94, 0.96);
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.24);
+  }
+  50% {
+    outline-color: rgba(34, 197, 94, 0.45);
+    box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.06);
+  }
+}
+
+.rec-window-hint-label {
+  position: absolute;
+  background: var(--green-600);
+  color: var(--neutral-0);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
 /* ─── 录制中动画 keyframes ────────────────────────────────────── */
 @keyframes rec-pulse {
   0%,

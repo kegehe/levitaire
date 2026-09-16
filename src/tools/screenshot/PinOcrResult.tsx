@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -12,6 +12,11 @@ import {
   type SearchEngineId,
 } from "../../constants/searchEngineConfig";
 import { useAiOptimize } from "../../hooks/useAiOptimize";
+import {
+  applyThemePreferences,
+  getStoredThemePreferences,
+  subscribeThemePreferences,
+} from "../../styles/themePreferences";
 
 import "./PinOcrResult.css";
 
@@ -24,7 +29,8 @@ interface Payload {
 const TRANSLATE_MODE = OPTIMIZE_MODES.find((m) => m.id === "translate")!;
 
 export default function PinOcrResult() {
-  const win = getCurrentWebviewWindow();
+  // getCurrentWebviewWindow() 每次调用都返回新对象，必须 memo 化（它是 effect 的依赖）
+  const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [text, setText] = useState("");
   // ocrError：OCR 识别失败（结果窗口无文本可看，直接覆盖内容区）
   const [ocrError, setOcrError] = useState("");
@@ -34,6 +40,19 @@ export default function PinOcrResult() {
   const [translating, setTranslating] = useState(false);
   const translatingRef = useRef(false);
   const textBeforeTranslateRef = useRef("");
+
+  // 主题接入：OCR 结果窗为常驻窗口，需在挂载时着色并订阅广播，
+  // 否则主题在窗口创建后变更时不会刷新。
+  useLayoutEffect(() => {
+    applyThemePreferences(getStoredThemePreferences());
+  }, []);
+
+  useEffect(() => {
+    const unlistenTheme = subscribeThemePreferences();
+    return () => {
+      unlistenTheme.then((fn) => fn());
+    };
+  }, []);
 
   const { optimize, cancel, isLoading, optimizedText, errorMessage, checkAiConfig } =
     useAiOptimize();

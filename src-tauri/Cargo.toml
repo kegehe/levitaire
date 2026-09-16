@@ -13,6 +13,11 @@ tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+# 安装前复核本地缓存安装包的签名。tauri-plugin-updater 公开的 Update::install 不验签
+# （校验写死在 download 里），静默升级把「下载」与「安装」拆到两个时间点后，就必须由
+# 我们自己补上这一步。版本必须与 tauri-plugin-updater 内部依赖保持一致（同一份即可），
+# 否则会同时存在两份 minisign-verify。校验方式：cargo tree -i minisign-verify
+minisign-verify = "0.2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -41,6 +46,11 @@ sysinfo = { version = "0.32", default-features = false, features = ["system", "d
 thiserror = "1"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "api-24", "std", "tracing"] }
 ndarray = { version = "0.17", features = ["std"] }
+# 桌面化加固（webview_hardening.rs）需要直接操作 WebView2 的 ICoreWebView2Settings：
+# Tauri 未暴露 wry 的 with_default_context_menus，只能自己拿 controller 设置。
+# 版本必须与 tauri 内部引用的 webview2-com 一致，否则 controller 的接口类型无法统一
+# （校验方式：cargo tree -i webview2-com）。
+webview2-com = "0.38"
 
 [dependencies.windows]
 version = "0.61"
@@ -50,6 +60,7 @@ features = [
     "Win32_UI_Shell",
     "Win32_UI_Accessibility",
     "Win32_System_Com",
+    "Win32_System_Console",
     "Win32_System_Ole",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",

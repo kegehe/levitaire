@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
@@ -14,6 +14,8 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
   const [areaMode, setAreaMode] = useState<AreaMode>("region");
   const [windows, setWindows] = useState<WindowInfo[]>([]);
   const [selectedWindow, setSelectedWindow] = useState<WindowInfo | null>(null);
+  // 鼠标悬停的窗口：在其真实屏幕位置显示呼吸预览框，用户点击前即可确认录制范围
+  const [hoveredWindow, setHoveredWindow] = useState<WindowInfo | null>(null);
   const [ready, setReady] = useState(false);
   const scaleRef = useRef<number>(1);
   const originRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -25,7 +27,8 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
     height: number;
   } | null>(null);
 
-  const win = getCurrentWebviewWindow();
+  // getCurrentWebviewWindow() 每次调用都返回新对象，必须 memo 化（它是 fetchReady 的依赖）
+  const win = useMemo(() => getCurrentWebviewWindow(), []);
 
   // 获取 DPI 缩放和虚拟桌面原点
   const fetchReady = useCallback(() => {
@@ -55,6 +58,7 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
     } else {
       setWindows([]);
       setSelectedWindow(null);
+      setHoveredWindow(null);
     }
   }, [areaMode]);
 
@@ -83,9 +87,23 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
     }
   };
 
+  // 物理像素 → overlay 的 CSS 像素（与区域拖框共用同一套 origin/scale）
+  const toCssRect = useCallback((w: WindowInfo) => {
+    const scale = scaleRef.current || 1;
+    const origin = originRef.current;
+    return {
+      left: (w.left - origin.x) / scale,
+      top: (w.top - origin.y) / scale,
+      width: w.width / scale,
+      height: w.height / scale,
+    };
+  }, []);
+
   // 窗口识别：选中某个窗口
   const selectWindow = (w: WindowInfo) => {
     setSelectedWindow(w);
+    // 点击即开始录制，预览框必须立刻消失，避免被 BitBlt 截进首帧
+    setHoveredWindow(null);
     onAreaSelected({
       left: w.left,
       top: w.top,
@@ -241,41 +259,74 @@ function AreaSelector({ onAreaSelected, onCancel }: AreaSelectorProps) {
         <div className="rec-fullscreen-panel" onPointerDown={(e) => e.stopPropagation()}>
           <p>将录制整个屏幕</p>
           <p className="rec-fullscreen-hint">
-            点击「开始选择」后将立即开始录制
+            点击「开始录制」后将立即开始录制
             <br />
-            全屏录制不显示控制栏与选区框（避免被录进画面）
+            全屏录制会在屏幕边缘显示呼吸框和控制栏，它们不会出现在成片里
             <br />
-            Ctrl+Shift+S 停止 · Ctrl+Shift+P 暂停 · Esc 取消
+            也可用 Ctrl+Shift+S 停止 · Ctrl+Shift+P 暂停 · Esc 取消
           </p>
           <button className="rec-area-confirm" onClick={selectFullscreen}>
-            开始选择
+            开始录制
           </button>
         </div>
       )}
 
       {/* 窗口识别模式 */}
       {areaMode === "window" && (
-        <div className="rec-window-list" onPointerDown={(e) => e.stopPropagation()}>
-          {windows.length === 0 ? (
-            <p className="rec-window-empty">未检测到可录制的窗口</p>
-          ) : (
-            windows.map((w) => (
-              <button
-                key={w.hwnd}
-                className={`rec-window-item ${selectedWindow?.hwnd === w.hwnd ? "selected" : ""}`}
-                onClick={() => selectWindow(w)}
-              >
-                <Icon name="AppWindow" size={16} />
-                <div className="rec-window-item-info">
-                  <span className="rec-window-item-title">{w.title}</span>
-                  <span className="rec-window-item-size">
-                    {w.width}×{w.height}
-                  </span>
+        <>
+          {/* 悬停预览框：贴在目标窗口的真实位置，点击前先确认录制范围。
+              用 outline 向外画（区域外的像素不会被录进成片），并带呼吸动画。 */}
+          {ready &&
+            hoveredWindow &&
+            (() => {
+              const rect = toCssRect(hoveredWindow);
+              const labelAbove = rect.top >= 24;
+              return (
+                <div
+                  className="rec-window-hint"
+                  style={{
+                    left: rect.left,
+                    top: rect.top,
+                    width: rect.width,
+                    height: rect.height,
+                  }}
+                >
+                  <div
+                    className="rec-window-hint-label"
+                    style={{
+                      top: labelAbove ? -22 : 4,
+                      left: labelAbove ? 0 : 4,
+                    }}
+                  >
+                    {hoveredWindow.title} · {hoveredWindow.width}×{hoveredWindow.height}
+                  </div>
                 </div>
-              </button>
-            ))
-          )}
-        </div>
+              );
+            })()}
+          <div className="rec-window-list" onPointerDown={(e) => e.stopPropagation()}>
+            {windows.length === 0 ? (
+              <p className="rec-window-empty">未检测到可录制的窗口</p>
+            ) : (
+              windows.map((w) => (
+                <button
+                  key={w.hwnd}
+                  className={`rec-window-item ${selectedWindow?.hwnd === w.hwnd ? "selected" : ""}`}
+                  onMouseEnter={() => setHoveredWindow(w)}
+                  onMouseLeave={() => setHoveredWindow(null)}
+                  onClick={() => selectWindow(w)}
+                >
+                  <Icon name="AppWindow" size={16} />
+                  <div className="rec-window-item-info">
+                    <span className="rec-window-item-title">{w.title}</span>
+                    <span className="rec-window-item-size">
+                      {w.width}×{w.height}
+                    </span>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        </>
       )}
     </div>
   );

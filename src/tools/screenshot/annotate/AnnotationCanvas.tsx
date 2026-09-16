@@ -7,7 +7,8 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { Annotation, ToolKind } from "./types";
+import { buildCursorSkin, normalizeCursorColor } from "../../../utils/cursorSkin";
+import type { ActiveTool, Annotation, ToolKind } from "./types";
 import { DEFAULT_COLOR, fontSizeFor, strokeWidthFor } from "./types";
 import { normalizeRect, renderAll } from "./render";
 import type { UseAnnotations } from "./useAnnotations";
@@ -17,13 +18,20 @@ export interface AnnotationCanvasHandle {
   flushBase64: () => string | null;
   /** 底图是否已加载就绪，导出前需就绪 */
   isReady: () => boolean;
+  /**
+   * 预解码一张底图。调用方应在**切换 image 之前** await 它：这样新 image 落地的第一帧
+   * 就能画上新底图，中间不会出现「画布已经挪到新选区、底图却还是空的」的空白帧，
+   * 也不会留下 isReady() 为 false 的窗口（那段窗口里导出会静默退化成未标注的原图）。
+   * 失败（base64 损坏等）时 reject，调用方可忽略并退回常规的异步加载路径。
+   */
+  preload: (base64: string) => Promise<void>;
 }
 
 interface Props {
   image: { base64: string; width: number; height: number };
   selection: { left: number; top: number; width: number; height: number };
   scale: number;
-  tool: ToolKind;
+  tool: ActiveTool;
   color: string;
   widthIndex: number;
   annotations: UseAnnotations;
@@ -32,62 +40,30 @@ interface Props {
 }
 
 /**
- * The annotation canvas covers the captured image, so the native cursor is
- * very easy to lose against a busy screenshot. Keep a small tool glyph under
- * a dark outline and a light keyline; the selected colour is the innermost
- * stroke and therefore remains visible on both light and dark images.
+ * 截图标注光标（十字准星 + 颜色徽章）。几何、叠色、热点**全部来自 utils/cursorSkin**——
+ * 屏幕草稿（SketchTool）用的是同一套外壳，要改光标外观请改那边，别在这里再抄一份副本。
+ * 本模块只负责「每个工具画什么符号」；三条硬约束见 cursorSkin.ts 顶部注释。
+ * 热点 = 十字交点 (16,16)：六个工具的落笔点都正好是点击处（矩形/马赛克左上角、
+ * 箭头/画笔起点、序号圆心、文字左上角）。
  */
-const CURSOR_SHAPES: Record<ToolKind, { shape: string; hotspot: [number, number] }> = {
-  rect: {
-    shape:
-      '<path d="M14 3v6M14 19v6M3 14h6M19 14h6"/><rect x="8" y="8" width="12" height="12" rx="1"/>',
-    hotspot: [14, 14],
-  },
-  arrow: {
-    shape: '<path d="M4 24 22 6M14 6h8v8"/>',
-    hotspot: [4, 24],
-  },
-  brush: {
-    shape:
-      '<path d="m4 24 3.2-8.2L18.8 4.2a2.6 2.6 0 0 1 3.7 3.7L10.7 19.8 4 24Z"/><path d="m13.5 9.5 4.2 4.2"/>',
-    hotspot: [4, 24],
-  },
-  text: {
-    shape: '<path d="M5 5h18M14 5v18M9 23h10"/>',
-    hotspot: [5, 5],
-  },
-  number: {
-    shape: '<circle cx="14" cy="14" r="8"/><path d="m12 11 2-2v10M11 19h6"/>',
-    hotspot: [14, 14],
-  },
-  mosaic: {
-    shape:
-      '<path d="M14 3v6M14 19v6M3 14h6M19 14h6"/><rect x="8" y="8" width="5" height="5"/><rect x="15" y="8" width="5" height="5"/><rect x="8" y="15" width="5" height="5"/><rect x="15" y="15" width="5" height="5"/>',
-    hotspot: [14, 14],
-  },
+
+/**
+ * 徽章里的工具图形，坐标写在 10×10 单位框内（框的尺寸与缩放见 cursorSkin.ts）。
+ * 32px 下这些符号只有 6px 左右，所以**只保留最少、最粗的特征**——细节一多就在 1× 下糊掉
+ * （马赛克原先是 4 个描边小方块、序号是 #，实测都糊成一团，改成实心块／"1"）。
+ * `fill="__INK__"` 由 buildCursorSkin() 按底色亮度替换成墨色，用于实心符号。
+ */
+const CURSOR_GLYPHS: Record<ToolKind, string> = {
+  rect: '<path d="M1.7 1.7h6.6v6.6h-6.6z"/>',
+  arrow: '<path d="M1.6 8.4 8.4 1.6M4.4 1.6h4v4"/>',
+  brush: '<path d="M1.4 8.6 5.1 2.4 8.6 5.9z" fill="__INK__"/>',
+  text: '<path d="M1.8 2.1h6.4M5 2.1v6.4M3.1 8.5h3.8"/>',
+  number: '<path d="M3.3 3.5 5.7 1.9v6.4M3 8.3h5.4"/>',
+  mosaic: '<path d="M1.4 1.4h3.5v3.5h-3.5zM5.1 5.1h3.5v3.5h-3.5z" fill="__INK__"/>',
 };
 
-function cursorColor(color: string): string {
-  // The colour picker emits hex values. Guard the SVG URL in case a persisted
-  // setting from an older version contains an invalid value.
-  return /^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(color) ? color : DEFAULT_COLOR;
-}
-
 export function annotationCursor(tool: ToolKind, color: string): string {
-  const { shape, hotspot } = CURSOR_SHAPES[tool];
-  const accent = cursorColor(color);
-  const svg = [
-    '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">',
-    '<g fill="none" stroke="#101216" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">',
-    shape,
-    "</g>",
-    '<g fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">',
-    shape,
-    "</g>",
-    `<g fill="none" stroke="${accent}" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">${shape}</g>`,
-    "</svg>",
-  ].join("");
-  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${hotspot[0]} ${hotspot[1]}, auto`;
+  return buildCursorSkin(normalizeCursorColor(color, DEFAULT_COLOR), CURSOR_GLYPHS[tool]);
 }
 
 function genId(): string {
@@ -103,6 +79,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [baseImg, setBaseImg] = useState<HTMLImageElement | null>(null);
+  // 已解码底图对应的 image.base64，用于判断底图是否还是"当前这张"
+  const loadedSrcRef = useRef<string | null>(null);
+  // 预解码好的底图（见 handle.preload）。渲染时按 base64 精确命中，命中就不必再异步加载。
+  const preloadedRef = useRef<{ base64: string; img: HTMLImageElement } | null>(null);
   // 浮动文字输入：在画布物理坐标处显示
   const [textEditing, setTextEditing] = useState<{
     x: number; // 画布内部物理 px
@@ -121,14 +101,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
   const draftPtsRef = useRef<{ x: number; y: number }[]>([]);
 
   const { committed, draft, setDraft, commit } = annotations;
-  const cursor = useMemo(() => annotationCursor(tool, color), [tool, color]);
+  // 移动工具不画图，用系统标准移动光标而不是「十字 + 徽章」皮肤（那套皮肤是落笔点提示，
+  // 对不落笔的工具是误导）；四个方向的缩放光标由选区手柄自身的 CSS 负责。
+  const cursor = useMemo(
+    () => (tool === "move" ? "move" : annotationCursor(tool, color)),
+    [tool, color],
+  );
 
-  // 底图加载
+  // 底图加载。记下「当前这份 baseImg 对应哪张图」，见下面的 baseImgForRender。
+  // 若这张图已经被 preload 预解码过，这里就不重复解码（预解码结果由渲染分支直接取用）。
   useEffect(() => {
+    if (preloadedRef.current?.base64 === image.base64) return;
     let cancelled = false;
     const img = new Image();
     img.onload = () => {
-      if (!cancelled) setBaseImg(img);
+      if (cancelled) return;
+      loadedSrcRef.current = image.base64;
+      setBaseImg(img);
     };
     img.src = `data:image/png;base64,${image.base64}`;
     return () => {
@@ -136,14 +125,33 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     };
   }, [image.base64]);
 
+  /**
+   * 底图与当前 image 不一致时一律不画。
+   *
+   * 选区调整后，canvas 会先随新的 selection 挪到新位置，而新底图还要几十毫秒才解码完；
+   * 这期间若继续用旧 baseImg 绘制，上屏的就是一帧错位像素（canvas 在新位置、内容是旧裁剪）。
+   * 不能靠「用 effect 把 baseImg 置 null」来挡：effect 在本次绘制**之后**才跑，那一帧照样画出去。
+   * 清空后 canvas 全透明，露出的实时桌面在新位置反而是对的。
+   *
+   * 必须用渲染期取值（而不是把预解码结果塞进 state）：切换 image 的那一次渲染就要拿到新底图，
+   * 否则第一帧仍是空画布，白闪一帧。
+   */
+  const preloaded = preloadedRef.current;
+  const baseImgForRender =
+    preloaded && preloaded.base64 === image.base64
+      ? preloaded.img
+      : loadedSrcRef.current === image.base64
+        ? baseImg
+        : null;
+
   // 重绘
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    renderAll(ctx, baseImg, committed, draft);
-  }, [committed, draft, baseImg]);
+    renderAll(ctx, baseImgForRender, committed, draft);
+  }, [committed, draft, baseImgForRender]);
 
   // 文字输入框自动撑高：按内容 scrollHeight 调整，使多行（Shift+Enter / 自动换行）可见。
   // 先置 auto 重置历史高度，再按 scrollHeight 设定；限制最大高度避免超出选区过多。
@@ -162,7 +170,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    renderAll(ctx, baseImg, annotations.getCommitted(), annotations.getDraft());
+    renderAll(ctx, baseImgForRender, annotations.getCommitted(), annotations.getDraft());
   };
 
   // 提交正在编辑的文字（读 ref 防陈旧/防重入）
@@ -201,11 +209,21 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
         const url = canvas.toDataURL("image/png");
         return url.substring(url.indexOf(",") + 1);
       },
-      isReady: () => baseImg !== null,
+      isReady: () => baseImgForRender !== null,
+      preload: (base64: string) =>
+        new Promise<void>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            preloadedRef.current = { base64, img };
+            resolve();
+          };
+          img.onerror = () => reject(new Error("底图预解码失败"));
+          img.src = `data:image/png;base64,${base64}`;
+        }),
     }),
     // flushBase64 通过 getCommitted/getDraft/textEditingRef 读最新值，无需依赖 committed/draft；
-    // 仅 baseImg/color/widthIndex 变化时重建（影响 syncRender/finishText 闭包）
-    [baseImg, color, widthIndex],
+    // 仅底图/color/widthIndex 变化时重建（影响 syncRender/finishText 闭包）
+    [baseImgForRender, color, widthIndex],
   );
 
   // 把指针 client 坐标换算为画布内部物理像素坐标
@@ -221,6 +239,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
   };
 
   const onPointerDown = (e: ReactPointerEvent) => {
+    if (tool === "move") return; // 移动工具的事件由选区调整层接管（canvas 本身也 pointer-events:none）
     // 若有正在编辑的文字，先提交，再处理新操作
     if (textEditingRef.current) finishText();
     const p = toCanvas(e.clientX, e.clientY);
@@ -308,7 +327,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
   };
 
   const onPointerMove = (e: ReactPointerEvent) => {
-    if (tool === "text" || tool === "number") return;
+    if (tool === "move" || tool === "text" || tool === "number") return;
     const start = startRef.current;
     if (!start) return;
     const p = toCanvas(e.clientX, e.clientY);
@@ -334,7 +353,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
   };
 
   const onPointerUp = (e: ReactPointerEvent) => {
-    if (tool === "text" || tool === "number") return;
+    if (tool === "move" || tool === "text" || tool === "number") return;
     const start = startRef.current;
     if (!start) return;
     startRef.current = null;

@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// 单张便利贴窗口的 label 前缀（capabilities 用 `sticky-note-*` glob 放行）
 pub const NOTE_WINDOW_PREFIX: &str = "sticky-note-";
@@ -318,6 +318,43 @@ pub fn ensure_note_window(app: &tauri::AppHandle, id: &str) -> Result<tauri::Web
         .background_color(tauri::webview::Color(0, 0, 0, 0))
         .build()
         .map_err(|e| format!("创建便利贴窗口失败: {e}"))?;
+
+    // Alt+F4（或任务栏关闭）产生的 WM_CLOSE：拦成「收起」，不要销毁。
+    //
+    // 不拦的后果：窗口消失、而数据里 `visible` 仍是 true —— 管理窗显示「已贴在桌面」
+    // 但桌面上没有这张便签，两处状态从此不一致；且防抖中（≤500ms）的正文随窗口一起丢。
+    // 对照：管理窗（`commands/sticky.rs::show_sticky_notes_manager`）与待办窗
+    // （`commands/todo.rs`）都有同样的 CloseRequested 拦截，便签窗此前是唯一漏的。
+    {
+        let close_app = app.clone();
+        let close_id = id.to_string();
+        let close_label = label.clone();
+        let close_win = win.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                // 先让前端把防抖中的正文冲盘（前端监听后立刻 flushSave），再落状态并隐藏。
+                // 必须**定向**发（`emit_to`）：`Emitter::emit` 是全局广播，会让每一张
+                // 便签窗都收到并各自多冲一次盘（多余 IPC + 写盘 + 管理窗列表抖动）。
+                let _ = close_app.emit_to(
+                    close_label.as_str(),
+                    "sticky-note-close-requested",
+                    (),
+                );
+                if let Some(store) = close_app.try_state::<NoteStore>() {
+                    if let Err(error) = store.set_visible(&close_id, false) {
+                        crate::utils::logger::log(
+                            "sticky_note",
+                            &format!("关闭便签时落 visible=false 失败: {error}"),
+                        );
+                    }
+                }
+                let _ = close_win.hide();
+                crate::commands::notify_sticky_notes_changed(&close_app);
+            }
+        });
+    }
+
     crate::utils::logger::log("sticky_note", &format!("note window created: {label}"));
     Ok(win)
 }
@@ -542,5 +579,39 @@ mod tests {
         // 单段 "." / ".." 可能越过 images 根目录，必须回退
         assert_eq!(note_safe_dir("."), "unknown");
         assert_eq!(note_safe_dir(".."), "unknown");
+    }
+
+    /// 「便签不存在」是**跨端契约**：前端 `StickyNote.tsx` 靠这句话区分
+    /// 「便签真的没了」（销毁窗口）与「瞬时读取失败」（保留窗口 + 重试卡片）。
+    ///
+    /// 为什么必须钉住：文案一改，前端 `includes` 就永远不成立 —— 已删除的便签会
+    /// 变成一张「读取失败，重试」的幽灵卡片（点重试永远失败），而瞬时失败也不再
+    /// 被误判（方向安全）；反过来，若前端把判定放宽成「任何错误都销毁窗口」，
+    /// 一次 IPC 抖动就会销毁用户正看着的便签窗，而数据里它仍是 visible=true，
+    /// 管理窗显示「已贴在桌面」但桌面没有窗口 —— 这正是本次要修的旧 bug。
+    #[test]
+    fn not_found_message_is_a_cross_boundary_contract() {
+        const MARKER: &str = "便利贴不存在";
+        // ① 生产代码里必须仍有这条文案（本用例自己写在文件末尾的测试模块里，不算）
+        let source = include_str!("mod.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("mod.rs 至少应有一段生产代码");
+        assert!(
+            production.contains(&format!("\"{MARKER}\"")),
+            "后端不再返回「{MARKER}」：前端 StickyNote.tsx 的 NOTE_NOT_FOUND_MARKER 必须同步修改"
+        );
+        // ② 前端必须引用同一个字面量，且经由具名常量（避免散落的裸字符串）
+        let frontend = include_str!("../../../src/tools/sticky-note/StickyNote.tsx");
+        assert!(
+            frontend.contains(&format!("const NOTE_NOT_FOUND_MARKER = \"{MARKER}\";")),
+            "前端 StickyNote.tsx 的 NOTE_NOT_FOUND_MARKER 与后端文案不一致：\
+             两侧必须逐字相同，否则「便签已删除」与「瞬时失败」再也分不开"
+        );
+        assert!(
+            frontend.contains("message.includes(NOTE_NOT_FOUND_MARKER)"),
+            "前端必须用该常量做判定；退回裸字符串会让本守卫失去意义"
+        );
     }
 }

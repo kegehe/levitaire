@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useLayoutEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
@@ -15,6 +15,7 @@ import { ensureRecordingControlsWindow } from "../../utils/toolWindows";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
+  resolveThemeMode,
   subscribeThemePreferences,
 } from "../../styles/themePreferences";
 
@@ -88,8 +89,9 @@ export interface ControlsPlacement {
   region: CssRegion;
   controls: ControlPosition;
   /** 控制栏是否覆盖在录制区域内。为 true 表示区域铺满视口（全屏），
-   * 控制栏无处可放，调用方必须不显示控制栏（否则会被 BitBlt 截进视频），
-   * 直接录制完整区域；为 false 时控制栏在录制区域外，可安全显示。 */
+   * WebView2 控制栏在此处会被 BitBlt 截进视频，调用方必须不创建它
+   * （改由后端原生指示层经 WDA_EXCLUDEFROMCAPTURE 排除出捕获）；
+   * 为 false 时控制栏在录制区域外，可安全显示。 */
   overlay: boolean;
 }
 
@@ -98,7 +100,7 @@ export interface ControlsPlacement {
  * the region; when the region is full-screen (edge-to-edge) there is no outside
  * space, so the controls would have to overlay the recorded area — instead of
  * shrinking the region (which would drop screen content from the video), the
- * caller keeps the full region and simply never shows the control bar.
+ * caller keeps the full region and never creates the WebView2 control bar.
  * Returns `null` when the viewport cannot fit the controls anywhere (the caller
  * reports an error then).
  */
@@ -146,7 +148,8 @@ export function resolveControlsPlacement(
 }
 
 function RecordingTool() {
-  const win = getCurrentWebviewWindow();
+  // getCurrentWebviewWindow() 每次调用都返回新对象，必须 memo 化（它是多个 effect 的依赖）
+  const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [phase, setPhase] = useState<RecordingPhase>("mode_select");
   const [mode, setMode] = useState<RecordMode | null>(null);
   const [region, setRegion] = useState<RecordRegion | null>(null);
@@ -420,9 +423,9 @@ function RecordingTool() {
         const resolved = resolveControlsPlacement(cssRegion, window.innerWidth, window.innerHeight);
         if (!resolved) throw new Error("屏幕空间不足，无法显示录制控制栏");
 
-        // 全屏录制：控制栏无处可放，不显示它（会被 BitBlt 截进视频），也不收缩
-        // 录制区域（否则成片丢失屏幕边缘内容）。直接录制完整区域，通过全局快捷键
-        // 控制：Ctrl+Shift+S 停止、Ctrl+Shift+P 暂停/继续、Esc 取消。
+        // 全屏录制：控制栏在录制区域内无处可放，WebView2 控制栏会被 BitBlt 截进成片，
+        // 因此不收缩录制区域（否则成片丢失屏幕边缘内容）、也不建 WebView2 控制栏，
+        // 改用后端的原生指示层（见下方 show_recording_indicator）。
         if (resolved.overlay) {
           // 同步提交区域与阶段切换：确保 AreaSelector 的全屏面板/顶部标签在
           // start_recording 抓第一帧前已从 DOM 卸载（flushSync 同步提交，
@@ -451,6 +454,17 @@ function RecordingTool() {
           }
           // 遮罩改为点击穿透，避免遮挡被录制应用的交互
           await invoke("show_recording_controls");
+          // 全屏录制改用**原生指示层**（屏幕边缘呼吸框 + 录制控制栏）替代 WebView2 控制栏：
+          // 它带 WDA_EXCLUDEFROMCAPTURE，用户看得见但不会被 BitBlt 截进成片。
+          // 系统不支持该标记时后端会放弃创建并退回静默录制（此时只剩全局快捷键），
+          // 前端无需区分，故失败只记日志。
+          await invoke("show_recording_indicator", {
+            left: selectedRegion.left,
+            top: selectedRegion.top,
+            width: selectedRegion.width,
+            height: selectedRegion.height,
+            dark: resolveThemeMode(getStoredThemePreferences().theme) === "dark",
+          }).catch((err) => console.error("show_recording_indicator failed:", err));
           return;
         }
 

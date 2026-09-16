@@ -1,12 +1,20 @@
 /* ============================================================
    便利贴管理窗
+
+   高度随内容走：窗口尺寸由前端按面板实测高度下发（见 StickyNoteManager.tsx 的
+   resizeToContent），所以这里**不能**写 height: 100vh、面板也不能写 height: 100%。
+   一旦面板撑满窗口，实测出来的高度就等于窗口高度，形成「面板高 → 窗口高 → 面板更高」
+   的反馈环，窗口只会一路变大。
    ============================================================ */
 
 .snm-window {
   box-sizing: border-box;
   width: 100vw;
-  height: 100vh;
-  padding: 12px;
+  /* 内边距同时是面板投影的展开空间：面板投影为 0 12px 28px，需求 = 左右 14、
+     顶部 14-12=2（取与左右同值保持匀称）、底部 12+14=26（取 28 留余量）。
+     内边距小于需求时，投影会被窗口边界硬切，在面板圆角处留下带直角的残影。
+     ⚠️ 与 StickyNoteManager.tsx 的 MANAGER_MARGIN_TOP/BOTTOM/X 同步。 */
+  padding: 14px 14px 28px;
   font-family:
     system-ui,
     -apple-system,
@@ -21,7 +29,7 @@
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  height: 100%;
+  /* 高度随内容（勿写 100%）：窗口尺寸是照它实测出来的，撑满窗口就会形成反馈环 */
   border-radius: 14px;
   background: var(--color-bg-elevated, #ffffff);
   border: 1px solid var(--color-border, #d9e1ed);
@@ -31,13 +39,20 @@
   overflow: hidden;
 }
 
-/* 头部 */
+/* 头部。同时是拖拽面：本窗是无边框窗（decorations:false），没有原生标题栏，
+   不给这里挂 drag 就没有任何地方能拖动整窗（见 StickyNoteManager.tsx 的 startPanelDrag）。
+   按钮自带 cursor:pointer，不会被这里的 grab 覆盖。 */
 .snm-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px;
   border-bottom: 1px solid var(--color-border, #d9e1ed);
+  cursor: grab;
+}
+
+.snm-header:active {
+  cursor: grabbing;
 }
 
 .snm-title {
@@ -102,6 +117,18 @@
   color: var(--color-danger, #d64540);
 }
 
+/* 新建（标题栏里的常驻入口）。它是本窗唯一的「新建」落点：便签列表本身要吃掉全部
+   竖向空间，底部再压一条整宽主按钮既费高度、又和空状态的紧凑按钮重复；图标按钮
+   在两种状态下位置都不变，不和列表抢地方。 */
+.snm-icon-btn.is-brand {
+  color: var(--color-brand, #2474d7);
+}
+
+.snm-icon-btn.is-brand:hover:not(:disabled) {
+  background: var(--color-brand, #2474d7);
+  color: var(--color-brand-fg, #ffffff);
+}
+
 /* 摘要行 */
 .snm-summary {
   padding: 6px 14px 2px;
@@ -111,11 +138,15 @@
 
 /* 列表 */
 .snm-list {
-  flex: 1;
+  /* 不用 flex: 1 —— 面板高度跟着内容收缩（窗口按实测高度下发）。行数多时用
+     max-height 收口：border-box 含自身 14px 上下内边距 → 净 300px，实测行高 48px，
+     约 6 行 + 第 7 行露一小截 —— 那半截正好当「还能往下滚」的提示（7 张起进入滚动，
+     窗口高度上限锁在 ~431：再高就该滚动了，继续撑高只会把窗口顶出屏幕）。 */
   margin: 0;
-  padding: 4px 10px 8px;
-  list-style: none;
+  padding: 4px 10px 10px;
+  max-height: 314px;
   overflow-y: auto;
+  list-style: none;
 }
 
 .snm-item {
@@ -232,9 +263,10 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  flex: 1;
+  /* 刻意不写 flex: 1（也没有 justify-content：高度自撑后它不起作用）：空状态一旦撑满
+     面板，面板就被拉回固定高度，窗口又变成一大片空白 */
   gap: 8px;
+  padding: 18px 14px 12px;
   color: var(--color-fg-subtle, #8793a8);
   font-size: 13px;
   text-align: center;
@@ -244,39 +276,42 @@
   margin: 0;
 }
 
-.snm-empty svg {
+/* 只压暗空状态自己的大图标；新建按钮里的 + 是按钮的一部分，跟着压暗会像禁用态 */
+.snm-empty > svg {
   color: var(--color-fg-subtle, #8793a8);
+  opacity: 0.72;
 }
 
-/* 底部新建 */
-.snm-footer {
-  padding: 10px 12px;
-  border-top: 1px solid var(--color-border, #d9e1ed);
-}
-
-.snm-primary-btn {
+/* 空状态的「新建第一张」：自撑宽的胶囊按钮，不占满整行 —— 一行文字下面压一条整宽
+   主按钮，在这么小的面板里过重，视觉重心也全歪到按钮上。
+   淡蓝底 + 一圈 brand 细边（只靠底色会读成 `.snm-count` 那种「徽标」而不是按钮）。 */
+.snm-add-btn {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  border-radius: 10px;
-  background: var(--color-brand, #2474d7);
-  color: var(--color-brand-fg, #ffffff);
-  font-size: 13px;
+  gap: 4px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--color-brand, #2474d7) 22%, transparent);
+  border-radius: 999px;
+  background: var(--color-brand-subtle, #e4edfa);
+  color: var(--color-brand, #2474d7);
+  font-size: 12px;
   font-weight: 500;
+  line-height: 1;
   cursor: pointer;
   transition:
     background var(--transition-fast, 120ms ease),
+    border-color var(--transition-fast, 120ms ease),
+    color var(--transition-fast, 120ms ease),
     transform var(--transition-fast, 120ms ease);
 }
 
-.snm-primary-btn:hover {
-  background: var(--color-brand-hover, #1a5fb8);
+.snm-add-btn:hover {
+  border-color: var(--color-brand, #2474d7);
+  background: var(--color-brand, #2474d7);
+  color: var(--color-brand-fg, #ffffff);
 }
 
-.snm-primary-btn:active {
-  transform: scale(0.98);
+.snm-add-btn:active {
+  transform: scale(0.97);
 }

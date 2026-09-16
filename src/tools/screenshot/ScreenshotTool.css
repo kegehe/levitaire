@@ -159,6 +159,26 @@
   display: none;
 }
 
+/* 工具栏被翻到选区**上方**时（底图不够放，见 ScreenshotTool.tsx 的 toolbarAbove）：
+   翻到上方说明下方放不下，工具栏会被贴到窗口上沿附近（aboveFits 的门槛只有
+   VIEWPORT_PADDING = 12px），此时向上弹的浮层越过窗口上边界被削掉（实测 17%，
+   贴顶时最多 47%）。改为向下弹 → 落在选区上，仍完整可见。 */
+.ss-toolbar-wrap.ss-toolbar-above .ss-btn[data-tooltip]::after {
+  top: calc(100% + 4px);
+  bottom: auto;
+}
+
+/* OCR 结果面板的关闭按钮：面板初始位置会被钳制到距屏幕顶 12px 处（见
+   initialOcrPanelPosition），向上弹出的浮层同样会被窗口上边界削掉（实测 83% 不可见）。
+   面板头部下方是结果文本区，改为向下弹即可完整可见；同时右对齐避免溢出面板右边。 */
+.ss-ocr-result-header .ss-btn[data-tooltip]::after {
+  top: calc(100% + 4px);
+  bottom: auto;
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
 .ss-btn:hover:not(:disabled) {
   background: var(--button-hover-bg);
 }
@@ -197,6 +217,78 @@
 .ss-annotate-canvas {
   display: block;
   touch-action: none;
+}
+
+/* 移动工具下 canvas 必须让开指针事件：选区调整层压在它上面，
+   若 canvas 仍可命中，拖动会被画布吞掉（画布只认标注工具）。 */
+.ss-overlay.ss-move-tool .ss-annotate-canvas {
+  pointer-events: none;
+}
+
+/* 选区调整层（移动工具）。
+   层级关系（标注态）：canvas 5 < 遮罩 6(仅调整中) < 移动层 7 < 文字输入 8 <
+   边手柄 9 < 角手柄 10 < 工具栏 10。
+   移动层在 canvas 之上是有意的：调整期间底图停在原处不动，露出的新区域靠下方的
+   实时桌面补，用这层接管指针才能真正"拖动选区"。 */
+.ss-adjust-body {
+  position: absolute;
+  z-index: 7;
+  cursor: move;
+}
+
+/* 四边/四角手柄：透明命中区，命中宽度 8px（跨在选区边界上，内外各一半）。
+   平时不可见，只提供光标反馈（鼠标靠近边/角就变缩放光标）；开始拖动后四角才显形。 */
+.ss-adjust-handle {
+  position: absolute;
+  z-index: 9;
+  background: transparent;
+}
+
+.ss-adjust-n,
+.ss-adjust-s {
+  height: 8px;
+  cursor: ns-resize;
+  transform: translateY(-50%);
+}
+
+.ss-adjust-w,
+.ss-adjust-e {
+  width: 8px;
+  cursor: ew-resize;
+  transform: translateX(-50%);
+}
+
+/* 角手柄压在边手柄之上：角的优先级最高，否则靠近角落时会被边抢走 */
+.ss-adjust-ne,
+.ss-adjust-nw,
+.ss-adjust-se,
+.ss-adjust-sw {
+  z-index: 10;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+}
+
+.ss-adjust-nw,
+.ss-adjust-se { cursor: nwse-resize; }
+.ss-adjust-ne,
+.ss-adjust-sw { cursor: nesw-resize; }
+
+/* 拖动中：遮罩抬到 canvas 之上，挡住"伸出新选区"的旧底图部分；
+   四角显形成 8px 实心方块（四边不显形——选区框的蓝色描边已经标出了它们）。 */
+.ss-overlay.ss-adjusting .ss-mask {
+  z-index: 6;
+}
+
+.ss-overlay.ss-adjusting .ss-adjust-ne,
+.ss-overlay.ss-adjusting .ss-adjust-nw,
+.ss-overlay.ss-adjusting .ss-adjust-se,
+.ss-overlay.ss-adjusting .ss-adjust-sw {
+  width: 8px;
+  height: 8px;
+  background: #fff;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--color-accent);
 }
 
 .ss-annotate-toolbar {

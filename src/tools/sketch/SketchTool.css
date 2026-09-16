@@ -1,4 +1,28 @@
 .sketch-root {
+  /* 草稿悬浮层配色：统一由主题令牌派生，随浅色/深色方案实时切换。
+     该层悬浮在任意桌面内容之上，因此保留描边与投影保证可辨识度。
+     注意：阴影自包含字面值，不引用 --shadow-* 系，
+     避免 themePreferences 运行时把 --shadow-md/lg 覆盖成大浮层投影。 */
+  --sketch-surface: var(--toolbar-bg);
+  --sketch-surface-strong: var(--color-bg-elevated);
+  --sketch-border: var(--color-border-hover);
+  --sketch-border-soft: var(--color-border);
+  --sketch-fg: var(--color-fg);
+  --sketch-fg-muted: var(--color-fg-muted);
+  --sketch-fg-subtle: var(--color-fg-subtle);
+  --sketch-hover-bg: color-mix(in srgb, var(--color-fg) 9%, transparent);
+  --sketch-active-bg: color-mix(in srgb, var(--color-fg) 15%, transparent);
+  --sketch-divider: color-mix(in srgb, var(--color-fg) 18%, transparent);
+  --sketch-canvas-bg: var(--color-bg-sunken);
+  /* 色板选中环：内环取前景色（浅色主题下深、深色主题下浅，始终与浮层底拉开对比），
+     外圈加一道与浮层同色的 1px 隔离缝，避免与相邻色块粘连。
+     注意不能把内环设成浮层底色：取色面板底色与之同值，环会整圈不可见，
+     导致「选中态」与「hover 态」视觉无法区分。 */
+  --sketch-swatch-ring: var(--color-fg);
+  --sketch-swatch-gap: var(--sketch-surface);
+  --sketch-shadow: 0 12px 32px rgb(24 34 48 / 0.18), 0 2px 8px rgb(24 34 48 / 0.1);
+  --sketch-shadow-strong: 0 18px 48px rgb(24 34 48 / 0.24);
+
   position: fixed;
   inset: 0;
   width: 100vw;
@@ -7,22 +31,35 @@
   background: transparent;
   cursor: default;
 }
+
+[data-theme="dark"] .sketch-root {
+  --sketch-shadow: 0 12px 32px rgb(0 0 0 / 0.45), 0 2px 8px rgb(0 0 0 / 0.3);
+  --sketch-shadow-strong: 0 18px 48px rgb(0 0 0 / 0.56);
+}
+
 .sketch-tooltip {
   position: fixed;
   z-index: 100;
   max-width: min(240px, calc(100vw - 16px));
   padding: 4px 8px;
-  border: 1px solid var(--tooltip-border, rgba(255, 255, 255, 0.22));
+  border: 1px solid var(--tooltip-border);
   border-radius: 5px;
-  color: var(--tooltip-text, #f4f5f7);
-  background: var(--tooltip-bg, rgba(18, 20, 24, 0.96));
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+  color: var(--tooltip-text);
+  background: var(--tooltip-bg);
+  box-shadow: 0 4px 12px rgb(24 34 48 / 0.28);
   font-size: 11px;
   font-weight: 500;
   line-height: 1.35;
   white-space: nowrap;
   pointer-events: none;
   transform: translate(-50%, -100%);
+}
+/* 浮层默认向上弹：translateY(-100%) 把 top 解释成「浮层下沿」（即按钮上沿再上移 7px 间距）。
+   按钮上方净空不足时（见 SketchTool.tsx 的 TOOLTIP_ABOVE_SPACE，例如标注文字编辑器的
+   确认/取消按钮被钳到 top: 8px），继续向上弹会整体落到窗口上边界之外被原生窗口裁掉，
+   改用本修饰类向下弹。写成双类提高特异性，不依赖两条规则在文件里的先后顺序。 */
+.sketch-tooltip.sketch-tooltip--below {
+  transform: translate(-50%, 0);
 }
 .sketch-canvas {
   position: absolute;
@@ -43,10 +80,10 @@
   width: 272px;
   max-width: calc(100vw - 16px);
   padding: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid var(--sketch-border);
   border-radius: 8px;
-  background: rgba(24, 26, 31, 0.96);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+  background: var(--sketch-surface);
+  box-shadow: var(--sketch-shadow);
   pointer-events: auto;
 }
 .sketch-text-input {
@@ -54,19 +91,19 @@
   min-width: 0;
   height: 30px;
   padding: 0 7px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--sketch-border-soft);
   border-radius: 5px;
   outline: 0;
-  color: #f4f5f7;
-  background: rgba(255, 255, 255, 0.1);
+  color: var(--sketch-fg);
+  background: var(--sketch-hover-bg);
   line-height: 30px;
 }
 .sketch-text-input:focus {
-  border-color: rgba(255, 255, 255, 0.62);
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12);
+  border-color: var(--color-focus-ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus-ring) 22%, transparent);
 }
 .sketch-text-input::placeholder {
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--sketch-fg-subtle);
 }
 .sketch-text-confirm,
 .sketch-text-cancel {
@@ -77,15 +114,15 @@
   height: 30px;
   border: 0;
   border-radius: 5px;
-  color: #f4f5f7;
+  color: var(--sketch-fg);
   background: transparent;
   cursor: pointer;
 }
 .sketch-text-confirm:hover {
-  background: rgba(52, 199, 89, 0.28);
+  background: color-mix(in srgb, var(--color-success) 24%, transparent);
 }
 .sketch-text-cancel:hover {
-  background: rgba(255, 59, 48, 0.28);
+  background: color-mix(in srgb, var(--color-danger) 24%, transparent);
 }
 .sketch-picker-panel {
   position: absolute;
@@ -93,11 +130,11 @@
   bottom: 78px;
   left: 50%;
   padding: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
+  border: 1px solid var(--sketch-border);
   border-radius: 9px;
-  color: #f4f5f7;
-  background: rgba(24, 26, 31, 0.96);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+  color: var(--sketch-fg);
+  background: var(--sketch-surface);
+  box-shadow: var(--sketch-shadow);
   transform: translateX(-50%);
   pointer-events: auto;
 }
@@ -131,9 +168,9 @@
   position: absolute;
   inset: 4px;
   display: block;
-  border: 1px dashed rgba(255, 255, 255, 0.8);
+  border: 1px dashed var(--sketch-fg-muted);
   border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85);
+  box-shadow: 0 0 0 1px var(--sketch-swatch-gap);
 }
 .sketch-custom-color::before {
   content: "+";
@@ -146,11 +183,11 @@
   font-size: 16px;
   font-weight: 700;
   line-height: 1;
-  text-shadow: 0 1px 2px #000;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.85);
   pointer-events: none;
 }
 .sketch-custom-color.active span {
-  border: 2px solid #fff;
+  border: 2px solid var(--sketch-swatch-ring);
 }
 .sketch-custom-width {
   display: flex;
@@ -159,21 +196,21 @@
   min-width: 82px;
   min-height: 34px;
   padding: 4px 7px;
-  border: 1px dashed rgba(255, 255, 255, 0.38);
+  border: 1px dashed var(--sketch-divider);
   border-radius: 6px;
-  color: rgba(255, 255, 255, 0.82);
+  color: var(--sketch-fg-muted);
   cursor: ns-resize;
   user-select: none;
 }
 .sketch-custom-width:focus-visible {
-  outline: 2px solid var(--color-focus-ring, #5aa9ff);
+  outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
 .sketch-custom-width-dot {
   display: block;
   flex: 0 0 auto;
   border-radius: 50%;
-  background: #fff;
+  background: var(--sketch-fg);
 }
 .sketch-custom-width-value {
   min-width: 28px;
@@ -193,11 +230,11 @@
   overflow-x: auto;
   gap: 7px;
   padding: 9px 11px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--sketch-border);
   border-radius: 14px;
-  background: rgba(24, 26, 31, 0.92);
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.35);
-  color: #f4f5f7;
+  background: color-mix(in srgb, var(--sketch-surface) 94%, transparent);
+  box-shadow: var(--sketch-shadow);
+  color: var(--sketch-fg);
   backdrop-filter: blur(16px);
   scrollbar-width: thin;
   cursor: default;
@@ -224,13 +261,13 @@
   height: 30px;
   padding: 0;
   border-radius: 8px;
-  color: #d8dbe2;
+  color: var(--sketch-fg-muted);
   background: transparent;
 }
 .sketch-icon-button:hover,
 .sketch-icon-button.active {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.16);
+  color: var(--sketch-fg);
+  background: var(--sketch-active-bg);
 }
 .sketch-icon-button:disabled {
   opacity: 0.35;
@@ -240,9 +277,9 @@
   display: block;
   width: 16px;
   height: 16px;
-  border: 2px solid #fff;
+  border: 2px solid var(--sketch-swatch-ring);
   border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.82);
+  box-shadow: 0 0 0 1px var(--sketch-swatch-gap);
 }
 .sketch-width-trigger span {
   display: block;
@@ -265,16 +302,16 @@
   content: "";
   position: absolute;
   inset: 3px;
-  border: 2px solid #fff;
+  border: 2px solid var(--sketch-swatch-ring);
   border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85);
+  box-shadow: 0 0 0 1px var(--sketch-swatch-gap);
   pointer-events: none;
 }
 .sketch-color:hover::after {
   content: "";
   position: absolute;
   inset: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.75);
+  border: 1px solid color-mix(in srgb, var(--color-fg) 45%, transparent);
   border-radius: 50%;
   pointer-events: none;
 }
@@ -293,25 +330,25 @@
 .sketch-width span {
   display: block;
   border-radius: 50%;
-  background: #fff;
+  background: var(--sketch-fg);
 }
 .sketch-width.active {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--sketch-active-bg);
 }
 .sketch-divider {
   width: 1px;
   height: 20px;
   margin: 0 2px;
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--sketch-divider);
 }
 .sketch-save {
   flex: 0 0 auto;
 }
 .sketch-save-saved {
-  color: #34c759;
+  color: var(--color-success);
 }
 .sketch-save-failed {
-  color: #ff9f0a;
+  color: var(--color-danger);
 }
 .sketch-save-saving svg {
   animation: sketch-save-spin 0.9s linear infinite;
@@ -328,12 +365,12 @@
   transform: translateX(-50%);
   max-width: min(420px, calc(100vw - 32px));
   padding: 7px 10px;
-  border: 1px solid rgba(255, 96, 96, 0.45);
+  border: 1px solid var(--color-danger);
   border-radius: 7px;
-  color: #ffd9d9;
-  background: rgba(92, 24, 28, 0.92);
+  color: var(--color-danger);
+  background: var(--sketch-surface-strong);
   font-size: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--sketch-shadow);
 }
 .sketch-close {
   margin-left: 1px;
@@ -344,8 +381,8 @@
   border: 0;
   border-radius: 7px;
   padding: 0 5px;
-  color: #f4f5f7;
-  background: rgba(255, 255, 255, 0.12);
+  color: var(--sketch-fg);
+  background: var(--sketch-active-bg);
 }
 .sketch-history {
   position: absolute;
@@ -356,11 +393,11 @@
   max-height: 280px;
   overflow: auto;
   padding: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid var(--sketch-border);
   border-radius: 10px;
-  color: #f4f5f7;
-  background: rgba(24, 26, 31, 0.95);
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.35);
+  color: var(--sketch-fg);
+  background: var(--sketch-surface);
+  box-shadow: var(--sketch-shadow);
   cursor: default;
 }
 .sketch-history-title {
@@ -370,14 +407,14 @@
 }
 .sketch-history-empty {
   padding: 10px 4px;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--sketch-fg-subtle);
   font-size: 12px;
 }
 .sketch-history-item {
   display: flex;
   align-items: center;
   width: 100%;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--sketch-border-soft);
 }
 .sketch-history-restore {
   display: flex;
@@ -386,17 +423,17 @@
   min-width: 0;
   padding: 8px 5px;
   border: 0;
-  color: #f4f5f7;
+  color: var(--sketch-fg);
   background: transparent;
   text-align: left;
   font-size: 11px;
   cursor: pointer;
 }
 .sketch-history-restore:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--sketch-hover-bg);
 }
 .sketch-history-restore span:last-child {
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--sketch-fg-subtle);
 }
 .sketch-history-remove {
   display: grid;
@@ -406,13 +443,13 @@
   margin-right: 2px;
   border: 0;
   border-radius: 5px;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--sketch-fg-subtle);
   background: transparent;
   cursor: pointer;
 }
 .sketch-history-remove:hover {
-  color: #fff;
-  background: rgba(255, 90, 90, 0.3);
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 18%, transparent);
 }
 .sketch-preview {
   position: absolute;
@@ -424,17 +461,17 @@
   width: min(720px, calc(100vw - 32px));
   height: min(560px, calc(100vh - 56px));
   padding: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid var(--sketch-border);
   border-radius: 8px;
-  background: rgba(18, 20, 24, 0.96);
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.48);
-  color: #f4f5f7;
+  background: var(--sketch-surface-strong);
+  box-shadow: var(--sketch-shadow-strong);
+  color: var(--sketch-fg);
   transform: translate(-50%, -50%);
 }
 .sketch-preview-titlebar {
   flex: 0 0 30px;
   padding: 0 5px;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--sketch-fg-muted);
   font-size: 12px;
   font-weight: 600;
   line-height: 30px;
@@ -450,7 +487,7 @@
   flex: 1;
   overflow: hidden;
   border-radius: 5px;
-  background: rgba(0, 0, 0, 0.28);
+  background: var(--sketch-canvas-bg);
   cursor: grab;
   touch-action: none;
 }
@@ -490,12 +527,12 @@
   cursor: pointer;
 }
 .sketch-preview-cancel {
-  color: #f4f5f7;
-  background: rgba(255, 255, 255, 0.12);
+  color: var(--sketch-fg);
+  background: var(--sketch-hover-bg);
 }
 .sketch-preview-confirm {
-  color: #141518;
-  background: #fff;
+  color: var(--color-accent-fg);
+  background: var(--color-accent);
 }
 .sketch-preview-actions button:disabled {
   opacity: 0.45;

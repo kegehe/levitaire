@@ -1,6 +1,14 @@
 // 标注数据模型。坐标均为「画布内部物理像素」，与底图 image.width/height 同坐标系。
 
+/** 会产生标注图形的工具（对应 Annotation 的 kind） */
 export type ToolKind = "rect" | "arrow" | "brush" | "text" | "number" | "mosaic";
+
+/**
+ * 标注工具栏可选项：标注工具 + 移动工具。
+ * 移动工具只调整选区（拖动选区移动、拖动四边四角改大小），不产生任何标注，
+ * 因此不进 ToolKind / Annotation.kind —— 标注数据模型里不该出现"什么都不画"的 kind。
+ */
+export type ActiveTool = ToolKind | "move";
 
 export interface BaseAnnotation {
   id: string;
@@ -81,7 +89,8 @@ export const COLOR_AUTO = "auto";
 // 粗细三档（物理像素），0/1/2 对应细/中/粗
 export const STROKE_WIDTHS = [3, 5, 8];
 
-export const DEFAULT_TOOL: ToolKind = "rect";
+// 默认落在移动工具上：截图完成后的第一诉求通常是微调选区，而不是立刻画图形。
+export const DEFAULT_TOOL: ActiveTool = "move";
 export const DEFAULT_COLOR = "#E53935";
 export const DEFAULT_WIDTH_INDEX = 1;
 

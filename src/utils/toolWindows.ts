@@ -12,6 +12,11 @@ import {
   type ContextMenuRequest,
 } from "../components/contextMenuTypes";
 import { BACKEND_TOOLS } from "../tools/registry";
+import {
+  DEFAULT_SYSTEM_MONITOR_LAYOUT,
+  monitorLayoutOption,
+} from "../constants/systemMonitorConfig";
+import { PANEL_SHADOW_MARGIN, panelWindowSize } from "./panelWindow";
 
 type ToolWindowLabel =
   | "screenshot-overlay"
@@ -21,7 +26,6 @@ type ToolWindowLabel =
   | "long-capture-frame"
   | "context-menu"
   | "pin-ocr"
-  | "pomodoro-overlay"
   | "time-overlay"
   | "todo-overlay"
   | "sketch-overlay"
@@ -51,9 +55,6 @@ const contextMenuReadyWaiters = new Set<() => void>();
 let pinOcrReady = false;
 let pinOcrReadyListener: Promise<UnlistenFn> | undefined;
 const pinOcrReadyWaiters = new Set<() => void>();
-let pomodoroReady = false;
-let pomodoroReadyListener: Promise<UnlistenFn> | undefined;
-const pomodoroReadyWaiters = new Set<() => void>();
 let timerReady = false;
 let timerReadyListener: Promise<UnlistenFn> | undefined;
 const timerReadyWaiters = new Set<() => void>();
@@ -288,37 +289,6 @@ async function waitForRecordingControlsWindowReady(): Promise<void> {
   });
 }
 
-async function preparePomodoroWindowReadyListener(): Promise<void> {
-  if (!pomodoroReadyListener) {
-    pomodoroReadyListener = listen("pomodoro-window-ready", () => {
-      pomodoroReady = true;
-      pomodoroReadyWaiters.forEach((resolve) => resolve());
-      pomodoroReadyWaiters.clear();
-    });
-  }
-  await pomodoroReadyListener;
-}
-
-export async function waitForPomodoroWindowReady(): Promise<void> {
-  await preparePomodoroWindowReadyListener();
-  if (pomodoroReady) return;
-
-  await new Promise<void>((resolve, reject) => {
-    const retryTimer = startReadyRequestRetry("pomodoro-overlay", "pomodoro-window-ready-request");
-    const timeout = window.setTimeout(() => {
-      window.clearInterval(retryTimer);
-      pomodoroReadyWaiters.delete(onReady);
-      reject(new Error("番茄钟窗口初始化超时"));
-    }, 5000);
-    const onReady = () => {
-      window.clearInterval(retryTimer);
-      window.clearTimeout(timeout);
-      resolve();
-    };
-    pomodoroReadyWaiters.add(onReady);
-  });
-}
-
 function createToolWindow(
   label: ToolWindowLabel,
   options: ConstructorParameters<typeof WebviewWindow>[1],
@@ -338,6 +308,10 @@ function createToolWindow(
     const win = new WebviewWindow(label, {
       url: "index.html",
       visible: false,
+      // Tauri 的 dragDropEnabled 默认 true，Windows 上会劫持 WebView 拖放事件，
+      // 使页面内 HTML5 拖拽（draggable + dragstart/dragover）完全不触发——待办窗口的
+      // 任务拖拽排序就是因此失效的。本应用未使用任何 Tauri 原生拖放事件，故统一关闭。
+      dragDropEnabled: false,
       ...options,
     });
 
@@ -636,10 +610,12 @@ export async function ensureContextMenuWindow(): Promise<WebviewWindowInstance> 
     return existing;
   }
   contextMenuReady = false;
+  // 窗口 = 菜单 + 四周投影留白（见 panelWindow.ts 的 PANEL_SHADOW_MARGIN）
+  const initialSize = panelWindowSize(CONTEXT_MENU_WIDTH, contextMenuHeight("pin"));
   const window = await createToolWindow("context-menu", {
     title: "Levitaire Context Menu",
-    width: CONTEXT_MENU_WIDTH,
-    height: contextMenuHeight("pin"),
+    width: initialSize.width,
+    height: initialSize.height,
     resizable: false,
     transparent: true,
     decorations: false,
@@ -745,12 +721,18 @@ export async function showContextMenu(request: ContextMenuRequest): Promise<void
   await window.hide();
   // Width/height describe CSS pixels; use logical size so the menu remains
   // identical on 100%, 125%, and 150% Windows display scaling.
-  await window.setSize(new LogicalSize(width, height));
+  // 窗口尺寸含四周投影留白（面板另由 body.context-menu-window 的 padding 定位），
+  // 否则投影会被窗口边界硬切成四个角的直角残影。
+  const size = panelWindowSize(width, height);
+  await window.setSize(new LogicalSize(size.width, size.height));
+  // 留白参与窗口坐标：窗口左上角要比菜单目标位置再向左上让出一圈留白，
+  // 菜单本体才会落在 request.x/y 上。
+  const margin = Math.round(PANEL_SHADOW_MARGIN * scaleFactor);
   await window.setPosition(
     clampContextMenuPosition(
-      request,
-      Math.round(width * scaleFactor),
-      Math.round(height * scaleFactor),
+      { ...request, x: request.x - margin, y: request.y - margin },
+      Math.round(size.width * scaleFactor),
+      Math.round(size.height * scaleFactor),
       bounds,
     ),
   );
@@ -769,7 +751,7 @@ export async function ensureMonitorWindow(): Promise<{
   // 复用已有窗口：保留采集历史（前端环形缓冲 ref 不清零）与已注册的
   // 关闭拦截监听器。若每次都销毁重建，曲线会从零开始，且旧窗口上的
   // Alt+F4 拦截监听器随之失效，导致新窗口关窗后后台采集线程空跑。
-  // 复用策略同 ensurePomodoroWindow。
+  // 复用策略同 ensureTimerWindow。
   const existing = await WebviewWindow.getByLabel("monitor-overlay");
   if (existing) {
     await waitForNewMonitorWindowReady();
@@ -780,8 +762,11 @@ export async function ensureMonitorWindow(): Promise<{
   monitorReady = false;
   const window = await createToolWindow("monitor-overlay", {
     title: "Levitaire Monitor",
-    width: 300,
-    height: 520,
+    // 创建尺寸只是个占位：show_monitor_window 会在显示前按存储的「显示模式 + 显示样式」
+    // 重新设置尺寸（样式不同宽度也不同，只有双列宫格是 340）。这里取默认样式的尺寸，
+    // 免得两个地方各写一份数字。
+    width: monitorLayoutOption(DEFAULT_SYSTEM_MONITOR_LAYOUT).width,
+    height: monitorLayoutOption(DEFAULT_SYSTEM_MONITOR_LAYOUT).placeholderHeight,
     resizable: false,
     transparent: true,
     decorations: false,
@@ -798,36 +783,8 @@ export async function ensureMonitorWindow(): Promise<{
   return { window, created: true };
 }
 
-/** 创建或复用番茄钟悬浮窗（隐藏，待 ready 后由 show_pomodoro_window 显示）。
+/** 创建或复用时间工具悬浮窗（隐藏，待 ready 后由 show_timer_window 显示）。
  * 窗口已存在时直接复用，保留用户拖拽后的位置与组件状态；计时由后端持有，不受影响。 */
-export async function ensurePomodoroWindow(): Promise<WebviewWindowInstance> {
-  const existing = await WebviewWindow.getByLabel("pomodoro-overlay");
-  if (existing) {
-    await waitForPomodoroWindowReady();
-    return existing;
-  }
-  await preparePomodoroWindowReadyListener();
-  pomodoroReady = false;
-  const window = await createToolWindow("pomodoro-overlay", {
-    title: "Levitaire Pomodoro",
-    width: 240,
-    height: 240,
-    resizable: false,
-    transparent: true,
-    decorations: false,
-    // 视觉边界由 .pomo-body 的 CSS border 负责（同 monitor-overlay）
-    shadow: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    focusable: true,
-    x: 100,
-    y: 100,
-    backgroundColor: [0, 0, 0, 0],
-  });
-  await waitForPomodoroWindowReady();
-  return window;
-}
-
 export async function ensureTimerWindow(): Promise<WebviewWindowInstance> {
   const existing = await WebviewWindow.getByLabel("time-overlay");
   if (existing) {
@@ -837,8 +794,8 @@ export async function ensureTimerWindow(): Promise<WebviewWindowInstance> {
   await prepareTimerWindowReadyListener();
   timerReady = false;
   const window = await createToolWindow("time-overlay", {
-    title: "Levitaire Timer",
-    width: 380,
+    title: "Levitaire 时间工具",
+    width: 320,
     height: 220,
     resizable: false,
     transparent: true,
@@ -867,8 +824,11 @@ export async function ensureTodoWindow(): Promise<WebviewWindowInstance> {
     todoReady = false;
     const window = await createToolWindow("todo-overlay", {
       title: "Levitaire Todo",
+      // 只是首帧占位：待办窗高度随内容走（空清单只有一百多像素，折叠态更矮），
+      // 挂载后由 `TodoTool.tsx` 按面板实测高度重新 setSize。给个接近常见内容的
+      // 初始值，免得开窗时先看见一次「拉长再收窄」的跳变。
       width: 360,
-      height: 560,
+      height: 300,
       resizable: false,
       transparent: true,
       decorations: false,
@@ -917,7 +877,11 @@ export async function ensureUtilityHubWindow(): Promise<WebviewWindowInstance> {
     title: "Levitaire 通用工具",
     // The frontend resizes to its active tool's measured content height plus
     // a transparent 26px gutter for upward tooltips.
-    width: 120,
+    // 初始宽按「tools」模式的标题栏估算：手柄 + 取色 + 滚动导航 + 窗口置顶 + 关闭
+    // = 面板 127px（见 UtilityHub.css 的 max-content），再加两侧投影留白。只是首帧
+    // 占位：面板宽度不受窗口钳制，真实尺寸由 UtilityHub.tsx 量完下发，多了/少了
+    // 工具按钮都能自愈。
+    width: 167,
     height: 62,
     resizable: false,
     transparent: true,
@@ -933,14 +897,17 @@ export async function ensureUtilityHubWindow(): Promise<WebviewWindowInstance> {
 }
 
 /** 创建或复用便利贴管理窗（隐藏，待 show_sticky_notes_manager 命令显示）。
- * 管理窗统筹所有便签的新建/删除/收起/唤出。 */
+ * 管理窗统筹所有便签的新建/删除/收起/唤出。
+ * 高度只是创建时的占位值：面板高度随内容变化（空状态一两行、便签多时受列表
+ * max-height 收口），实际窗口尺寸由 StickyNoteManager.tsx 按面板实测高度下发。
+ * 这里取空状态附近的值，避免「先弹出一个高窗再跳矮」的闪烁。 */
 export async function ensureStickyNotesManagerWindow(): Promise<WebviewWindowInstance> {
   const existing = await WebviewWindow.getByLabel("sticky-notes-manager");
   if (existing) return existing;
   return createToolWindow("sticky-notes-manager", {
     title: "Levitaire 便利贴",
     width: 360,
-    height: 560,
+    height: 200,
     resizable: false,
     transparent: true,
     decorations: false,
@@ -964,7 +931,7 @@ export async function ensureStickyNotesManagerWindow(): Promise<WebviewWindowIns
  * merely enabling a tool keep that renderer alive for the whole session, so
  * "3 tools enabled" could mean 6-7 resident WebViews. Auxiliary per-flow
  * windows (long-capture controls/frame, context menu, recording controls) and
- * panel tools (monitor/pomodoro/timer/utility-hub) do not need this and are now
+ * panel tools (monitor/timer/utility-hub) do not need this and are now
  * created lazily. quick-input's overlay is ensured natively when enabled.
  */
 export async function preloadEnabledToolWindows(): Promise<void> {
@@ -1026,11 +993,6 @@ export async function openToolWindow(toolId: string): Promise<boolean> {
         await waitForNewMonitorWindowReady();
       }
       await invoke("show_monitor_window");
-      return true;
-    }
-    if (toolId === "pomodoro") {
-      await ensurePomodoroWindow();
-      await invoke("show_pomodoro_window");
       return true;
     }
     if (toolId === "timer") {

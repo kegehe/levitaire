@@ -1,24 +1,53 @@
 body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
-.timer-shell { width: 100%; height: auto; min-height: 0; padding: 10px; color: var(--color-fg); background: var(--color-bg-elevated); border: 1px solid var(--color-border); border-radius: 8px; box-sizing: border-box; font-size: 12px; overflow: hidden; }
+/* 面板宽度**随内容走**（`width: max-content`）：收起工具条（默认态）时不再按
+   「5 个页签 + 操作按钮」的 320px 常年铺开，时钟/秒表/番茄钟这些窄内容直接贴边，
+   左右不再各留一大块空白；工具条展开时由页签行重新参与宽度计算，把面板撑到刚好容纳它
+   （靠下方 `.timer-shell:not(.is-chrome-open) .timer-header` 的绝对定位实现）。
+   ⚠️ 两条约束，改宽度相关的规则时必须一起看：
+   1. `max-width` 是兜底：内容异常长时不撑爆窗口，改由内部会换行的行（预设芯片等）折行。
+      它同时也是**页签行的上限** —— 所以 `.timer-header` / `.timer-tabs` 都留了 `flex-wrap`，
+      万一页签行比它还宽，结果是折行，而不是把「关闭」按钮裁在面板外。
+   2. `width: max-content` 要求每个**不换行的横向行**都能给出有限的自然宽度：自定义预设芯片行、
+      秒表名、番茄钟关联任务名这类长度不可控的文本必须显式限宽（见各自那条规则），
+      否则一行长文本就会把整个面板撑开。 */
+.timer-shell { position: relative; width: max-content; max-width: 360px; height: auto; min-height: 0; padding: 10px; color: var(--color-fg); background: var(--color-bg-elevated); border: 1px solid var(--color-border); border-radius: 8px; box-sizing: border-box; font-size: 12px; overflow: hidden; }
 .timer-header, .timer-controls, .timer-presets { display: flex; align-items: center; }
-.timer-header { justify-content: space-between; height: 24px; }
+/* min-height 而非 height：正常情况页签与操作按钮排在 24px 这一行里，只有面板被内容限得很窄时
+   才允许折行（宁可面板长高，也不能把「关闭」按钮裁掉）。 */
+.timer-header { justify-content: space-between; min-height: 24px; flex-wrap: wrap; row-gap: 2px; }
 .timer-tabs, .timer-actions, .timer-controls, .timer-presets { gap: 4px; }
+/* 页签收敛到 5 个（时钟/倒计时/番茄钟/秒表/日历）后，要和右侧操作按钮排在同一行
+   （工具条展开时面板宽度**就是**这一行的宽度，见文件顶部说明），故把页签内距与间距调紧：
+   加宽页签要么把操作按钮挤到换行、要么把整个面板撑宽。 */
+.timer-tabs { gap: 3px; flex-wrap: wrap; }
 .timer-tabs button, .timer-actions button, .timer-controls button, .timer-presets button { border: 0; color: var(--color-fg-muted); background: transparent; cursor: pointer; }
-.timer-tabs button { padding: 3px 8px; border-radius: 4px; }
+.timer-tabs button { padding: 3px 7px; border-radius: 4px; }
 .timer-tabs button.is-active { color: var(--color-fg); background: var(--color-bg-sunken); }
 .timer-actions button, .timer-controls button { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 5px; }
 .timer-actions button:hover, .timer-controls button:hover { color: var(--color-fg); background: var(--button-hover-bg); }
 .timer-actions button[data-tooltip]::after, .timer-controls button[data-tooltip]::after { content: attr(data-tooltip); position: absolute; z-index: 5; top: calc(100% + 4px); right: 0; padding: 3px 7px; white-space: nowrap; color: var(--tooltip-text); background: var(--tooltip-bg); border: 1px solid var(--tooltip-border); border-radius: 4px; opacity: 0; pointer-events: none; }
 .timer-actions button:hover::after, .timer-controls button:hover::after { opacity: 1; }
+/* 控制区（面板下半部分）的 tooltip 一律**向上**弹出，与顶部 .timer-actions 相反：
+   1. `.timer-controls` 是每个视图的最后一行，向下弹会被 .timer-shell 的 overflow: hidden
+      沿面板底边整条裁掉（只剩顶部一条边）；倒计时 / 番茄钟 / 秒表三个视图的控制条都会命中。
+   2. `.timer-presets` / `.timer-preset-editor` 虽然下面还有控制条垫着，但向下弹正好盖住
+      「开始 / +1 分钟 / 重置」这排主操作，观感上像浮层压在按钮上；且它们离面板底边只有
+      一个控制条的高度，窗口再矮一点就会被裁。
+   统一向上后，鼠标悬停任意底部控件，浮层都落在按钮上方，永远不出面板。
+   ⚠️ 三类选择器的覆盖规则必须排在各自基础规则**之后**（见文件下方 .timer-presets /
+   .timer-preset-editor 的覆盖块），否则同特异性下会被基础规则的 top 值盖回去。 */
+.timer-controls button[data-tooltip]::after { top: auto; bottom: calc(100% + 4px); }
 .timer-clock-view, .timer-countdown-view { display: flex; flex-direction: column; align-items: center; text-align: center; }
 .timer-clock-view { gap: 6px; padding-top: 28px; }
-.timer-countdown-view { gap: 8px; padding-top: 12px; }
+.timer-countdown-view { --ring-color: var(--color-accent); gap: 8px; padding-top: 12px; }
 .timer-eyebrow, .timer-date { color: var(--color-fg-muted); font-size: 11px; }
 .timer-local-clock-value { font-size: 39px; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: 0; }
 .timer-date { font-size: 12px; }
 .timer-primary-value { margin: 12px 0 4px; font-size: 46px; line-height: 1; font-variant-numeric: tabular-nums; }
 .timer-countdown-view.is-complete .timer-primary-value, .timer-countdown-view.is-complete .timer-ring-view strong { color: var(--color-danger-fg); }
-.timer-presets { justify-content: center; flex-wrap: wrap; margin: 2px 0 4px; }
+/* max-width: 100%：快捷预设行是面板里最宽的一行（4 个预设 + 自定义框 + 设定 + 存为预设），
+   它决定了面板的自然宽度；万一撞上面板的兜底上限，也是这行折行，而不是把面板撑到窗口外。 */
+.timer-presets { justify-content: center; flex-wrap: wrap; max-width: 100%; margin: 2px 0 4px; }
 .timer-presets button, .timer-presets input { height: 23px; padding: 0 6px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg-muted); background: var(--color-bg-sunken); font-size: 10px; }
 .timer-presets input { width: 38px; color: var(--color-fg); text-align: center; }
 .timer-presets button:hover { color: var(--color-fg); }
@@ -27,11 +56,13 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-presets .timer-preset-save { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 23px; padding: 0; }
 .timer-presets button[data-tooltip]::after { content: attr(data-tooltip); position: absolute; z-index: 5; top: calc(100% + 4px); right: 0; padding: 3px 7px; white-space: nowrap; color: var(--tooltip-text); background: var(--tooltip-bg); border: 1px solid var(--tooltip-border); border-radius: 4px; opacity: 0; pointer-events: none; }
 .timer-presets button[data-tooltip]:hover::after { opacity: 1; }
-/* 用户自定义预设：可点击应用，悬停露出删除按钮 */
-.timer-my-presets { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; }
+/* 用户自定义预设：可点击应用，悬停露出删除按钮。
+   限宽（而非 max-width: 100%）是给面板宽度兜底：芯片行本身会换行，但名字最长 24 字，
+   不限宽时「一排芯片的自然宽度」会远大于面板所需，把宽度一起撑开。 */
+.timer-my-presets { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; max-width: 250px; }
 .timer-preset-chip { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; height: 23px; padding: 0 2px 0 7px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg-muted); background: var(--color-bg-sunken); box-sizing: border-box; }
 .timer-preset-chip > button { height: 100%; border: 0; color: inherit; background: transparent; cursor: pointer; }
-.timer-preset-chip > button:first-child { min-width: 0; max-width: 100%; overflow: hidden; padding: 0; font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
+.timer-preset-chip > button:first-child { min-width: 0; max-width: 132px; overflow: hidden; padding: 0; font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
 .timer-preset-chip > button:first-child:hover { color: var(--color-fg); }
 .timer-preset-chip:hover, .timer-preset-chip:focus-within { border-color: var(--color-border-hover); }
 .timer-preset-remove { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 19px; border-radius: 3px; color: var(--color-fg-subtle); opacity: 0; }
@@ -51,6 +82,9 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-preset-editor button:disabled:hover { color: var(--color-fg-muted); border-color: var(--color-border); }
 .timer-preset-editor button[data-tooltip]::after { content: attr(data-tooltip); position: absolute; z-index: 5; top: calc(100% + 4px); right: 0; padding: 3px 7px; white-space: nowrap; color: var(--tooltip-text); background: var(--tooltip-bg); border: 1px solid var(--tooltip-border); border-radius: 4px; opacity: 0; pointer-events: none; }
 .timer-preset-editor button[data-tooltip]:hover::after { opacity: 1; }
+/* 预设行 / 编辑行都属「控制区」，tooltip 与 .timer-controls 一样向上弹（原因见文件上方注释）。
+   必须排在上面两条基础规则之后才生效。 */
+.timer-presets button[data-tooltip]::after, .timer-preset-editor button[data-tooltip]::after { top: auto; bottom: calc(100% + 4px); }
 .timer-controls { justify-content: center; margin-top: 2px; }
 .timer-controls .timer-play { width: auto; padding: 0 12px; gap: 5px; color: var(--color-fg-on-accent); background: var(--color-accent); }
 .timer-controls .timer-play:hover { color: var(--color-fg-on-accent); background: var(--color-accent); filter: brightness(1.05); }
@@ -58,8 +92,94 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-ring-view svg { width: 148px; height: 148px; transform: rotate(-90deg); }
 .timer-ring-bg, .timer-ring-fg { fill: none; stroke-width: 8; }
 .timer-ring-bg { stroke: var(--color-bg-sunken); }
-.timer-ring-fg { stroke: var(--color-accent); stroke-linecap: round; transition: stroke-dashoffset .35s linear; }
-.timer-ring-view strong { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 27px; font-variant-numeric: tabular-nums; }
+/* 描边色统一走 --ring-color：倒计时在 CSS 里按状态取值（accent → 临近结束转警示色），
+   番茄钟按阶段在内联样式里给（内联 stroke 优先级更高）。
+   入场动画只写 from、起点取 TS 侧下发的 --ring-from（＝周长，即零长度弧），
+   结束值自动落在元素自身的 stroke-dashoffset 上，于是弧线「从 0 画到当前进度」。 */
+.timer-ring-fg { stroke: var(--ring-color, var(--color-accent)); stroke-linecap: round; transition: stroke-dashoffset .35s ease-out, stroke .3s ease; animation: timer-ring-in 520ms cubic-bezier(.25, .9, .3, 1); }
+/* 环头：贴在弧尖上的小珠子，随剩余进度绕圈。transform-box/origin 必须显式写死，
+   否则（默认 fill-box 语义下）旋转会绕珠子自身而不是环心，珠子就不沿环走。
+   填充取面板底色，珠子压在 8px 宽的弧上才看得出是「珠子」而不是多了一小节。 */
+.timer-ring-head { transform-box: view-box; transform-origin: 60px 60px; }
+.timer-ring-head circle { fill: var(--color-bg-elevated); stroke: var(--ring-color, var(--color-accent)); stroke-width: 2.2; filter: drop-shadow(0 0 4px color-mix(in srgb, var(--ring-color, var(--color-accent)) 55%, transparent)); }
+.timer-ring-view strong { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 27px; font-variant-numeric: tabular-nums; animation: timer-digit-tick 220ms ease-out; }
+/* 紧凑样式的数字同样逐秒跳动，与环内数字保持一致的表现——
+   两个显示样式只是「有没有环」的差别，数字的动效不该只给环形样式。 */
+.timer-countdown-view .timer-primary-value { animation: timer-digit-tick 220ms ease-out; }
+/* 紧凑样式（纯数字）没有环，用一条进度条承载同样的「剩余比例」信息。
+   负外边距是在抵掉 .timer-countdown-view 的 gap: 8px，让进度条贴近数字（实测
+   数字下方 8px、预设行上方 7px），整块只比没有进度条时高 4px——改 gap 时要一起复算，
+   否则会与相邻行重叠。 */
+.timer-progress { display: block; width: 100%; max-width: 180px; height: 3px; margin: -4px 0 -3px; border-radius: 999px; background: var(--color-bg-sunken); overflow: hidden; }
+.timer-progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--ring-color, var(--color-accent)); transform-origin: left center; transition: transform .35s ease-out; }
+/* 运行中把后端每秒一次的下发接成连续推进：后端 500ms 轮询、整数秒变化才广播，
+   过渡时长取略小于 1s，弧线/珠子/进度条在两次更新之间匀速走完，视觉上是「连续减少」
+   而不是一秒一跳；暂停时不给这条过渡，直接对齐真实剩余时间。 */
+.timer-countdown-view.is-running .timer-ring-fg, .timer-pomodoro-view.is-running .timer-ring-fg { transition: stroke-dashoffset .95s linear, stroke .3s ease; }
+.timer-countdown-view.is-running .timer-ring-head, .timer-pomodoro-view.is-running .timer-ring-head { transition: transform .95s linear, stroke .3s ease; }
+.timer-countdown-view.is-running .timer-progress-fill { transition: transform .95s linear; }
+/* 强调态（剩余 ≤ URGENT_SECONDS 且计时中）：环与数字转警示色，数字每次更新放大回弹一次。
+   数字上原有的 timer-digit-tick 由本条整体覆盖——这里用更「跳」的一版动画。 */
+.timer-countdown-view.is-urgent { --ring-color: var(--color-danger); }
+.timer-countdown-view.is-urgent .timer-primary-value, .timer-countdown-view.is-urgent .timer-ring-view strong, .timer-pomodoro-view.is-urgent .timer-ring-time { color: var(--color-danger-fg); text-shadow: 0 0 10px color-mix(in srgb, var(--color-danger) 32%, transparent); animation: timer-digit-urgent 420ms cubic-bezier(.2, .8, .3, 1); }
+.timer-countdown-view.is-urgent .timer-ring-fg, .timer-pomodoro-view.is-urgent .timer-ring-fg { filter: drop-shadow(0 0 4px color-mix(in srgb, var(--color-danger) 45%, transparent)); }
+.timer-countdown-view.is-urgent .timer-progress-fill { box-shadow: 0 0 6px color-mix(in srgb, var(--color-danger) 55%, transparent); }
+/* 到点：环底与数字闪两次提示结束。is-complete 会一直挂在元素上，故动画只跑 2 次，
+   不会常驻闪烁；重置后类名摘掉，下次到点再重新触发。 */
+.timer-countdown-view.is-complete .timer-primary-value, .timer-countdown-view.is-complete .timer-ring-view strong, .timer-countdown-view.is-complete .timer-ring-bg { animation: timer-complete-flash 900ms ease-out 2; }
+/* ── 倒计时「沙漏」显示样式 ──────────────────────────────────
+   与环形样式同一坐标系（120×120 viewBox、渲染 112px），两种样式切换时面板高度基本不变。
+   几何与映射见 hourglassGeometry.ts：瓶壁是**一条弧线**（采样成折线的闭合轮廓），
+   沙子是「矩形 + clipPath」，纵向只改 translateY；沙面凹坑 / 堆沙尖堆 / 沙色明暗层
+   都是跟着同一段位移走的独立小件。
+
+   ⚠️ 命名约定：`.timer-*` 这个命名空间是**面板（shell）与图形共用**的，两边撞名会互相改样式。
+   面板的显示样式修饰类一律写作 `.timer-display-<display>`（见 TimerTool.tsx），
+   图形根类名才用 `.timer-hourglass`；下面这条规则只允许命中 <svg>，一旦有人把面板的修饰类
+   改回 `timer-${display}`，面板会被压成 112×112（`width: 100%` 被覆盖）并把内容溢出到面板外。
+   回归由 TimerTool.test.tsx 的「面板修饰类不与图形类撞名」用例卡住。 */
+.timer-hourglass { display: block; width: 112px; height: 112px; overflow: visible; }
+/* 沙色与瓶色各收敛成一个变量：强调态只改沙色那一处，渐变两端与流沙一起转警示色，
+   瓶子保持中性（与环形样式「只变弧、底环不变」同一口径）。 */
+.timer-countdown-view { --hg-sand-color: var(--color-accent); --hg-glass-color: color-mix(in srgb, var(--color-accent) 7%, var(--color-bg-sunken)); }
+.timer-countdown-view.is-urgent { --hg-sand-color: var(--color-danger); }
+/* 空瓶底色掺一点沙色：纯 sunken 底在深色主题里会读成「瓶子上破了个黑窟窿」。
+   描边比填充亮一档就够（2.1 而非 2.6）：瓶壁是弧线，粗描边会把弧线糊成一根白管子。 */
+.hg-glass { fill: var(--hg-glass-color); }
+.hg-outline { fill: none; stroke: var(--color-fg-muted); stroke-width: 2.1; stroke-linejoin: round; stroke-linecap: round; }
+.hg-cap { fill: none; stroke: var(--color-fg-muted); stroke-width: 2.1; stroke-linecap: round; opacity: .5; }
+/* 沙块（上沙 / 堆沙共用）。位移必须写在内层元素上：裁剪用的 <g> 不能带 transform，
+   否则 SVG 的 clip-path 会跟着沙子一起平移，沙子就从瓶壁两侧漏出去（已由像素复核实测过）。 */
+.hg-sand { fill: var(--hg-sand-color); transition: transform .35s ease-out; }
+/* 沙色的竖向明暗：静态层（rect 不带 transform ⇒ 渐变坐标系钉在 viewBox 上），
+   上端几乎透明、越往下压得越深，于是「上层的沙亮、下层的沙深」。
+   末端只压到 34% 黑：再深就从「有体积」变成「脏」。 */
+.hg-shade { fill: url(#timer-hg-shade-gradient); }
+.hg-shade-stop-top { stop-color: #000; stop-opacity: 0; }
+.hg-shade-stop-mid { stop-color: #000; stop-opacity: .12; }
+.hg-shade-stop-bottom { stop-color: #000; stop-opacity: .34; }
+/* 堆沙尖堆：与堆沙共用位移，绕锥底中心缩放（锥底在颈线上 ⇒ 原点就是 60,60） */
+.hg-mound { fill: var(--hg-sand-color); transform-box: view-box; transform-origin: 60px 60px; transition: transform .35s ease-out; }
+/* 凹坑用空瓶底色「挖」在沙面上；缩放值由 JS 给（暂停收平、沙面浅了自动收小），这里只负责过渡。
+   原点 (60, 11.5) = 沙面正中（11.5 即 HG_TOP）：沙面下移时凹坑跟着 translateY，
+   缩放仍绕沙面进行，沙面塌陷的那一下才不会飘。 */
+.hg-crater { fill: var(--hg-glass-color); transform-box: view-box; transform-origin: 60px 11.5px; transition: transform .6s ease-out; }
+/* 流沙柱与柱心的「落沙纹」 */
+.hg-stream { transform-box: view-box; transform-origin: 60px 60px; transition: transform .35s ease-out; }
+.hg-stream-body { fill: var(--hg-sand-color); }
+/* 落沙纹：一条比沙色亮一档的短虚线，靠 stroke-dashoffset 由 0 走到 -一个周期，
+   于是纹路持续往下淌（周期 8 = 5 实线 + 3 空白，见 HG_STREAM_FLOW_DASH）。
+   压到 0.45 的透明度才像「流动的沙面反光」；再亮就会看着像一根打了虚线孔的水管。
+   用白色提亮而不是主题色：它是「反光」，明暗两套主题里都该更亮。 */
+.hg-stream-flow { fill: none; stroke: color-mix(in srgb, var(--hg-sand-color) 62%, #fff); stroke-width: 1; stroke-linecap: round; opacity: .45; animation: timer-hg-stream-flow 420ms linear infinite; }
+@keyframes timer-hg-stream-flow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -8; } }
+/* 运行中：下漏 / 堆起 / 流沙都接成 0.95s 连续推进（与环形样式同一口径） */
+.timer-countdown-view.is-running .hg-sand,
+.timer-countdown-view.is-running .hg-mound,
+.timer-countdown-view.is-running .hg-stream { transition: transform .95s linear; }
+.timer-countdown-view.is-running .hg-crater { transition-duration: .95s; }
+/* 沙漏比环高，数字相应小一号（紧凑样式的 46px 不适用于这里） */
+.timer-countdown-view .timer-hg-value { margin: 0; font-size: 26px; }
 /* 模拟指针表盘：面盘/刻度/数字用主题变量取色，指针端点由 JSX 直接计算，无 CSS 过渡 */
 .timer-clock-face { display: block; width: 148px; height: 148px; }
 .timer-clock-view .timer-clock-face { margin: 2px 0 0; }
@@ -72,6 +192,9 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-face-hand-second { stroke: var(--color-accent); stroke-width: 1.5; }
 .timer-face-cap { fill: var(--color-fg); }
 .timer-face-cap-accent { fill: var(--color-accent); }
+/* 日历页签是 7 列网格：列宽若按内容算，会得到一组随月份/农历文字浮动的窄格子，故固定
+   改版前的 380px。`.timer-shell` 的兜底 max-width 要一起放开，否则会被它截到 360px。 */
+.timer-shell[data-view="calendar"] { width: 380px; max-width: 380px; }
 .timer-calendar-view { padding-top: 8px; }
 .calendar-toolbar { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 10px; }
 .calendar-toolbar strong { min-width: 108px; color: var(--color-fg); font-size: 14px; font-weight: 600; text-align: center; }
@@ -82,12 +205,16 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .calendar-toolbar .calendar-today { width: auto; margin-left: 2px; padding: 0 7px; border: 1px solid var(--color-border); color: var(--color-fg-muted); background: var(--color-bg-sunken); font-size: 11px; }
 .calendar-weekdays, .calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
 .calendar-weekdays { margin-bottom: 3px; color: var(--color-fg-subtle); font-size: 10px; text-align: center; }
-.calendar-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; height: 39px; border: 1px solid transparent; border-radius: 5px; color: var(--color-fg); background: transparent; cursor: pointer; }
+.calendar-cell { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; height: 39px; border: 1px solid transparent; border-radius: 5px; color: var(--color-fg); background: transparent; cursor: pointer; }
 .calendar-cell:hover { border-color: var(--color-border-hover); background: var(--button-hover-bg); }
 .calendar-cell > span { font-size: 13px; line-height: 16px; font-variant-numeric: tabular-nums; }
 .calendar-cell small { max-width: 100%; overflow: hidden; color: var(--color-fg-subtle); font-size: 9px; line-height: 12px; white-space: nowrap; text-overflow: ellipsis; }
 .calendar-cell small.note-festival { color: var(--color-danger-fg); font-weight: 600; }
 .calendar-cell small.note-term { color: var(--color-success-fg); }
+/* 休 / 班角标：绝对定位在格子右下角，不占布局，不影响原有节日 / 农历文字排版 */
+.calendar-cell small.calendar-rest { position: absolute; right: 1px; bottom: 0; font-weight: 700; letter-spacing: 0.5px; }
+.calendar-cell small.rest-holiday { color: var(--color-success-fg); }
+.calendar-cell small.rest-workday { color: var(--color-warning-fg); }
 .calendar-cell.is-outside { color: var(--color-fg-subtle); opacity: 0.58; }
 .calendar-cell.is-today { border-color: var(--color-accent); color: var(--color-accent); }
 .calendar-cell.is-selected { background: var(--color-accent-subtle); }
@@ -100,7 +227,58 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .calendar-selection span.note-festival { color: var(--color-danger-fg); font-weight: 600; }
 .calendar-selection span.note-term { color: var(--color-success-fg); }
 .timer-stopwatch-view { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding-top: 12px; }
-.timer-label { position: relative; display: inline-flex; align-items: center; padding: 1px 4px; border: 0; border-bottom: 1px dashed transparent; border-radius: 4px; color: var(--color-fg-muted); background: transparent; cursor: text; }
+/* ── 番茄钟页签 ──────────────────────────────────────────────
+   计时状态在后端（专注/短休息/长休息自动循环），这里只渲染。
+   进度环复用倒计时页签的 .timer-ring-view，两个页签的环完全等大，
+   仅描边色按阶段区分（focus/short_break/long_break）。 */
+.timer-pomodoro-view { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding-top: 12px; }
+/* 运行中让进度环轻微呼吸，与「已暂停」一眼可分 */
+.timer-pomodoro-view.is-running .timer-ring-view { animation: timer-ring-breathe 3s ease-in-out infinite; }
+.timer-ring-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; pointer-events: none; }
+/* font-weight 必须显式写：倒计时页签的环心数字是 `<strong>`（默认粗体），
+   番茄钟页签这里是 `<span>` 且祖先都没给字重 —— 不写就会出现「同一窗口两个页签的
+   环心数字一粗一细」。旧独立番茄钟工具的 `.pomo-time` 原本就是 700。 */
+.timer-ring-center .timer-ring-time { font-size: 27px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; animation: timer-digit-tick 220ms ease-out; }
+.timer-stage-label { color: var(--color-fg-muted); font-size: 11px; animation: timer-digit-tick 240ms ease-out; }
+/* 关联的待办任务名：从待办工具「开始专注」进入时显示，长标题省略。
+   限宽（而非 max-width: 100%）同样是给面板宽度兜底，见 .timer-my-presets 的说明。 */
+.timer-pomodoro-focus { display: inline-flex; align-items: center; gap: 4px; max-width: 190px; padding: 1px 6px; border: 0; border-radius: 4px; color: var(--color-fg-muted); background: transparent; font-size: 11px; cursor: default; }
+.timer-pomodoro-focus svg { flex: 0 0 auto; }
+.timer-pomodoro-focus-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.timer-rounds { display: flex; align-items: center; gap: 5px; }
+.timer-round-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--color-bg-sunken); border: 1px solid var(--color-border); }
+.timer-round-dot.is-done { background: var(--color-accent); border-color: var(--color-accent); animation: timer-round-pop 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.timer-rounds-text { margin-left: 2px; color: var(--color-fg-subtle); font-size: 10px; font-variant-numeric: tabular-nums; }
+/* 呼吸的辉光取 --ring-color，随阶段（专注/短休息/长休息）与强调态一起变，
+   不会出现「环是绿的、光却是蓝的」。 */
+@keyframes timer-ring-breathe {
+  0%, 100% { filter: drop-shadow(0 0 0 transparent); }
+  50% { filter: drop-shadow(0 0 5px color-mix(in srgb, var(--ring-color, var(--color-accent)) 28%, transparent)); }
+}
+@keyframes timer-round-pop {
+  from { transform: scale(0.7); opacity: 0.5; }
+  to { transform: scale(1); opacity: 1; }
+}
+/* 只写 from、不写 to：结束值自动取元素自身的值，动画结束即精确回到真实进度/样式 */
+@keyframes timer-ring-in {
+  from { stroke-dashoffset: var(--ring-from); }
+}
+@keyframes timer-digit-tick {
+  from { opacity: 0.5; transform: translateY(-.06em); }
+}
+@keyframes timer-digit-urgent {
+  0% { opacity: 0.45; transform: scale(1.08); }
+}
+@keyframes timer-complete-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+/* 秒表名可以双击改成任意文本（上限 60 字），必须限宽 + 省略号：面板宽度按内容实测，
+   不设上限时一行长名字会把整个面板撑开。 */
+.timer-label { position: relative; display: inline-flex; align-items: center; max-width: 150px; padding: 1px 4px; border: 0; border-bottom: 1px dashed transparent; border-radius: 4px; color: var(--color-fg-muted); background: transparent; cursor: text; }
+/* 文本单独一层才吃得到省略号：按钮是 flex 容器，写在它自己身上的 text-overflow 作用不到
+   匿名 flex 项上。min-width: 0 是让这层在 flex 里能被压缩（默认 min-width: auto 撑住不缩）。 */
+.timer-label-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .timer-label .icon { position: absolute; left: 100%; top: 50%; transform: translate(2px, -50%); opacity: 0; }
 .timer-label:hover { color: var(--color-fg); border-bottom-color: var(--color-border); }
 .timer-label:hover .icon { opacity: 1; }
@@ -112,8 +290,15 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-lap-total { min-width: 56px; text-align: right; color: var(--color-fg-subtle); }
 
 /* 顶部页签/操作工具条默认收起（悬浮到工具区域或聚焦时展开，见 TimerTool 的
-   .is-chrome-open）。收起后让内容区上移使用原工具条高度，避免常驻占用显示区域。 */
+   .is-chrome-open）。收起后让内容区上移使用原工具条高度，避免常驻占用显示区域。
+   `position: absolute` 是关键：面板宽度按内容实测（见文件顶部说明），收起的工具条必须
+   退出宽度计算，否则「5 个页签 + 操作按钮」的宽度会继续撑住面板，收起就白收了。
+   绝对定位后它不再参与 max-content，宽度退回内容宽度；展开时恢复静态定位，重新把面板撑宽。 */
 .timer-shell:not(.is-chrome-open) .timer-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
   height: 0;
   min-height: 0;
   margin: 0;
@@ -126,7 +311,30 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 /* 收起时压缩各视图顶部为工具条预留的留白，使悬浮窗保持紧凑 */
 .timer-shell:not(.is-chrome-open) .timer-clock-view { padding-top: 8px; }
 .timer-shell:not(.is-chrome-open) .timer-countdown-view,
+.timer-shell:not(.is-chrome-open) .timer-pomodoro-view,
 .timer-shell:not(.is-chrome-open) .timer-stopwatch-view { padding-top: 2px; }
 .timer-shell:not(.is-chrome-open) .timer-calendar-view { padding-top: 0; }
 
-@media (prefers-reduced-motion: reduce) { .timer-ring-fg { transition: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .timer-ring-fg, .timer-ring-head, .timer-progress-fill,
+  .hg-sand, .hg-mound, .hg-stream, .hg-crater,
+  .timer-countdown-view.is-running .timer-ring-fg,
+  .timer-countdown-view.is-running .timer-ring-head,
+  .timer-countdown-view.is-running .timer-progress-fill,
+  .timer-countdown-view.is-running .hg-sand,
+  .timer-countdown-view.is-running .hg-mound,
+  .timer-countdown-view.is-running .hg-stream,
+  .timer-countdown-view.is-running .hg-crater { transition: none; }
+  .timer-pomodoro-view.is-running .timer-ring-view,
+  .timer-round-dot.is-done,
+  .hg-stream-flow,
+  .timer-ring-fg, .timer-ring-view strong, .timer-progress-fill,
+  .timer-countdown-view .timer-primary-value,
+  .timer-ring-center .timer-ring-time, .timer-stage-label,
+  .timer-countdown-view.is-urgent .timer-primary-value,
+  .timer-countdown-view.is-urgent .timer-ring-view strong,
+  .timer-pomodoro-view.is-urgent .timer-ring-time,
+  .timer-countdown-view.is-complete .timer-primary-value,
+  .timer-countdown-view.is-complete .timer-ring-view strong,
+  .timer-countdown-view.is-complete .timer-ring-bg { animation: none; }
+}

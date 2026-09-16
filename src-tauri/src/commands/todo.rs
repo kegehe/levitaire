@@ -32,13 +32,31 @@ pub fn purge_deleted_todos(
 }
 
 
+/// 导出待办为 JSON。
+///
+/// 必须是异步命令：① 内部打开**阻塞式**系统文件对话框，同步命令会在主线程 inline
+/// 执行、把 WebView 一起卡住；② `DialogTopmostGuard` 要读窗口可见性/置顶态。
+///
+/// 待办窗是 alwaysOnTop，而 rfd 不带 parent 时给 `IFileDialog::Show` 传 NULL owner
+/// ⇒ 对话框会被自己的窗口**完全盖住**（实测：置顶窗压住无主对话框，且
+/// `SetForegroundWindow` 也抬不上来），表现为「点了导出没有任何反应」。
 #[tauri::command]
-pub fn export_todos(state: State<'_, crate::todo::TodoStore>) -> Result<bool, String> {
-    let Some(path) = rfd::FileDialog::new()
+pub async fn export_todos(
+    app: tauri::AppHandle,
+    state: State<'_, crate::todo::TodoStore>,
+) -> Result<bool, String> {
+    let guard = DialogTopmostGuard::suspend(&app, &["todo-overlay"]);
+    let mut dialog = rfd::FileDialog::new()
         .add_filter("Todo JSON", &["json"])
-        .set_file_name("levitaire-todos.json")
-        .save_file()
-    else {
+        .set_file_name("levitaire-todos.json");
+    if let Some(owner) = guard.owner() {
+        dialog = dialog.set_parent(owner);
+    }
+    let picked = tokio::task::spawn_blocking(move || dialog.save_file())
+        .await
+        .map_err(|e| format!("保存对话框任务失败: {}", e))?;
+    drop(guard);
+    let Some(path) = picked else {
         return Ok(false);
     };
     state.export_to(&path)?;
@@ -46,15 +64,22 @@ pub fn export_todos(state: State<'_, crate::todo::TodoStore>) -> Result<bool, St
 }
 
 
+/// 从 JSON 导入待办（异步原因同 [`export_todos`]）。
 #[tauri::command]
-pub fn import_todos(
+pub async fn import_todos(
     app: tauri::AppHandle,
     state: State<'_, crate::todo::TodoStore>,
 ) -> Result<bool, String> {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("Todo JSON", &["json"])
-        .pick_file()
-    else {
+    let guard = DialogTopmostGuard::suspend(&app, &["todo-overlay"]);
+    let mut dialog = rfd::FileDialog::new().add_filter("Todo JSON", &["json"]);
+    if let Some(owner) = guard.owner() {
+        dialog = dialog.set_parent(owner);
+    }
+    let picked = tokio::task::spawn_blocking(move || dialog.pick_file())
+        .await
+        .map_err(|e| format!("打开对话框任务失败: {}", e))?;
+    drop(guard);
+    let Some(path) = picked else {
         return Ok(false);
     };
     state.import_from(&path)?;
@@ -371,8 +396,12 @@ pub fn show_todo_window(
     let win = app
         .get_webview_window("todo-overlay")
         .ok_or_else(|| "todo-overlay 窗口未找到".to_string())?;
-    win.set_size(tauri::LogicalSize::new(360.0, 560.0))
-        .map_err(|e| e.to_string())?;
+    // # 不要在这里写死窗口尺寸
+    //
+    // 待办窗高度随内容走（空清单只有一百多像素，折叠/展开还会再收一次），尺寸由前端
+    // `TodoTool.tsx` 按 `.todo-body` 实测高度下发。曾经这里每次显示都 `set_size(360, 560)`，
+    // 结果前端刚算好的高度一显示就被打回固定值，窗口永远是一大片空白。
+    // 窗口只隐藏不销毁，尺寸一直有效，宽度也不需要在这里兜。
     if !TODO_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
         let on_close = win.clone();
         win.on_window_event(move |event| {

@@ -10,9 +10,11 @@ import {
   subscribeThemePreferences,
 } from "../../styles/themePreferences";
 import ScrollNavigator from "../scroll-navigator/ScrollNavigator";
+import WindowPinPanel from "./WindowPinPanel";
+import { clampWindowToWorkArea, panelWindowSize } from "../../utils/panelWindow";
 import "./UtilityHub.css";
 
-type HubMode = "tools" | "color" | "scroll";
+type HubMode = "tools" | "color" | "scroll" | "pin";
 
 const TOOLTIP_TOP_GUTTER_PX = 26;
 
@@ -61,8 +63,14 @@ function UtilityHub() {
     applyThemePreferences(getStoredThemePreferences());
     document.documentElement.style.background = "transparent";
     document.body.classList.add("utility-hub-window");
+    // 投影留白（见 utils/panelWindow.ts 与 global.css 的 body.utility-hub-window）
+    // 是一圈透明区域，但它仍属于本窗口：原生层不会把点击透给桌面，于是就变成一圈
+    // 「吞点击」的死区。让留白与标题栏一样成为拖拽面——Tauri 的 drag region 只认
+    // 命中元素自身，把属性挂在 body 上正好只覆盖留白，不会波及面板内部控件。
+    document.body.setAttribute("data-tauri-drag-region", "");
     return () => {
       document.body.classList.remove("utility-hub-window");
+      document.body.removeAttribute("data-tauri-drag-region");
     };
   }, []);
 
@@ -104,16 +112,22 @@ function UtilityHub() {
 
     const resizeToContent = () => {
       const bounds = hub.getBoundingClientRect();
-      const width = Math.ceil(bounds.width);
+      const panelWidth = Math.ceil(bounds.width);
       // Keep the transparent top gutter inside the native window. CSS pseudo-elements
       // cannot escape the WebView bounds even when their DOM ancestors allow overflow.
-      const height = Math.ceil(bounds.height + TOOLTIP_TOP_GUTTER_PX);
+      const panelHeight = Math.ceil(bounds.height);
+      if (!panelWidth || !panelHeight) return;
+      // 窗口 = 面板 + 投影留白。窗口尺寸若等于面板尺寸，投影没有任何展开空间，
+      // 只在面板圆角的「缺口」里露出一小块并被窗口边界硬切成直角（四角各一块）。
+      // 顶部 26px tooltip 安全区比留白宽，已覆盖顶部需求，故按 topGutter 传入。
+      const { width, height } = panelWindowSize(panelWidth, panelHeight, TOOLTIP_TOP_GUTTER_PX);
       const size = `${width}:${height}`;
-      if (!width || !height || size === lastSizeRef.current) return;
+      if (size === lastSizeRef.current) return;
       lastSizeRef.current = size;
       getCurrentWebviewWindow()
         .setSize(new LogicalSize(width, height))
         .catch(() => {});
+      clampWindowToWorkArea(width, height);
     };
 
     resizeToContent();
@@ -125,6 +139,9 @@ function UtilityHub() {
 
   const pickColor = useCallback(async () => {
     try {
+      // 取色与窗口置顶点选都要接管系统光标，进一个之前必须先退出另一个，
+      // 否则退出时恢复出来的是对方那只光标。
+      await invoke("stop_window_pin_pick");
       setMode("color");
       setMessage(null);
       await invoke("start_utility_color_pick");
@@ -153,8 +170,13 @@ function UtilityHub() {
 
   return (
     <main ref={hubRef} className={`utility-hub utility-hub--${mode}`} aria-label="通用工具">
-      <header className="utility-hub-header" data-tauri-drag-region>
-        <span className="utility-hub-drag-space" data-tauri-drag-region aria-hidden="true" />
+      <header className="utility-hub-header" data-tauri-drag-region="deep">
+        {/* 拖拽手柄：固定 16px 宽，六个点用 mask 画。它只负责「看起来能拖」——
+            实际拖拽由标题栏承担：必须写 "deep"，因为 Tauri 的裸属性只在「该元素自己
+            就是命中元素」时生效（drag.js: `return el === composedPath[0]`），而中段留白
+            的命中元素是 flex:1 的 .utility-hub-actions，裸属性不会向上传播。按钮不受
+            影响：drag.js 遇到「可点击元素 + 无属性」会直接 return false。 */}
+        <span className="utility-hub-grip" aria-hidden="true" />
         <div className="utility-hub-actions">
           <nav className="utility-hub-tools" aria-label="小工具">
             <button
@@ -177,10 +199,25 @@ function UtilityHub() {
               title="滚动导航"
               onClick={() => {
                 void invoke("stop_utility_color_pick");
+                void invoke("stop_window_pin_pick");
                 setMode("scroll");
               }}
             >
               <Icon name="ChevronsDown" size={16} />
+            </button>
+            <button
+              className={mode === "pin" ? "is-active" : ""}
+              type="button"
+              aria-label="窗口置顶"
+              aria-pressed={mode === "pin"}
+              data-tooltip="窗口置顶"
+              title="窗口置顶"
+              onClick={() => {
+                void invoke("stop_utility_color_pick");
+                setMode("pin");
+              }}
+            >
+              <Icon name="AppWindow" size={16} />
             </button>
           </nav>
           <button
@@ -257,6 +294,7 @@ function UtilityHub() {
         </section>
       )}
       {mode === "scroll" && <ScrollNavigator embedded />}
+      {mode === "pin" && <WindowPinPanel />}
       {message && (
         <p className="utility-hub-message" role="status">
           {message}

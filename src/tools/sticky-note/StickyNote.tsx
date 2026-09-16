@@ -16,10 +16,24 @@ import {
   NOTE_COLORS,
   parseNoteIdFromLabel,
 } from "./constants";
+import { clampWindowToWorkArea } from "../../utils/panelWindow";
 import "./StickyNote.css";
 
 /** 与后端 sticky_note::NOTE_WIDTH_LOGICAL 一致（逻辑像素） */
 const NOTE_WIDTH = 264;
+
+/**
+ * 「便签已不存在」的后端错误文案（`sticky_note/mod.rs` 里的 `ok_or_else`）。
+ *
+ * ⚠️ 这是**跨端契约**：只有确认「它真的没了」才允许销毁窗口；其它任何错误（瞬时 IPC
+ * 失败、锁中毒）都必须保留窗口并给一张可重试的卡片。以前不区分、一律 `destroy()`，
+ * 于是一次瞬时失败就把用户正看着的便签窗销毁掉，而数据里它仍是 visible=true ——
+ * 管理窗显示「已贴在桌面」、桌面上却没有窗口，用户看不到任何解释。
+ *
+ * 两侧的字面量由后端守卫测试 `not_found_message_is_a_cross_boundary_contract` 钉住：
+ * 改后端文案而不改这里，守卫会报红（否则行为会静默退回「任何错误都销毁窗口」）。
+ */
+const NOTE_NOT_FOUND_MARKER = "便利贴不存在";
 
 /** 块级标签：序列化时在这些元素之间补换行 */
 const BLOCK_TAGS = new Set(["DIV", "P", "LI", "PRE", "BLOCKQUOTE", "H1", "H2", "H3"]);
@@ -130,6 +144,8 @@ function StickyNote() {
   const noteIdRef = useRef<string>(parseNoteIdFromLabel(win.label));
 
   const [note, setNote] = useState<StickyNote | null>(null);
+  // 读取失败（且便签确实还在）时进入可重试的失败态，见下方 loadNote
+  const [loadFailed, setLoadFailed] = useState(false);
   const [colorId, setColorId] = useState<string>("yellow");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [isEmpty, setIsEmpty] = useState(true);
@@ -151,6 +167,17 @@ function StickyNote() {
   const [pasteError, setPasteError] = useState<string | null>(null);
   const pasteErrorTimer = useRef<number | null>(null);
 
+  /**
+   * 统一的短暂提示（复用原有 `.sn-paste-error` 提示条）。
+   * 粘贴图片、保存正文、读取便签失败都走它 —— 这些路径以前只 `console.error`，
+   * 用户零感知：以为已经存住了，刷新后内容却回退甚至丢失。
+   */
+  const showNotice = useCallback((message: string) => {
+    setPasteError(message);
+    if (pasteErrorTimer.current) clearTimeout(pasteErrorTimer.current);
+    pasteErrorTimer.current = window.setTimeout(() => setPasteError(null), 3500);
+  }, []);
+
   const color = getNoteColor(colorId);
 
   // 主题（单张便签独立窗口，需手动应用与订阅）
@@ -164,24 +191,33 @@ function StickyNote() {
     };
   }, []);
 
-  // 读取便签内容；已删除（如被管理窗删掉）时自毁窗口
-  useEffect(() => {
-    let disposed = false;
-    const id = noteIdRef.current;
-    invoke<StickyNote>("get_sticky_note", { id })
-      .then((data) => {
-        if (disposed) return;
-        setNote(data);
-        setColorId(data.colorId || "yellow");
-      })
-      .catch(() => {
-        // 便利贴已不存在：关闭窗口
+  // 读取便签内容；已删除（如被管理窗删掉）时自毁窗口。
+  //
+  // 只有「确实已不存在」才允许自毁：以前任何错误都会 `win.destroy()` —— 一次瞬时的
+  // IPC/锁失败就把用户正在看的便签窗销毁掉，而数据里它仍是 visible=true，管理窗于是
+  // 显示「已贴在桌面」但桌面没有窗口，用户也看不到任何解释。瞬时失败改为在窗内给出
+  // 可操作的失败态（重试），窗口本身保留。
+  const loadNote = useCallback(async () => {
+    try {
+      const data = await invoke<StickyNote>("get_sticky_note", { id: noteIdRef.current });
+      setNote(data);
+      setColorId(data.colorId || "yellow");
+      setLoadFailed(false);
+    } catch (error) {
+      const message = typeof error === "string" ? error : "";
+      // 判定依据见 NOTE_NOT_FOUND_MARKER：只有「确实没了」才销毁窗口
+      if (message.includes(NOTE_NOT_FOUND_MARKER)) {
         void win.destroy().catch(() => {});
-      });
-    return () => {
-      disposed = true;
-    };
-  }, []);
+        return;
+      }
+      console.error("读取便利贴失败:", error);
+      setLoadFailed(true);
+    }
+  }, [win]);
+
+  useEffect(() => {
+    void loadNote();
+  }, [loadNote]);
 
   // 拉取便利贴图片根目录，供 convertFileSrc 解析令牌为可显示地址
   useEffect(() => {
@@ -218,9 +254,17 @@ function StickyNote() {
       if (height > 0 && height !== lastHeightRef.current) {
         lastHeightRef.current = height;
         win.setSize(new LogicalSize(NOTE_WIDTH, height)).catch(() => {});
+        // 便签越写越高：贴着屏幕下沿的便签若不重新夹，底部几行会落到工作区外。
+        clampWindowToWorkArea(NOTE_WIDTH, height);
       }
     }, 40);
   }, []);
+
+  // 读取失败的卡片也要量一次高度：该分支 `note` 为 null，下面的水合 effect 不会跑，
+  // 少了这一次窗口会停在创建时的 180px，卡片要么被裁、要么下方留一大片透明。
+  useEffect(() => {
+    if (loadFailed) scheduleResize();
+  }, [loadFailed, scheduleResize]);
 
   // note 渲染完成后（editor 已挂载）再水合正文；不能在上面的 then 中直接写
   // editorRef——此时新分支尚未提交，ref 仍为 null。正文始终立即水合（纯文本
@@ -271,15 +315,31 @@ function StickyNote() {
     }
     if (destroyedRef.current) return;
     const id = noteIdRef.current;
-    void invoke("update_sticky_note_content", { id, content: latestTextRef.current }).catch((err) =>
-      console.error("保存便利贴失败:", err),
+    void invoke("update_sticky_note_content", { id, content: latestTextRef.current }).catch(
+      (err) => {
+        console.error("保存便利贴失败:", err);
+        // 磁盘满 / 内容超限（后端上限 10 万字符）等失败以前只打日志、用户零感知，
+        // 以为已经存住了，刷新后内容回退甚至永久丢失。
+        showNotice(`保存失败：${typeof err === "string" ? err : "请检查磁盘空间"}`);
+      },
     );
-  }, []);
+  }, [showNotice]);
 
   const scheduleSave = useCallback(() => {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(flushSave, 500);
   }, [flushSave]);
+
+  // 原生关闭（Alt+F4）：后端把 WM_CLOSE 拦成「收起」并落 visible=false，
+  // 这里只负责把防抖中（≤500ms）的正文立刻冲盘，避免随窗口隐藏一起丢。
+  useEffect(() => {
+    const unlisten = win.listen("sticky-note-close-requested", () => {
+      flushSave();
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [win, flushSave]);
 
   const onInput = () => {
     const text = readEditorText(editorRef.current);
@@ -365,9 +425,7 @@ function StickyNote() {
       // 粘贴已被 preventDefault，失败会静默丢失图片；给用户可见的短暂提示，避免无感知丢失。
       const detail =
         typeof err === "string" ? err : (err as { message?: string })?.message || "请重试";
-      setPasteError(`图片保存失败：${detail}`);
-      if (pasteErrorTimer.current) clearTimeout(pasteErrorTimer.current);
-      pasteErrorTimer.current = window.setTimeout(() => setPasteError(null), 3500);
+      showNotice(`图片保存失败：${detail}`);
     }
   };
 
@@ -406,11 +464,26 @@ function StickyNote() {
     };
   }, [win]);
 
-  const startHeaderDrag = (event: React.MouseEvent) => {
+  /**
+   * 按住便签的空白处拖动整窗。
+   *
+   * 判定挂在**窗口根节点**上，而不是只挂顶栏：顶栏只有 32px 高、且大半宽度被纸色点
+   * 占掉，用户按到纸色点、正文、或卡片外那一圈留白上都以为「便利贴拖不动」。
+   * 现在除了两类元素，窗口内任何位置都能拖：
+   * - `button`：纸色点 / 收起 / 新建 / 删除都是点击目标，不能被拖拽吃掉；
+   * - `.sn-editor`：正文是 contenteditable，按住要能落光标、划选文字。
+   *
+   * 用显式 startDragging()（而非 data-tauri-drag-region 属性）：后者由 Tauri 在
+   * mousedown 时调 `internal_toggle_maximize` 处理双击，会把这张固定宽度的小纸条
+   * 双击顶成整屏；这里只要拖拽，不要最大化。失败要出声——静默吞掉异常时，
+   * 「拖不动」在日志里查不到任何痕迹。
+   */
+  const startNoteDrag = (event: React.MouseEvent) => {
     if (event.button !== 0) return;
-    if ((event.target as HTMLElement).closest("button")) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("button") || target.closest(".sn-editor")) return;
     event.preventDefault();
-    win.startDragging().catch(() => {});
+    win.startDragging().catch((err) => console.error("拖动便利贴失败:", err));
   };
 
   const changeColor = (next: string) => {
@@ -461,17 +534,37 @@ function StickyNote() {
   } as CSSProperties;
 
   if (!note) {
-    // 内容读取中：保持窗口透明不闪烁
-    return <div ref={rootRef} className="sn-window" data-loading="true" />;
+    // 内容读取中：保持窗口透明不闪烁。
+    // 读取失败（便签确实还在）时给一个可操作的小卡片：否则这张便签会永远停在
+    // 「看不见内容的空窗」状态，用户既看不到内容、也不知道发生了什么。
+    if (!loadFailed) {
+      return <div ref={rootRef} className="sn-window" data-loading="true" />;
+    }
+    return (
+      <div ref={rootRef} className="sn-window" onMouseDown={startNoteDrag}>
+        <article className="sn-card is-empty" style={paperStyle}>
+          <div className="sn-paste-error" role="alert">
+            读取便利贴失败，内容暂未加载
+          </div>
+          <div className="sn-load-retry">
+            <button className="sn-btn" onClick={() => void loadNote()}>
+              重试
+            </button>
+          </div>
+        </article>
+      </div>
+    );
   }
 
   return (
-    <div ref={rootRef} className="sn-window">
+    <div ref={rootRef} className="sn-window" onMouseDown={startNoteDrag}>
       <article
         className={`sn-card ${isEmpty ? "is-empty" : ""} ${confirmDelete ? "is-deleting" : ""}`}
         style={paperStyle}
       >
-        <header className="sn-head" onMouseDown={startHeaderDrag}>
+        <header className="sn-head">
+          {/* 常显的六点抓手：把「按住这里能拖动」说出来（真正的拖拽面是整个窗口） */}
+          <span className="sn-grip" aria-hidden="true" />
           <div className="sn-colors">
             {NOTE_COLORS.map((item) => (
               <button
@@ -542,7 +635,7 @@ function StickyNote() {
             <Icon name="Plus" size={15} />
           </button>
           <span className="sn-foot-hint">
-            {confirmDelete ? "再点一次确认删除" : "拖动顶栏移动 · Esc 收起"}
+            {confirmDelete ? "再点一次确认删除" : "按住空白处可拖动 · Esc 收起"}
           </span>
           <button
             type="button"

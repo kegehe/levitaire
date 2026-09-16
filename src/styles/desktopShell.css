@@ -1,0 +1,77 @@
+/* ── 应用自绘文本右键菜单 ──────────────────────────────────
+   用于替代 WebView2 自带的网页右键菜单（刷新 / 另存为 / 检查 …），
+   在可编辑区域提供「剪切 / 复制 / 粘贴 / 全选」。
+   见 src/utils/textContextMenu.ts。 */
+
+.app-text-menu {
+  position: fixed;
+  z-index: 1000; /* 大于应用内所有浮层（最高 40），小于系统级弹窗 */
+  display: flex;
+  flex-direction: column;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--color-bg-elevated);
+  box-shadow:
+    0 10px 28px rgb(0 0 0 / 0.2),
+    var(--shadow-sm);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--text-base, 13px);
+  line-height: var(--leading-tight, 1.25);
+  user-select: none;
+  animation: app-text-menu-enter 90ms ease-out both;
+}
+
+.app-text-menu__item {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast, 120ms ease),
+    color var(--transition-fast, 120ms ease);
+}
+
+.app-text-menu__item:hover,
+.app-text-menu__item:focus-visible {
+  outline: none;
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.app-text-menu__item:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.app-text-menu__item:disabled:hover {
+  background: transparent;
+  color: inherit;
+}
+
+@keyframes app-text-menu-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-text-menu {
+    animation: none;
+  }
+}

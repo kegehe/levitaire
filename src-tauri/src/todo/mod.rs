@@ -13,8 +13,12 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 const MAX_TITLE_CHARS: usize = 500;
-const INBOX_LIST_ID: &str = "inbox";
 const MAX_LIST_NAME_CHARS: usize = 80;
+/// 数据文件版本。v3 起取消内置「收件箱」清单：任务可以不属于任何清单
+/// （`list_id` 为空串），清单全部由用户自建。
+const FILE_VERSION: u32 = 3;
+/// v2 及更早版本内置收件箱清单的 id。仅迁移时用于识别并移除。
+const LEGACY_INBOX_LIST_ID: &str = "inbox";
 
 /// 待办变更 → 调度线程的唤醒通道。调度线程空闲时最长沉睡 60s，
 /// 若此时新建/修改了「近时到期的提醒」，写入路径会 send 一记唤醒信号，
@@ -79,7 +83,8 @@ pub struct TodoItem {
     pub priority: TodoPriority,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default = "default_list_id")]
+    /// 所属清单 id。空串（或省略）表示不属于任何清单。
+    #[serde(default)]
     pub list_id: String,
     #[serde(default)]
     pub deleted_at: Option<String>,
@@ -114,7 +119,8 @@ pub struct CreateTodoInput {
     pub priority: TodoPriority,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default = "default_list_id")]
+    /// 所属清单 id。空串（或省略）表示不属于任何清单。
+    #[serde(default)]
     pub list_id: String,
     #[serde(default)]
     pub repeat_rule: TodoRepeatRule,
@@ -357,9 +363,6 @@ impl TodoStore {
     }
 
     pub fn update_list(&self, id: &str, input: UpdateTodoListInput) -> Result<TodoList, String> {
-        if id == INBOX_LIST_ID {
-            return Err("The inbox list cannot be renamed".to_string());
-        }
         let name = normalize_list_name(&input.name)?;
         let mut data = self.data.lock().map_err(|e| e.to_string())?;
         let previous = data.clone();
@@ -383,9 +386,6 @@ impl TodoStore {
     }
 
     pub fn delete_list(&self, id: &str) -> Result<(), String> {
-        if id == INBOX_LIST_ID {
-            return Err("The inbox list cannot be deleted".to_string());
-        }
         let mut data = self.data.lock().map_err(|e| e.to_string())?;
         let previous = data.clone();
         let before = data.lists.len();
@@ -393,10 +393,11 @@ impl TodoStore {
         if data.lists.len() == before {
             return Err("List does not exist".to_string());
         }
+        // 清单里的任务改为「不属于任何清单」，不随清单一起消失。
         let now = Utc::now().to_rfc3339();
         for item in &mut data.items {
             if item.list_id == id {
-                item.list_id = INBOX_LIST_ID.to_string();
+                item.list_id = String::new();
                 item.updated_at = now.clone();
             }
         }
@@ -415,9 +416,7 @@ impl TodoStore {
         );
         let mut data = self.data.lock().map_err(|e| e.to_string())?;
         let previous = data.clone();
-        if !data.lists.iter().any(|list| list.id == input.list_id) {
-            return Err("List does not exist".to_string());
-        }
+        let list_id = normalize_list_ref(&input.list_id, &data.lists)?;
         let sort_order = data
             .items
             .iter()
@@ -431,7 +430,7 @@ impl TodoStore {
             notes: input.notes.trim().to_string(),
             priority: input.priority,
             tags: normalize_tags(input.tags),
-            list_id: input.list_id,
+            list_id,
             deleted_at: None,
             repeat_rule: input.repeat_rule,
             status: TodoStatus::Active,
@@ -451,11 +450,11 @@ impl TodoStore {
     pub fn update(&self, id: &str, input: UpdateTodoInput) -> Result<TodoItem, String> {
         let mut data = self.data.lock().map_err(|e| e.to_string())?;
         let previous = data.clone();
-        if let Some(ref list_id) = input.list_id {
-            if !data.lists.iter().any(|list| list.id == list_id.as_str()) {
-                return Err("List does not exist".to_string());
-            }
-        }
+        // 先校验清单引用，再取 items 的可变借用（normalize_list_ref 只读 data.lists）。
+        let list_id = match input.list_id.as_deref() {
+            Some(value) => Some(normalize_list_ref(value, &data.lists)?),
+            None => None,
+        };
         let item = data
             .items
             .iter_mut()
@@ -473,7 +472,7 @@ impl TodoStore {
         if let Some(tags) = input.tags {
             item.tags = normalize_tags(tags);
         }
-        if let Some(list_id) = input.list_id {
+        if let Some(list_id) = list_id {
             item.list_id = list_id;
         }
         if let Some(repeat_rule) = input.repeat_rule {
@@ -604,7 +603,6 @@ impl TodoStore {
         let raw = fs::read_to_string(path).map_err(|e| format!("Could not read tasks: {e}"))?;
         let mut imported: TodoFile =
             serde_json::from_str(&raw).map_err(|e| format!("Invalid todo export: {e}"))?;
-        ensure_inbox_list(&mut imported);
         let mut list_ids = HashSet::new();
         for list in &imported.lists {
             if list.id.trim().is_empty() || !list_ids.insert(list.id.clone()) {
@@ -619,10 +617,15 @@ impl TodoStore {
             normalize_title(&item.title)?;
             validate_datetime(&item.due_at)?;
             validate_datetime(&item.remind_at)?;
-            if !imported.lists.iter().any(|list| list.id == item.list_id) {
+            // 引用校验必须在迁移之前：迁移会把悬空引用自愈成「无清单」，
+            // 先迁移的话这里就永远发现不了损坏的导入文件。
+            if !item.list_id.is_empty() && !imported.lists.iter().any(|l| l.id == item.list_id) {
                 return Err("An imported task references a missing list".to_string());
             }
         }
+        // 旧导出的文件里带内置收件箱清单，按当前版本归一化（移除该清单，
+        // 其下的任务改为「无清单」）。
+        migrate_file(&mut imported);
         let mut data = self.data.lock().map_err(|e| e.to_string())?;
         let previous = data.clone();
         *data = imported;
@@ -761,46 +764,40 @@ fn load_file(path: &PathBuf) -> TodoFile {
                     &format!("invalid todo file moved aside: {error}"),
                 );
                 TodoFile {
-                    version: 2,
+                    version: FILE_VERSION,
                     lists: Vec::new(),
                     items: Vec::new(),
                 }
             }
         },
         Err(_) => TodoFile {
-            version: 2,
+            version: FILE_VERSION,
             lists: Vec::new(),
             items: Vec::new(),
         },
     };
-    ensure_inbox_list(&mut file);
+    migrate_file(&mut file);
     file
 }
 
-fn default_list_id() -> String {
-    INBOX_LIST_ID.to_string()
-}
-
-fn ensure_inbox_list(file: &mut TodoFile) {
-    if !file.lists.iter().any(|list| list.id == INBOX_LIST_ID) {
-        let now = Utc::now().to_rfc3339();
-        file.lists.insert(
-            0,
-            TodoList {
-                id: INBOX_LIST_ID.to_string(),
-                name: "Inbox".to_string(),
-                created_at: now.clone(),
-                updated_at: now,
-            },
-        );
-    }
-    file.version = file.version.max(2);
+/// 把任意历史版本的数据文件归一化到当前 `FILE_VERSION`，并顺带自愈悬空引用。
+///
+/// v2 → v3：移除内置收件箱清单（`LEGACY_INBOX_LIST_ID`），原先挂在它下面的任务
+/// 改为「不属于任何清单」。清单因此可以为空，界面下拉框在没有任何清单时只显示
+/// 「全部任务」。
+///
+/// 自愈部分与版本无关，每次加载都跑：任何指向不存在清单的任务统一落回「无清单」，
+/// 避免数据文件被外部编辑后留下前端看不见的任务。
+fn migrate_file(file: &mut TodoFile) {
+    file.lists.retain(|list| list.id != LEGACY_INBOX_LIST_ID);
     for item in &mut file.items {
-        if item.list_id.trim().is_empty() || !file.lists.iter().any(|list| list.id == item.list_id)
-        {
-            item.list_id = INBOX_LIST_ID.to_string();
+        let dangling = item.list_id.trim().is_empty()
+            || !file.lists.iter().any(|list| list.id == item.list_id);
+        if dangling {
+            item.list_id = String::new();
         }
     }
+    file.version = FILE_VERSION;
 }
 
 fn normalize_title(value: &str) -> Result<String, String> {
@@ -823,6 +820,21 @@ fn normalize_list_name(value: &str) -> Result<String, String> {
         return Err("List name is too long".to_string());
     }
     Ok(name.to_string())
+}
+
+/// 校验并归一化任务引用的清单 id。
+///
+/// 空串（含纯空白）表示「不属于任何清单」，始终合法；非空时必须命中已有清单，
+/// 否则拒绝写入 —— 前端下拉框只能选到存在的清单，出现别的值说明数据被外部改坏了。
+fn normalize_list_ref(value: &str, lists: &[TodoList]) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    if lists.iter().any(|list| list.id == value) {
+        return Ok(value.to_string());
+    }
+    Err("List does not exist".to_string())
 }
 
 fn next_due(value: Option<&str>, rule: TodoRepeatRule, now: DateTime<Utc>) -> Option<String> {
@@ -1024,7 +1036,7 @@ mod tests {
             notes: String::new(),
             priority: TodoPriority::Normal,
             tags: Vec::new(),
-            list_id: INBOX_LIST_ID.to_string(),
+            list_id: String::new(),
             deleted_at: None,
             repeat_rule: TodoRepeatRule::None,
             status: TodoStatus::Active,
@@ -1044,11 +1056,11 @@ mod tests {
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
         let mut data = TodoFile {
-            version: 2,
+            version: FILE_VERSION,
             lists: Vec::new(),
             items,
         };
-        ensure_inbox_list(&mut data);
+        migrate_file(&mut data);
         (
             TodoStore {
                 file_path: path.clone(),
@@ -1206,7 +1218,7 @@ mod tests {
         ));
         let item = test_item("duplicate", 1);
         let file = TodoFile {
-            version: 2,
+            version: FILE_VERSION,
             lists: Vec::new(),
             items: vec![item.clone(), item],
         };
@@ -1217,5 +1229,149 @@ mod tests {
             .contains("unique"));
         let _ = fs::remove_file(store_path);
         let _ = fs::remove_file(input_path);
+    }
+
+    fn test_list(id: &str, name: &str) -> TodoList {
+        TodoList {
+            id: id.to_string(),
+            name: name.to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn test_input(title: &str, list_id: &str) -> CreateTodoInput {
+        CreateTodoInput {
+            title: title.to_string(),
+            notes: String::new(),
+            priority: TodoPriority::Normal,
+            tags: Vec::new(),
+            list_id: list_id.to_string(),
+            repeat_rule: TodoRepeatRule::None,
+            due_at: None,
+            remind_at: None,
+        }
+    }
+
+    #[test]
+    fn migration_drops_the_legacy_inbox_and_unfiles_its_tasks() {
+        let mut file = TodoFile {
+            version: 2,
+            lists: vec![
+                test_list(LEGACY_INBOX_LIST_ID, "Inbox"),
+                test_list("list-1", "工作"),
+            ],
+            items: vec![test_item("inboxed", 1), test_item("listed", 2), test_item("dangling", 3)],
+        };
+        file.items[0].list_id = LEGACY_INBOX_LIST_ID.to_string();
+        file.items[1].list_id = "list-1".to_string();
+        file.items[2].list_id = "list-gone".to_string();
+
+        migrate_file(&mut file);
+
+        assert_eq!(file.version, FILE_VERSION);
+        assert_eq!(file.lists.len(), 1);
+        // 收件箱下的任务和悬空引用都落回「无清单」，真实清单原地不动。
+        assert_eq!(file.items[0].list_id, "");
+        assert_eq!(file.items[1].list_id, "list-1");
+        assert_eq!(file.items[2].list_id, "");
+    }
+
+    #[test]
+    fn tasks_may_belong_to_no_list_but_never_to_a_missing_one() {
+        let (store, path) = test_store(Vec::new());
+        let item = store.create(test_input("无清单任务", "")).unwrap();
+        assert_eq!(item.list_id, "");
+        // 空白串等价于空串，不写入脏数据
+        assert_eq!(store.create(test_input("空白", "  ")).unwrap().list_id, "");
+        assert!(store.create(test_input("坏引用", "list-gone")).is_err());
+
+        let moved = UpdateTodoInput {
+            list_id: Some("list-gone".to_string()),
+            ..Default::default()
+        };
+        assert!(store.update(&item.id, moved).is_err());
+        let cleared = UpdateTodoInput {
+            list_id: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(store.update(&item.id, cleared).unwrap().list_id, "");
+        let _ = fs::remove_file(path);
+    }
+
+    /// 走真实文件读入：验证「旧版本写出的 v2 文件」经 serde 反序列化后能被正确迁移。
+    /// 只测 migrate_file 会漏掉字段名/缺省值对不上的情况。
+    #[test]
+    fn loading_a_legacy_file_migrates_it_in_place() {
+        let path = std::env::temp_dir().join(format!(
+            "levitaire-todo-legacy-{}.json",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let legacy = serde_json::json!({
+            "version": 2,
+            "lists": [
+                { "id": "inbox", "name": "Inbox", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z" },
+                { "id": "list-1", "name": "工作", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z" }
+            ],
+            "items": [
+                { "id": "todo-1", "title": "收件箱里的任务", "status": "active", "listId": "inbox",
+                  "dueAt": null, "remindAt": null, "reminderFiredAt": null,
+                  "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                  "completedAt": null, "sortOrder": 1 }
+            ]
+        });
+        fs::write(&path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        let file = load_file(&path);
+
+        assert_eq!(file.version, FILE_VERSION);
+        assert_eq!(file.lists.len(), 1);
+        assert_eq!(file.lists[0].id, "list-1");
+        assert_eq!(file.items[0].list_id, "");
+        let _ = fs::remove_file(path);
+    }
+
+    /// 导出/导入往返：清单可以为空、任务可以无清单，导入端不能因此报错或丢任务。
+    #[test]
+    fn export_import_round_trip_keeps_unlisted_tasks() {
+        let (store, store_path) = test_store(Vec::new());
+        store.create(test_input("无清单任务", "")).unwrap();
+        let export_path = std::env::temp_dir().join(format!(
+            "levitaire-todo-roundtrip-{}.json",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        store.export_to(&export_path).unwrap();
+
+        let (target, target_path) = test_store(Vec::new());
+        target.import_from(&export_path).unwrap();
+        let listed = target.list(true, Some("manual")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "无清单任务");
+        assert_eq!(listed[0].list_id, "");
+
+        let _ = fs::remove_file(store_path);
+        let _ = fs::remove_file(target_path);
+        let _ = fs::remove_file(export_path);
+    }
+
+    #[test]
+    fn deleting_a_list_unfiles_its_tasks_instead_of_dropping_them() {
+        let (store, path) = test_store(Vec::new());
+        let list = store
+            .create_list(CreateTodoListInput {
+                name: "工作".to_string(),
+            })
+            .unwrap();
+        let item = store.create(test_input("任务", &list.id)).unwrap();
+
+        store.delete_list(&list.id).unwrap();
+
+        let listed = store.list(true, Some("manual")).unwrap();
+        // 任务不能随清单一起消失，也不该留下悬空引用。
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, item.id);
+        assert_eq!(listed[0].list_id, "");
+        assert!(store.list_lists().unwrap().is_empty());
+        let _ = fs::remove_file(path);
     }
 }

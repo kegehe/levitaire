@@ -1,12 +1,21 @@
 .long-capture-controls,
 .long-capture-preview {
+  /* 阴影自包含字面值，不引用 --shadow-* 系：本窗口已接入主题订阅，
+     themePreferences 运行时会把 --shadow-md/lg 统一覆盖成 scheme 的大浮层投影，
+     若间接引用会让这枚紧凑控制条被渲染出 30px+ 的巨大阴影（同 tokens.css 的警告）。 */
+  --lc-shadow: 0 8px 24px rgb(24 34 48 / 0.16);
   box-sizing: border-box;
   color: var(--color-fg);
   background: var(--toolbar-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--lc-shadow);
   font-size: 12px;
+}
+
+[data-theme="dark"] .long-capture-controls,
+[data-theme="dark"] .long-capture-preview {
+  --lc-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
 }
 
 .long-capture-controls {

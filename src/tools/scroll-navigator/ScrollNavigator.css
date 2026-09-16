@@ -1,3 +1,11 @@
+/* 独立窗口（scroll-navigator-overlay）：四周留出投影留白。
+   见 utils/panelWindow.ts 的 PANEL_SHADOW_MARGIN —— 窗口尺寸由前端算成
+   「面板 + 2×留白」，留白供 .scroll-nav 的投影展开，否则投影会被窗口边界硬切，
+   在面板圆角处留下带直角的残影。嵌在通用工具面板内部时（embedded）不加这个类，
+   留白由 body.utility-hub-window 提供。 */
+body.scroll-nav-window {
+  padding: 20px;
+}
 .scroll-nav {
   box-sizing: border-box;
   width: 248px;
@@ -263,6 +271,82 @@
 }
 .scroll-nav-presets button:disabled {
   cursor: not-allowed;
+}
+/* 目标窗口没有可精确控制的滚动条时的中间区。
+   旧版在这里整块 disabled（百分比 / 滑杆 / 预设都点不动），而实测浏览器、Electron、
+   资源管理器恰恰都拿不到 UIA 滚动器 —— 等于对它们彻底不可用。改成「相对滚动」：
+   全部控件只依赖「存在目标窗口」，永远可用。见 docs/滚动导航问题分析.md。 */
+.scroll-nav-relative-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.scroll-nav-hint {
+  color: var(--color-fg-subtle);
+  font-size: 11px;
+}
+.scroll-nav-steps {
+  display: flex;
+  gap: 5px;
+}
+.scroll-nav-steps button {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 26px;
+  border: 1px solid var(--palette-card-border);
+  border-radius: 5px;
+  color: var(--color-fg-subtle);
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    background var(--transition-fast);
+}
+.scroll-nav-steps button:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+.scroll-nav-steps button:disabled {
+  cursor: not-allowed;
+}
+/* 目标窗口被关掉 / 抓取失败时：给一句说明 + 一键重绑（旧版只能关掉面板重开）。 */
+.scroll-nav-recover {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.scroll-nav-recover .scroll-nav-error {
+  margin: 0;
+}
+.scroll-nav-recover button {
+  flex: none;
+  min-height: 23px;
+  padding: 0 8px;
+  border: 1px solid var(--palette-card-border);
+  border-radius: 4px;
+  color: var(--color-fg-subtle);
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    background var(--transition-fast);
+}
+.scroll-nav-recover button:hover:not(:disabled) {
+  border-color: var(--palette-card-border-hover);
+  color: var(--color-fg);
+  background: var(--button-hover-bg);
+}
+.scroll-nav-recover button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 .scroll-nav-error {
   margin: -4px 0 0;

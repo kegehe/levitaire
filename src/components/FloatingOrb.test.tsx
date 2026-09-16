@@ -1,6 +1,7 @@
 import { act, fireEvent, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { clearMockListeners, emitMockEvent, menuState, mockStartDragging } from "../test/tauri-mock";
 import { ensureScreenshotWindow, showContextMenu } from "../utils/toolWindows";
 import FloatingOrb from "./FloatingOrb";
@@ -24,9 +25,12 @@ vi.mock("../styles/themePreferences", () => ({
 }));
 vi.mock("../tools/registry", () => ({
   BACKEND_TOOLS: [],
+  // 组件在自启动预热里会归一化旧工具 ID；补上映射，避免 mock 缺字段时抛错
+  resolveToolIdAlias: (id: string) => id,
 }));
 
 const mockInvoke = vi.mocked(invoke);
+const mockEmit = vi.mocked(emit);
 const mockEnsureScreenshotWindow = vi.mocked(ensureScreenshotWindow);
 const mockShowContextMenu = vi.mocked(showContextMenu);
 
@@ -124,6 +128,32 @@ describe("FloatingOrb 右键菜单", () => {
         await vi.advanceTimersByTimeAsync(80);
       });
       expect(mockInvoke).toHaveBeenCalledWith("show_palette");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("面板已展开时点浮球是「开合」：只广播意图，不再重复打开（由面板按原生可见性裁决）", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<FloatingOrb />);
+      await act(flush);
+
+      // 面板广播「我已经展开」。注意这个状态必须走 ref：orb-mouseup 的监听器
+      // 只在挂载时注册一次，闭包读到的 state 永远是初始的 false。
+      await act(async () => {
+        emitMockEvent("levitaire-palette-visibility", true);
+      });
+      mockInvoke.mockClear();
+      mockEmit.mockClear();
+
+      emitMockEvent("orb-mouseup", true);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(80);
+      });
+
+      expect(mockInvoke).not.toHaveBeenCalledWith("show_palette");
+      expect(mockEmit).toHaveBeenCalledWith("palette-toggle-requested");
     } finally {
       vi.useRealTimers();
     }

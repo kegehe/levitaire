@@ -1,15 +1,18 @@
 <div align="center">
 
+<img src="src-tauri/icons/128x128.png" width="96" height="96" alt="Levitaire">
+
 # Levitaire
 
-**一个基于 Rust + Tauri 的 Windows 浮窗效率工具箱**
+**基于 Rust + Tauri 的 Windows 浮窗效率工具箱**
 
-选中文字即时弹出工具栏 · 悬浮球一键唤起 · 截图 / 录屏 / OCR / 番茄钟 / 系统监控
+选中文字即时弹出工具栏 · 悬浮球一键唤起 · 截图 / 录屏 / OCR / 时间工具 / 系统监控
 
 <p>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-blue.svg">
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.70%2B-orange.svg">
+  <img alt="Release" src="https://img.shields.io/github/v/release/kegehe/levitaire">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.88%2B-orange.svg">
   <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2.x-green.svg">
 </p>
 
@@ -17,188 +20,144 @@
 
 ---
 
-## 📖 项目介绍
+## 📌 简介
 
-Levitaire 是一款面向 Windows 的悬浮效率工具集。运行后一个悬浮球常驻屏幕顶部，通过全局钩子自动感知"选中文字"，在鼠标旁即时弹出工具栏；也可一键唤起截图、录屏、OCR、番茄钟、系统监控等桌面工具，覆盖日常办公中的高频操作。
+Levitaire 是一款面向 Windows 的悬浮效率工具集。运行后一个悬浮球常驻屏幕，通过全局钩子自动感知「选中文字」，在鼠标旁即时弹出工具栏；也可一键唤起截图、录屏、OCR、时间工具、系统监控等桌面工具，覆盖日常办公中的高频操作。
 
-**核心设计理念**：把散落在多个应用里的零碎操作（复制、搜索、翻译、转换格式、截屏、记录）收敛到一个"指针所在之处"的统一入口，减少应用间切换。
+核心思路是把散落在多个应用里的零碎操作（复制、搜索、翻译、转换格式、截屏、记录）收敛到一个「指针所在之处」的统一入口，减少应用间切换。
 
 ---
 
 ## ✨ 功能特性
 
 ### 🔤 文字工具
-选中任意应用的文字后，工具栏自动在你鼠标旁弹出（透明无边框、始终置顶），提供：
 
-- 📋 **一键复制** — 选中后无需手动 Ctrl+C，工具栏直接复制
-- 🔍 **快捷搜索** — 一键在必应 / Google / 百度 / DuckDuckGo / 搜狗中搜索选中文字（可在设置中切换默认引擎）
-- 🤖 **AI 翻译与优化** — 翻译、润色、正式化、简洁化等，基于 Anthropic 与 OpenAI 兼容 API（DeepSeek、通义千问等），需在设置中填写 API Key
-- 🔄 **文本转换** — 大小写转换、Base64 编解码、中文与 Unicode 互转
-- 🧮 **MD5 加密** — 生成 32 位 / 16 位 MD5 摘要
-- ✂️ **去重 / 编号** — 按行去重、为多行文本自动编号
-- 📱 **二维码** — 将选中文字即时转为二维码
-- 📊 **字符统计** — 字数、字符数快速统计
-- 🗑️ **清除格式** — 去除富文本格式
-- 🔊 **语音朗读 (TTS)** — Windows 内置语音合成，支持暂停 / 继续 / 停止
+选中任意应用的文字后，工具栏自动在鼠标旁弹出（透明无边框、始终置顶）：
+
+- **一键复制 / 快捷搜索** — 点一下即复制，或在必应 / Google / 百度 / DuckDuckGo / 搜狗中搜索选中文字（默认必应，可切换）
+- **AI 翻译与优化** — 翻译、润色、正式化、简洁化，兼容 Anthropic 与 OpenAI 两类 API（DeepSeek、通义千问等）
+- **文本转换** — 大小写转换、Base64 编解码、中文与 Unicode 互转、简繁转换
+- **编辑处理** — 按行去重、自动编号、MD5 摘要、字符统计，以及按类型批量清理（空格 / 制表符 / 换行 / 空白 / 字母 / 数字 / 中文）
+- **二维码与朗读** — 选中文字即时转二维码；Windows 内置语音合成朗读，支持暂停 / 继续 / 停止
 
 ### 🖥️ 快速输入
-- 🎡 **转盘输入** — 按下触发键（默认 CapsLock）唤起圆形转盘，鼠标旋转选择预设词或剪贴板历史，点选即输入，无需打字
+
+- **转盘输入** — 按下触发键（默认 CapsLock，可改）唤起圆形转盘，鼠标旋转选择预设词或剪贴板历史，点选即输入
 
 ### 📷 屏幕工具
-- 🖼️ **区域截图** — 拖框截取屏幕任意区域，支持多显示器 / 虚拟桌面
-- ✏️ **截图标注** — 截图后可绘制箭头、矩形、文字标注
-- 📌 **钉图** — 截图后钉在桌面最上层，可拖拽、缩放，作为临时参考
-- 📜 **长截图** — 滚动捕获可滚动页面并自动拼接为一张长图，支持预览、保存与复制
-- 🖌️ **屏幕草稿** — 在当前屏幕上绘制临时草图，可保存为透明 PNG
-- 🔤 **离线 OCR** — 双引擎离线文字识别（Windows 系统 OCR + PaddleOCR），截图后一键提取文字，支持引擎切换
-- 🎥 **GIF / 视频录制** — 录制屏幕区域为 GIF 或 MP4（ffmpeg 编码），支持全屏 / 区域 / 窗口识别
+
+- **区域截图与标注** — 拖框截取屏幕任意区域（支持多显示器 / 虚拟桌面），可绘制箭头、矩形、文字标注
+- **钉图** — 截图后钉在桌面最上层，可拖拽、缩放，作临时参考
+- **长截图** — 滚动捕获可滚动页面并自动拼接为一张长图，支持预览、保存与复制
+- **屏幕草稿** — 在当前屏幕上绘制临时草图，可保存为透明 PNG
+- **离线 OCR** — 双引擎离线文字识别（Windows 系统 OCR + PaddleOCR），无需联网，可切换引擎
+- **GIF / 视频录制** — 录制屏幕区域为 GIF 或 MP4，支持全屏 / 区域 / 窗口识别
 
 ### 📊 系统工具
-- 📈 **系统监控** — 常驻悬浮显示 CPU、内存、网络、磁盘、电池实时曲线
-- 🍅 **番茄钟** — 常驻悬浮倒计时，专注 / 休息自动循环，到点语音播报或提示音提醒
-- ⏰ **时钟 / 倒计时 / 秒表 / 日历** — 桌面时钟与计时工具，内置月历、农历与 24 节气标注（本地历法计算，不联网）
-- ✅ **待办清单** — 分组待办、截止时间与提醒、重复任务、导入导出，支持全局快捷键快速添加
-- 📝 **便利贴** — 桌面多张便签，6 种预置纸色，实时编辑并持久化，收起不丢失
 
-### 🧰 通用工具集
-- 🎨 **取色器** — 拾取屏幕任意位置的颜色值
-- 🧭 **滚动导航** — 对长网页 / 长文档提供精确与百分比两种翻页方式（基于 UIA 滚动接口）
+- **系统监控** — 常驻悬浮显示 CPU、内存、网络、磁盘、电池实时曲线
+- **时间工具** — 一个悬浮窗内置时钟、倒计时、番茄钟、秒表、月历五个页签；月历带农历与 24 节气（本地历法计算，不联网）
+- **待办清单** — 分组待办、截止时间与提醒、重复任务、导入导出，支持全局快捷键快速添加
+- **便利贴** — 桌面多张便签、6 种预置纸色、实时编辑并持久化；管理窗可一键收起 / 一键把已收起的全部贴回
+
+### 🧰 通用工具
+
+- **取色器** — 拾取屏幕任意位置的颜色值，可查看并一键复制 HEX / `rgb(r, g, b)`，最近用色本地保留
+- **滚动导航** — 长网页 / 长文档翻页与定位：目标窗口提供 UIA 滚动接口时给出百分比与滑杆，否则改用投递键盘 / 滚轮通道做相对滚动（到顶到底、翻页、微调），浏览器与资源管理器同样可用
+- **窗口置顶** — 点选任意其他程序的窗口把它钉在最前（面板按钮进入点选、`Esc` 退出），面板中可查看当前置顶清单并逐条 / 一键取消；工具停用或退出应用时会自动把所有窗口还原
 
 ### ⚙️ 全局能力
-- 💫 **悬浮球** — 可拖拽、始终置顶，点击展开全部工具面板；每个工具可独立启停开关
-- ⌨️ **全局热键** — 截图、录屏等操作支持系统级快捷键（Win32 `RegisterHotKey`），无需聚焦窗口，冲突自动检测
-- 🔒 **安全存储** — API Key 使用 Windows DPAPI 加密，绑定当前用户，不可跨机器迁移
-- 🚀 **开机自启动** — 一键开启，通过 Windows 注册表实现
-- 🎨 **主题支持** — 浅色 / 深色主题切换
-- ⚡ **高性能** — Rust 原生编译，GDI 截屏、WinRT OCR / TTS 全链路原生调用
+
+- **悬浮球与工具面板** — 可拖拽、始终置顶，点击展开工具面板（按文字 / 屏幕 / 系统分组，悬停可见用途说明）；每个工具可独立启停
+- **全局热键** — 截图、录屏等支持系统级快捷键（Win32 `RegisterHotKey`），无需聚焦窗口，冲突自动检测
+- **安全存储** — API Key 使用 Windows DPAPI 加密，绑定当前用户，不可跨机器迁移
+- **开机自启动与主题** — 注册表实现自启，浅色 / 深色主题切换
+- **原生全链路** — Rust 原生编译，GDI 截屏、WinRT OCR / TTS、PDH 性能计数均直接调用系统接口
 
 ---
 
-## 🖼️ 界面预览
+## 📦 下载安装
 
-> TODO: 在此处添加应用截图（悬浮球、文字工具栏、截图标注、系统监控面板等）。
+- **安装包**：到 [Releases](https://github.com/kegehe/levitaire/releases) 下载最新的 `Levitaire_x.y.z_x64-setup.exe`（NSIS 安装包）
+- **在线更新**：启动后自动检查（之后每 24h 复检），发现新版本会在**后台静默下载**，全程不打扰；下载完成并在右上角提示「新版本已就绪」后点一下即可安装，断网也能装。也可在「设置 → 通用 → 在线更新」中手动检查
+- **系统要求**：Windows 10 / 11（x64），依赖 WebView2 运行时；缺失时安装包会静默下载并安装（需联网）
+- **更新日志**：[发布说明](docs/releases/)
 
----
-
-## 🛠️ 技术栈
-
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| 后端 | Rust + windows-rs 0.61 | 全局钩子、GDI 截屏、WinRT OCR/TTS、PDH 性能计数、DPAPI 加密 |
-| 深度学习 | ONNX Runtime | PaddleOCR 本地推理引擎（可选，无模型时自动回退 Windows OCR） |
-| 前端 | React 18 + TypeScript + Vite | 工具栏 UI、悬浮球、设置页 |
-| 框架 | Tauri 2.x | 前后端桥接、多窗口管理、托盘图标 |
-| 编码 | ffmpeg | MP4 视频编码 |
-| 构建 | Cargo + npm + Vitest | 依赖管理、构建与单元测试 |
+首次启动后悬浮球落在主屏右下角（工作区边缘内 20px），系统托盘出现图标；悬浮球可拖到任意位置并记忆。默认开启的工具有文字工具栏、屏幕截图、屏幕草稿、通用工具，其余工具在工具面板中按需开启。
 
 ---
 
-## 🚀 快速开始
+## 🚀 快速开始（源码构建）
 
 ### 环境要求
 
-- Windows 10 / 11
-- [Rust](https://rustup.rs/) 1.70+
-- [Node.js](https://nodejs.org/) 18+（本项目使用 npm）
-- [Tauri CLI](https://tauri.app/) 2.x
+- Windows 10 / 11（x64）
+- [Rust](https://rustup.rs/) 1.88+（下限由 PaddleOCR 的 `ort` 依赖决定；tauri 2.x 自身只要求 1.77.2），需 Visual Studio C++ 生成工具（MSVC 工具链）
+- [Node.js](https://nodejs.org/) 20.19+ 或 22.12+（本项目使用 npm，Node 自带 npm 即可）
 
-### 构建与资源（重要）
+> 无需单独安装 Tauri CLI，`npm install` 已包含 `@tauri-apps/cli`，统一走 `npm run tauri`。
 
-PaddleOCR 依赖 ONNX Runtime（`onnxruntime.dll`，约 20.5MB），MP4 录制依赖 ffmpeg（`ffmpeg.exe`，约 242MB）。
-这两个文件体积过大、**未纳入 Git 仓库**（见 `.gitignore`），因此：
-
-- **开发模式**（`npm run tauri dev`）：照常可用，无需它们。系统 OCR 走 Windows 内置引擎。
-- **打包发版**（`npm run release` / `npm run build:app`）：必须先把它们放到：
-
-  | 文件 | 放置路径 | 用途 |
-  |------|----------|------|
-  | `ffmpeg.exe` | `src-tauri/binaries/ffmpeg.exe` | MP4 视频编码 |
-  | `onnxruntime.dll` | `src-tauri/libs/onnxruntime.dll` | PaddleOCR 本地推理 |
-
-  发版脚本内置预检，缺失时会直接提示上述路径。这两个资源由
-  `src-tauri/tauri.bundle.conf.json` 在发版时注入安装包；基础配置 `tauri.conf.json`
-  不含它们，以保证 fresh clone 可以直接 `cargo check` / `cargo test`。
-
-PaddleOCR 采用 `load-dynamic` 模式运行时动态加载 ONNX Runtime，运行时按
-`ORT_DYLIB_PATH` 环境变量 → 当前目录 → exe 同目录的顺序查找 DLL。若不使用 PaddleOCR，
-可在 `Cargo.toml` 中移除 `ort` 依赖以减小构建体积。
-
-### 安装与运行
+### 克隆与运行
 
 ```bash
-# 1. 克隆
-git clone https://github.com/yourusername/Levitaire.git
-cd Levitaire
+git clone https://github.com/kegehe/levitaire.git
+cd levitaire
 
-# 2. 安装前端依赖
-npm install
-
-# 3. 安装 Tauri CLI（如未安装）
-cargo install tauri-cli
-
-# 4. 开发模式运行
-npm run tauri dev
+npm install        # 安装前端依赖
+npm run tauri dev  # 开发模式运行
 ```
 
-启动后：悬浮球出现在屏幕中央，系统托盘出现图标。Vite 开发服务器默认运行在 `http://localhost:1420`。
+Vite 开发服务器固定运行在 `http://localhost:1420`（`strictPort`）。
 
-### 构建发布版本
+### 打包
 
 ```bash
-npm run build:app
+npm run build:app   # = tauri build --config src-tauri/tauri.bundle.conf.json
 ```
 
-> `build:app` = `tauri build --config src-tauri/tauri.bundle.conf.json`，会自动把
-> `ffmpeg.exe` / `onnxruntime.dll` 打进安装包。若坚持用原生 `npm run tauri build`，
-> 请自行追加 `-- --config src-tauri/tauri.bundle.conf.json`，否则产物不含这两个资源。
+产物位于 `src-tauri/target/release/bundle/`，`nsis/` 与 `msi/` 下各有一份安装包（`bundle.targets` 为 `all`）；未打包的可执行文件为 `src-tauri/target/release/levitaire.exe`。发版脚本只出 NSIS（`--bundles nsis`）。
 
-构建产物位于 `src-tauri/target/release/bundle/`，含 `.msi` 安装包与独立 `.exe`。
+### 可选二进制资源（仅打包需要）
 
-### 在线更新与发布（0.1.0+）
+| 文件 | 放置路径 | 用途 | 体积 |
+|------|----------|------|------|
+| `ffmpeg.exe` | `src-tauri/binaries/ffmpeg.exe` | MP4 视频编码 | 约 230 MB |
+| `onnxruntime.dll` | `src-tauri/libs/onnxruntime.dll` | PaddleOCR 本地推理 | 约 20 MB |
 
-Levitaire 已接入 Tauri Updater：设置页 → 通用 → 在线更新 可手动检查、下载并安装新版本（NSIS 安装包静默安装后自动重启）。版本检查地址 `https://kegehe.github.io/levitaire/latest.json`（GitHub Pages）与签名公钥见 `src-tauri/tauri.conf.json` 的 `plugins.updater`。流程与 Milevia 一致：本地脚本出包 + 签名 + 生成清单，GitHub Releases 承载安装包（免费下载），GitHub Pages 承载 `latest.json`，零服务器费用。
+两者体积过大、**未纳入 Git 仓库**，缺失时发版脚本会直接提示路径；开发模式不受影响，OCR 会自动回退到 Windows 内置引擎。PaddleOCR 模型（`det.onnx` / `rec.onnx` 等）已随仓库提供，位于 `src-tauri/resources/ocr/`，打包时映射到安装目录的 `ocr/`。
 
-#### 发布一次新版本（本地脚本，无需 CI / Secrets）
+PaddleOCR 以 `load-dynamic` 模式运行时加载 ONNX Runtime（不静态链接），按 `ORT_DYLIB_PATH` → 当前目录 → exe 同目录 → exe 同目录 `resources/` 的顺序查找 DLL。不使用 PaddleOCR 时，可移除 `ort` / `ndarray` 依赖与 `src-tauri/src/ocr/paddle_ocr.rs` 以减小构建体积。
 
-> 前置：仓库已开启 GitHub Pages（源 = `master` 分支根目录）。
+### 发布新版本
 
 ```bash
-npm run release 0.1.1 "修复了…\n新增了…"
+# 升版本号（package.json / Cargo.toml / tauri.conf.json 三处校验并同步）
+# + 打包 NSIS + 签名 + 生成 release/latest.json（同时写入仓库根 latest.json）
+npm run release 0.1.6 "修复了…\n新增了…"
+
+# 发布：打 tag、上传安装包与升级清单、更新 GitHub Pages 上的 latest.json
+git tag v0.1.6 && git push origin v0.1.6
+gh release create v0.1.6 "src-tauri/target/release/bundle/nsis/Levitaire_0.1.6_x64-setup.exe" "release/latest.json" --notes "发布说明"
+git add latest.json && git commit -m "chore: 更新在线升级清单至 v0.1.6" && git push
 ```
 
-脚本自动：校验三处版本一致 → 一起升到 `0.1.1` → 预检 `ffmpeg.exe`/`onnxruntime.dll` → `tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json` → `tauri signer sign` 生成安装包签名 → 生成 `release/latest.json`（含签名与下载地址）。随后手动确认执行：
-
-```bash
-git tag v0.1.1 && git push origin v0.1.1
-gh release create v0.1.1 "src-tauri/target/release/bundle/nsis/Levitaire_0.1.1_x64-setup.exe" "release/latest.json" --notes "发布说明"
-git add latest.json && git commit -m "chore: 更新在线升级清单至 v0.1.1" && git push
-```
-
-- 仅同步版本号不打包：`npm run release:bump 0.2.0`；不重新出包签现有安装包：`node scripts/release.mjs 0.1.1 --no-build`。
-- `release/` 目录已加入 `.gitignore`（每次重新生成）；**仓库根 `latest.json` 需提交并推到 `master`**，GitHub Pages 才会更新（updater 从 `kegehe.github.io/levitaire/latest.json` 读取）。
-- 变体：`git tag v0.1.1` 需先 push 到带 `--force` 覆盖旧 tag？不需要——每次发版用新版本号即可，无需覆盖。
-
-#### 首次一次性配置
-
-1. **签名私钥**：本机 `C:\Users\<你>\.tauri\levitaire.key` 与口令 `levitaire-key-password.txt` 已生成。请妥善备份私钥与口令——丢失任一个 = 永久无法再签名更新包。私钥与口令**严禁**提交到仓库（已由 `.gitignore` 忽略 `.tauri/`、`*.key` 等）。
-2. **GitHub Pages**：仓库 Settings → Pages，源设为 `master` 分支根目录（已配置，确认即可）。
-
-> 说明：首次发布 `v0.1.0` 作为可分发基线；Updater 仅在「服务器版本 > 本地已装版本」时提示更新，因此后续补丁需递增版本号（如 `v0.1.1`）。
+- 仅同步版本号不打包：`npm run release:bump 0.2.0`；不重新出包、只签现有安装包：`node scripts/release.mjs 0.1.6 --no-build`。
+- 在线更新从 `https://kegehe.github.io/levitaire/latest.json` 读取（GitHub Pages 源 = `master` 分支根目录），因此**仓库根 `latest.json` 必须提交并推送**；`release/` 为本地生成物，已加入 `.gitignore`。
+- 签名私钥与口令保存在本机 `~/.tauri/` 且不入库，**丢失任一个即永久无法再签名更新包**，务必备份。
+- 更多细节见[开发指南 · 发布流程](docs/developer-guide.md#发布流程)。
 
 ---
 
 ## 📖 使用指南
 
-1. **文字工具**：在任意应用选中文字 → 自动弹出工具栏，使用复制、搜索、翻译、AI 优化、转换、二维码等
-2. **截图 / 录屏**：点击悬浮球 → 屏幕截图 / GIF·录屏，拖框选区后复制、保存、OCR 或钉桌面
+1. **文字工具**：在任意应用选中文字 → 工具栏自动弹出 → 复制、搜索、翻译、AI 优化、转换、二维码等
+2. **截图与录屏**：悬浮球 → 屏幕截图 / GIF·录屏，拖框选区后可复制、保存、OCR 或钉桌面
 3. **快速输入**：在任意应用按下触发键（默认 CapsLock）→ 唤起转盘，鼠标选词即输入
-4. **系统监控**：点击悬浮球 → 系统监控 / 番茄钟，显示实时面板或专注计时
-5. **全局热键**：在设置中为截图 / 录屏配置快捷键，无需点击悬浮球即可触发
-6. **工具开关**：设置页可独立启用 / 停用每个工具
+4. **悬浮球与设置**：悬浮球展开工具面板，唤起系统监控、时间工具、待办、便利贴等；设置页可配置全局热键、AI 参数，并独立启用 / 停用每个工具
 
 ### AI 配置
 
-Levitaire 支持两种 API 格式，在设置页的"API 类型"中选择并填写 API Key、Base URL 与 Model：
+在「设置 → AI 配置 → API 类型」中选择格式，并填写 API Key、Base URL 与 Model：
 
 | 类型 | Base URL | Model 示例 | 认证 |
 |------|----------|-----------|------|
@@ -209,111 +168,45 @@ API Key 使用 Windows DPAPI 加密存储于 `%APPDATA%/levitaire/config.json`�
 
 ---
 
-## 🏗️ 项目结构
+## 🛠️ 技术栈
 
-```
-Levitaire/
-├── src-tauri/                          # Rust 后端
-│   ├── src/
-│   │   ├── main.rs                     # 入口：初始化模块、注册命令
-│   │   ├── commands/                   # Tauri 命令（#[tauri::command]）
-│   │   ├── hooks/                      # WH_MOUSE_LL / WH_KEYBOARD_LL / RegisterHotKey
-│   │   ├── automation/                 # 多策略选区获取（UIA / Win32 / 剪贴板 / OCR 回退）
-│   │   ├── quick_input.rs               # 快速输入转盘 + 剪贴板历史
-│   │   ├── clipboard/                  # 剪贴板写入（文字 / 图片 / GIF）
-│   │   ├── screenshot/                  # GDI 截屏（多显示器）、钉图窗口
-│   │   ├── ocr/                         # OcrService（Windows OCR + PaddleOCR 双引擎）
-│   │   ├── recording/                   # GIF / ffmpeg MP4 录制、窗口检测
-│   │   ├── tts/                         # WinRT SpeechSynthesizer 语音合成
-│   │   ├── sound/                       # 合成提示音（番茄钟到点提醒）
-│   │   ├── monitor/                     # 系统监控（CPU/内存/网络/磁盘/电池）
-│   │   ├── pomodoro/                    # 番茄钟
-│   │   ├── ai/                         # AI 服务（Anthropic / OpenAI 兼容 API）
-│   │   ├── config/                     # ConfigManager、自启动
-│   │   └── utils/                      # 日志、DPAPI 加解密
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-│
-├── src/                                # 前端（React + TypeScript）
-│   ├── main.tsx                        # 入口
-│   ├── App.tsx                         # 路由：toolbar / orb / settings
-│   ├── components/                     # FloatingOrb / ToolPalette / Settings / Icon
-│   ├── tools/                          # 各工具（registry 注册，懒加载）
-│   │   ├── registry.ts                 # 工具注册表（新增工具在此登记）
-│   │   ├── text-toolbar/               # 文字工具栏
-│   │   ├── screenshot/                 # 截图工具 + 标注
-│   │   ├── recording/                  # 录屏工具
-│   │   ├── quick-input/                # 快速输入转盘
-│   │   ├── pomodoro/                   # 番茄钟
-│   │   └── system-monitor/             # 系统监控
-│   └── styles/
-│
-├── docs/                               # 设计文档
-├── package.json
-└── ...
-```
+| 层级 | 技术 | 说明 |
+|------|------|------|
+| 后端 | Rust + windows-rs | 全局钩子、GDI 截屏、WinRT OCR / TTS、PDH 性能计数、DPAPI 加密 |
+| 深度学习 | ONNX Runtime | PaddleOCR 本地推理引擎（可选，缺少 DLL / 模型时自动回退 Windows OCR） |
+| 前端 | React 18 + TypeScript + Vite | 工具栏 UI、悬浮球、设置页 |
+| 框架 | Tauri 2.x | 前后端桥接、多窗口管理、托盘图标 |
+| 编码 | ffmpeg | MP4 视频编码 |
+| 构建 | Cargo + npm + Vitest | 依赖管理、构建与单元测试 |
 
 ---
 
-## 🧭 架构概览
+## 🤝 贡献
 
-```
-┌───────────────────────────────────────────────────────┐
-│              前端层 (React + WebView)                  │
-│   FloatingOrb → ToolPalette → 各工具组件              │
-├───────────────────────────────────────────────────────┤
-│              桥接层 (Tauri invoke / emit / listen)     │
-├───────────────────────────────────────────────────────┤
-│              后端层 (Rust)                              │
-│   Mouse Hook ──→ emit("mouse-up")                     │
-│   UI Automation ──→ get_selection                     │
-│   GDI ──→ capture_screen_region                       │
-│   WinRT OCR / PaddleOCR ──→ ocr_region                │
-│   WinRT TTS ──→ tts_speak / pause / resume            │
-│   ffmpeg pipe ──→ start_recording / stop_recording    │
-│   sysinfo + PDH ──→ show_monitor_window               │
-│   RegisterHotKey ──→ 全局热键                          │
-│   AI Service ──→ call_ai                              │
-└───────────────────────────────────────────────────────┘
-```
-
-### 核心运行流程
-
-1. **选区感知**：全局低级鼠标钩子监听 `WM_LBUTTONUP`，通过 `mpsc` 通道通知后台线程，再 `emit("mouse-up")` 到前端
-2. **文字工具栏**：前端监听事件 → 调用 `get_selection` 获取选中文字（多策略：UIA / Win32 / 剪贴板 / OCR 回退）→ 在选区旁弹出工具栏
-3. **悬浮球**：始终置顶，点击展开工具面板，按需唤起各工具
-4. **全局热键**：独立线程 + 仅消息窗口，`RegisterHotKey` 系统级触发
-5. **OCR**：双引擎架构（Windows OCR + PaddleOCR ONNX），可自动选择或手动切换，大图自动分块 + COM 线程隔离
-
----
-
-## 🤝 贡献指南
-
-欢迎提交 Issue 与 Pull Request。
-
-1. Fork 本仓库并新建你的功能分支
-2. 提交前请确保通过测试与代码检查：
+欢迎提交 Issue 与 Pull Request。提交前请确保通过：
 
 ```bash
 npm run typecheck    # TypeScript 类型检查
-npm run test         # 单元测试（Vitest，前端 786 项）
 npm run lint         # ESLint 检查
+npm run test         # 前端单元测试（Vitest）
 npm run format:check # Prettier 格式检查
-cargo test           # 后端单元测试（在 src-tauri/ 下）
+cargo test --manifest-path src-tauri/Cargo.toml   # 后端单元测试
 ```
 
-> 推送与 PR 会由 CI（`.github/workflows/ci.yml`）自动跑 typecheck / lint / vitest / cargo clippy / cargo test。
+- CI（`.github/workflows/ci.yml`）会在 push 与 PR 时自动跑 typecheck / lint / Vitest / cargo clippy / cargo test。
+- **新增工具**：在 `src/tools/<tool>/` 实现组件，并在 `src/tools/registry.ts` 的 `FLOATING_TOOLS` 中登记；若该工具有后端启停开关，还需在 `BACKEND_TOOLS` 中登记一对 `<get|set>_<id>_enabled` 命令（`registry.test.ts` 有守卫测试兜底，漏登记不会报错但开关会失效）。
 
-3. 提交清晰的改动说明，参考现有代码风格
+---
 
-> 新增工具时，在 `src/tools/registry.ts` 登记即可，卡片选择器会自动展示。
+## 📚 文档
 
-详细的架构与开发说明见 [docs 目录](docs/)。
+- [快速开始](docs/quick-start.md)
+- [开发指南](docs/developer-guide.md) — 项目结构、核心模块、工具开发、测试、发布
+- [架构设计](docs/architecture-design.md)
+- [发布说明](docs/releases/)
 
 ---
 
 ## 📄 许可证
 
 [MIT License](LICENSE) © 2026 Levitaire
-
----

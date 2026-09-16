@@ -1,7 +1,7 @@
-import { act, render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { clearMockListeners, emitMockFocus } from "../test/tauri-mock";
+import { clearMockListeners, emitMockEvent, emitMockFocus } from "../test/tauri-mock";
 import Settings from "./Settings";
 import { DEFAULT_FEATURE_IDS, DEFAULT_FEATURE_ORDER } from "../constants/toolbarFeatures";
 
@@ -20,7 +20,7 @@ describe("Settings 悬浮窗位置恢复", () => {
     mockInvoke.mockResolvedValue("");
   });
 
-  it("渲染悬浮窗位置恢复分区及三个悬浮窗入口", async () => {
+  it("渲染悬浮窗位置恢复分区及悬浮窗入口", async () => {
     render(<Settings />);
     await act(async () => {
       await Promise.resolve();
@@ -29,8 +29,9 @@ describe("Settings 悬浮窗位置恢复", () => {
     expect(screen.getByText("悬浮窗位置")).toBeInTheDocument();
     expect(screen.getByText("悬浮球")).toBeInTheDocument();
     expect(screen.getAllByText("系统监控").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("番茄钟").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByRole("button", { name: "恢复默认位置" })).toHaveLength(5);
+    // 番茄钟已并入时间工具，不再有独立的窗口位置入口
+    expect(screen.getAllByText("时间工具").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByRole("button", { name: "恢复默认位置" })).toHaveLength(4);
     expect(screen.getByRole("button", { name: "全部恢复默认位置" })).toBeInTheDocument();
   });
 
@@ -191,7 +192,6 @@ describe("Settings 悬浮窗位置恢复", () => {
 
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "orb" });
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "monitor-overlay" });
-    expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "pomodoro-overlay" });
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "time-overlay" });
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "todo-overlay" });
   });
@@ -346,8 +346,6 @@ describe("Settings 窗口重新聚焦时同步工具启停状态", () => {
       switch (command) {
         case "get_system_monitor_enabled":
           return Promise.resolve(systemMonitorEnabled);
-        case "get_pomodoro_enabled":
-          return Promise.resolve(true);
         case "get_todo_enabled":
           return Promise.resolve(true);
         case "get_timer_enabled":
@@ -540,5 +538,291 @@ describe("Settings 快速输入剪贴板历史管理", () => {
     expect(mockInvoke).toHaveBeenCalledWith("remove_quick_input_history_item", {
       text: "secret",
     });
+  });
+});
+
+describe("Settings 时间工具页签（番茄钟已并入）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    localStorage.clear();
+    mockInvoke.mockImplementation((command) => {
+      switch (command) {
+        case "get_pomodoro_config":
+          return Promise.resolve(
+            JSON.stringify({
+              workMinutes: 45,
+              shortBreakMinutes: 10,
+              longBreakMinutes: 20,
+              roundsBeforeLongBreak: 2,
+              autoStartNext: true,
+              notifySoundType: "tone",
+            }),
+          );
+        // 真实契约是 Vec<String>；不写这一支会落到下面的 default 返回字符串，
+        // 让「启动时自动打开」的快照同步拿到一个非数组（与后端行为不符）。
+        case "get_tools_autostart":
+          return Promise.resolve([]);
+        default:
+          return Promise.resolve("");
+      }
+    });
+  });
+
+  it("不再有独立的「番茄钟」页签，配置随「时间工具」页签一起载入", async () => {
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // 独立页签必须消失，否则用户会在两处看到同一份番茄钟配置
+    expect(screen.queryByRole("button", { name: "番茄钟" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "时间工具" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // 番茄钟配置与时间工具自身的开关在同一页签，且取后端真值（非默认 25）
+    await waitFor(() => expect(screen.getByLabelText("专注时长")).toHaveValue("45"));
+    expect(screen.getByLabelText("短休息")).toHaveValue("10");
+    expect(screen.getByLabelText("长休息")).toHaveValue("20");
+    expect(screen.getByLabelText("长休息间隔")).toHaveValue("2");
+    expect(screen.getByLabelText("到点自动开始下一阶段")).toBeChecked();
+    expect(screen.getByLabelText("到点提醒")).toHaveValue("tone");
+  });
+
+  it("时间工具页签仍带自身的开关与「启动时自动打开」，且没有番茄钟的独立自启项", async () => {
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "时间工具" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByLabelText("启用倒计时提醒")).toBeInTheDocument();
+    expect(screen.getByLabelText("显示农历日期")).toBeInTheDocument();
+    // 只保留一个「启动时自动打开」（归属时间工具整体），不再有番茄钟独立勾选框
+    expect(screen.getAllByLabelText("启动时自动打开")).toHaveLength(1);
+  });
+
+  it("老配置里的 pomodoro 自启项会归一化成 timer（勾选态正确，且能被 UI 关掉）", async () => {
+    mockInvoke.mockImplementation((command) => {
+      switch (command) {
+        case "get_system_monitor_enabled":
+          return Promise.resolve(false);
+        case "get_todo_enabled":
+          return Promise.resolve(false);
+        case "get_timer_enabled":
+          return Promise.resolve(true);
+        case "get_tools_autostart":
+          // 升级前勾过「番茄钟」自启：后端存的是旧 ID，且 set_tools_autostart 不做迁移
+          return Promise.resolve(["pomodoro"]);
+        default:
+          return Promise.resolve("");
+      }
+    });
+
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "时间工具" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const checkbox = screen.getByRole("checkbox", {
+      name: "启动时自动打开",
+    }) as HTMLInputElement;
+    // 不归一化时这里会是**未勾选**（勾选框只认 "timer"），而 FloatingOrb 又会把
+    // "pomodoro" 别名成 "timer" 照常自动打开 —— 用户永远关不掉。
+    expect(checkbox).toBeChecked();
+
+    // 取消勾选后写回后端的数组里不应再残留 "pomodoro"（否则下次启动照旧打开）
+    fireEvent.click(checkbox);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const saved = mockInvoke.mock.calls.filter(([c]) => c === "set_tools_autostart").pop();
+    expect(saved?.[1]).toEqual({ ids: [] });
+  });
+});
+
+describe("Settings 自启动勾选框的加载闸门", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    localStorage.clear();
+    mockInvoke.mockResolvedValue("");
+  });
+
+  it("自启列表读到之前勾选框不可点（否则全量写入会抹掉已有配置）", async () => {
+    let resolveAutostart: ((value: string[]) => void) | undefined;
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_system_monitor_enabled") return Promise.resolve(true);
+      if (command === "get_tools_autostart") {
+        // 悬着不 resolve：模拟后端快照还没回来
+        return new Promise<string[]>((resolve) => {
+          resolveAutostart = resolve;
+        });
+      }
+      return Promise.resolve("");
+    });
+
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统监控" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const checkbox = screen.getByRole("checkbox", { name: "启动时自动打开" });
+    // autostartIds 初值是 []，而 set_tools_autostart 是全量覆盖语义：
+    // 此时允许点击 ⇒ 一次点击就把原有的自启项（待办 / 时间工具）整份抹掉。
+    expect(checkbox).toBeDisabled();
+    expect(screen.getByText("正在读取配置…")).toBeInTheDocument();
+
+    fireEvent.click(checkbox);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("set_tools_autostart", expect.anything());
+
+    // 快照回来（这里模拟用户之前勾过「待办」）之后才允许改
+    await act(async () => {
+      resolveAutostart?.(["todo"]);
+      await Promise.resolve();
+    });
+    expect(checkbox).not.toBeDisabled();
+    expect(screen.queryByText("正在读取配置…")).toBeNull();
+  });
+});
+
+describe("Settings 系统监控配置必须跟随浮窗改动", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    localStorage.clear();
+    mockInvoke.mockResolvedValue("");
+  });
+
+  const lastSavedMonitorConfig = () =>
+    JSON.parse(
+      String(
+        (
+          mockInvoke.mock.calls
+            .filter(([command]) => command === "set_system_monitor_config")
+            .pop()?.[1] as { config: string } | undefined
+        )?.config,
+      ),
+    );
+
+  const mockStoredMonitorConfig = (stored: Record<string, unknown>) =>
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_system_monitor_enabled") return Promise.resolve(true);
+      if (command === "get_tools_autostart") return Promise.resolve<string[]>([]);
+      if (command === "get_system_monitor_config") return Promise.resolve(JSON.stringify(stored));
+      return Promise.resolve("");
+    });
+
+  const openMonitorTab = async () => {
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统监控" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  };
+
+  it("浮窗里改了显示模式后，本窗口改刷新间隔不得把它写回旧值", async () => {
+    mockStoredMonitorConfig({ intervalMs: 1000, displayMode: "full", layout: "e" });
+    await openMonitorTab();
+
+    // 用户在监控浮窗里点了标题栏切到「迷你」：该窗口会广播这条事件。
+    // 本窗口若不订阅，就会一直抱着 displayMode="full" 的陈旧副本，
+    // 之后改「刷新间隔」时整份回写，把用户的显示模式静默改回去。
+    await act(async () => {
+      emitMockEvent("levitaire-system-monitor-config-changed", {
+        intervalMs: 1000,
+        displayMode: "mini",
+        layout: "e",
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("刷新间隔"), { target: { value: "2000" } });
+      await Promise.resolve();
+    });
+
+    expect(lastSavedMonitorConfig()).toEqual({
+      intervalMs: 2000,
+      displayMode: "mini",
+      layout: "e",
+    });
+  });
+
+  /**
+   * 与上一条同类、但漏点更隐蔽：广播比较函数里漏掉 `layout` 时，"只在浮窗里换了样式"
+   * 会被当成自己发出的回声而跳过，设置页于是抱着旧样式；随后任何一次改动都会把它整份
+   * 写回去 —— 用户在浮窗里选的样式被静默改回。
+   */
+  it("浮窗里换了显示样式后，本窗口改刷新间隔不得把它写回旧样式", async () => {
+    mockStoredMonitorConfig({ intervalMs: 1000, displayMode: "full", layout: "e" });
+    await openMonitorTab();
+
+    await act(async () => {
+      emitMockEvent("levitaire-system-monitor-config-changed", {
+        intervalMs: 1000,
+        displayMode: "full",
+        layout: "b",
+      });
+      await Promise.resolve();
+    });
+
+    // 设置页里的样式下拉也要跟着切到 b（否则显示的是旧样式，用户看不到真实值）
+    expect((screen.getByLabelText("显示样式") as HTMLSelectElement).value).toBe("b");
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("刷新间隔"), { target: { value: "5000" } });
+      await Promise.resolve();
+    });
+
+    expect(lastSavedMonitorConfig()).toEqual({
+      intervalMs: 5000,
+      displayMode: "full",
+      layout: "b",
+    });
+  });
+
+  it("设置页切换显示样式时把 layout 一起写进配置", async () => {
+    mockStoredMonitorConfig({ intervalMs: 1000, displayMode: "full", layout: "e" });
+    await openMonitorTab();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("显示样式"), { target: { value: "d" } });
+      await Promise.resolve();
+    });
+
+    expect(lastSavedMonitorConfig()).toEqual({
+      intervalMs: 1000,
+      displayMode: "full",
+      layout: "d",
+    });
+  });
+
+  it("迷你模式下显示样式下拉不可用（mini 形态固定）", async () => {
+    mockStoredMonitorConfig({ intervalMs: 1000, displayMode: "mini", layout: "e" });
+    await openMonitorTab();
+
+    expect(screen.getByLabelText("显示样式")).toBeDisabled();
+    expect(screen.getByText("迷你模式形态固定，切回标准后生效")).toBeInTheDocument();
   });
 });

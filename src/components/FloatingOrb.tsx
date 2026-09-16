@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useCallback, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useCallback, useRef, useState, useMemo } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
@@ -16,13 +16,15 @@ import {
 } from "../utils/toolWindows";
 import type { ContextMenuRequest } from "./contextMenuTypes";
 import { saveWindowPosition, persistWindowPositionOnMove } from "../utils/windowPosition";
-import { BACKEND_TOOLS } from "../tools/registry";
+import { BACKEND_TOOLS, resolveToolIdAlias } from "../tools/registry";
 import OrbIcon from "./OrbIcon";
 import { getOrbIcon, type OrbIconId } from "../constants/orbAppearance";
 import "./FloatingOrb.css";
 
 function FloatingOrb() {
-  const win = getCurrentWebviewWindow();
+  // getCurrentWebviewWindow() 每次调用都返回新对象，必须 memo 化：
+  // 它是多个 effect 的依赖，写在渲染体里会让它们每次渲染重跑（见 MEMORY.md 第 8 条）。
+  const win = useMemo(() => getCurrentWebviewWindow(), []);
   const orbRef = useRef<HTMLDivElement | null>(null);
   const windowPosOnMouseDown = useRef<PhysicalPosition | null>(null);
   const mouseUpTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -49,9 +51,14 @@ function FloatingOrb() {
   }, []);
 
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
+  // 「点悬浮球收起面板」要读这个状态，但 orb-mouseup 的监听器只在挂载时注册一次
+  // （依赖数组是 [win]），闭包里的 state 会永远停在初始值 false —— 必须走 ref。
+  const isPaletteOpenRef = useRef(false);
   useEffect(() => {
     const unlisten = listen<boolean>("levitaire-palette-visibility", (event) => {
-      setIsPaletteOpen(event.payload === true);
+      const open = event.payload === true;
+      isPaletteOpenRef.current = open;
+      setIsPaletteOpen(open);
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -172,6 +179,13 @@ function FloatingOrb() {
     };
   }, []);
 
+  // 球外点击穿透（悬浮球窗口被系统最小宽度拉到 135 逻辑、球只有 56，球外那圈透明留白
+  // 压在便签顶栏 / 面板 / 桌面图标上时，那些位置的点按会被它吃掉）**不在这里做**：
+  // 由后端鼠标钩子直接切换窗口的 `set_ignore_cursor_events`（见 mouse.rs 的 OrbZone 分支）。
+  // 两个原因 —— 钩子是全局的（窗口一旦穿透就收不到自己的鼠标消息，前端监听 mousemove
+  // 无法自己走回来），且经前端中转要多一个 emit→IPC→invoke 往返，而这段延迟正好落在
+  // 「鼠标移进球体 → 恢复交互」之间，快点击会整下漏掉。
+
   // 记忆 orb 位置：拖拽结束时即时保存（orb-mouseup），onMoved 防抖作为兜底，
   // 应用重启后恢复上次位置
   useEffect(() => persistWindowPositionOnMove("orb"), []);
@@ -219,7 +233,12 @@ function FloatingOrb() {
         const enabledIds = results
           .filter((r): r is { id: string; enabled: boolean } => r !== null && r.enabled)
           .map((r) => r.id);
-        const toOpen = autostartIds.filter((id) => enabledIds.includes(id));
+        // 已并入其他工具的旧 ID（如 pomodoro → timer）在配置里可能仍然存在，
+        // 不映射就会静默丢掉用户的「启动时自动打开」设置；映射后去重，
+        // 避免 "pomodoro" 与 "timer" 并存时重复打开同一个窗口。
+        const toOpen = [...new Set(autostartIds.map(resolveToolIdAlias))].filter((id) =>
+          enabledIds.includes(id),
+        );
         for (const toolId of toOpen) {
           openToolWindow(toolId).catch((err) => {
             console.error(`自启动工具 ${toolId} 打开失败:`, err);
@@ -242,14 +261,25 @@ function FloatingOrb() {
       }
       const clicked = event.payload === true;
       if (clicked) {
-        // 点击悬浮球：打开卡片工具选择器面板
+        // 点击悬浮球：打开 / 收起卡片工具选择器面板（toggle）
         // The low-level mouse hook reports button-up before Windows finishes
         // activating the orb/drag capture. Defer the palette slightly so its
         // focus is not immediately lost by the tail of that native event.
         if (paletteOpenTimer.current) clearTimeout(paletteOpenTimer.current);
         paletteOpenTimer.current = setTimeout(() => {
           paletteOpenTimer.current = null;
-          invoke("show_palette").catch(console.error);
+          if (isPaletteOpenRef.current) {
+            // 面板（曾经）开过 ⇒ 这一下是「开合切换」，交给面板自己裁决：它用**原生
+            // is_visible** 判断真值，比这里的 ref 可靠 —— 截图/长截图等流程会不经前端
+            // 直接把面板 hide 掉，那种情况下 ref 会残留成"已展开"。
+            // 另外球窗是 focusable(false)，点它不会改变前台窗口，面板的「失焦自动隐藏」
+            // 分支不会触发 —— 不主动收起就没有任何路径能关掉它。
+            emit("palette-toggle-requested").catch(console.error);
+          } else {
+            // ref 为 false 有两种情况：面板还没被创建过（必须 show），或面板已收起 ——
+            // 后者直接 show 也是对的（show_palette 幂等）。
+            invoke("show_palette").catch(console.error);
+          }
         }, 80);
         windowPosOnMouseDown.current = null;
         return;

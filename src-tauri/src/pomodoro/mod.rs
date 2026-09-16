@@ -1,13 +1,14 @@
-//! 番茄钟：常驻悬浮倒计时工具。
+//! 番茄钟：「时间工具」里的番茄钟页签所用的计时状态。
 //!
 //! PomodoroState 作为 Tauri managed state。计时线程基于 end_time 差值计算剩余时间，
 //! 通过 `app.emit("pomodoro-tick", payload)` 推送给前端；到点自动切换阶段
 //! （专注 → 短休息/长休息），并发 `pomodoro-complete` 事件、可选提醒音
 //! （语音播报 / 纯提示音）。
 //!
-//! 与系统监控不同：窗口隐藏（hide）不影响计时——关闭窗口仅隐藏实例，计时应继续，
-//! 到点提醒不依赖窗口可见。仅当工具被禁用（set_pomodoro_enabled(false)）时 stop 并重置。
-//! 计时状态由后端持有，前端重开窗口时通过 get_pomodoro_state 拉取恢复。
+//! 与系统监控不同：窗口隐藏（hide）/切换页签都不影响计时——番茄钟只是时间工具窗口里的
+//! 一个页签，计时应继续，到点提醒不依赖窗口可见与页签是否在显示。
+//! 仅当整个时间工具被禁用（set_timer_enabled(false)）时 stop 并重置。
+//! 计时状态由后端持有，前端切回页签时通过 get_pomodoro_state 拉取恢复。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;

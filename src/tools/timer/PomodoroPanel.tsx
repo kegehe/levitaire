@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
 import {
@@ -12,13 +12,8 @@ import {
   type PomodoroConfig,
   type PomodoroStage,
 } from "../../constants/pomodoroConfig";
-import {
-  applyThemePreferences,
-  getStoredThemePreferences,
-  subscribeThemePreferences,
-} from "../../styles/themePreferences";
-import { persistWindowPositionOnMove } from "../../utils/windowPosition";
-import "./PomodoroTool.css";
+import { formatTime } from "./formatTime";
+import { RING_CIRCUMFERENCE, RING_RADIUS, URGENT_SECONDS, ringHeadRotation } from "./ringGeometry";
 
 /** 后端 pomodoro-tick / pomodoro-complete 事件 payload（与 Rust PomodoroStatePayload 对应） */
 interface PomodoroStatePayload {
@@ -37,21 +32,13 @@ interface FocusTodoItem {
   status: string;
 }
 
-const RING_RADIUS = 52;
-const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
-
-function formatTime(secs: number): string {
-  const s = Math.max(0, Math.floor(secs));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  }
-  return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-}
-
-function PomodoroTool() {
+/**
+ * 番茄钟面板 —— 「时间工具」的番茄钟页签内容。
+ *
+ * 计时状态由后端 `PomodoroState` 持有（专注/休息自动循环、到点提醒都不依赖窗口可见），
+ * 本组件只负责渲染与下发命令，因此切换页签、隐藏窗口都不会中断计时。
+ */
+function PomodoroPanel() {
   const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [state, setState] = useState<PomodoroStatePayload | null>(null);
   const [config, setConfig] = useState<PomodoroConfig>(DEFAULT_POMODORO_CONFIG);
@@ -70,38 +57,10 @@ function PomodoroTool() {
       ? roundsBeforeLongBreak
       : done % roundsBeforeLongBreak;
   const ringColor = POMODORO_STAGE_COLORS[stage];
-
-  // 独立 WebView 需要自行初始化主题和透明背景，避免首帧闪烁。
-  useLayoutEffect(() => {
-    applyThemePreferences(getStoredThemePreferences());
-    document.documentElement.style.background = "transparent";
-    document.body.style.background = "transparent";
-    const root = document.getElementById("root");
-    if (root) {
-      root.style.background = "transparent";
-      root.style.margin = "0";
-      root.style.height = "100%";
-    }
-  }, []);
-
-  // 通知后端窗口已就绪（toolWindows 等待此事件后 show）
-  useEffect(() => {
-    const unlistenReadyRequest = listen("pomodoro-window-ready-request", () => {
-      void emit("pomodoro-window-ready");
-    });
-    void emit("pomodoro-window-ready");
-    return () => {
-      unlistenReadyRequest.then((fn) => fn());
-    };
-  }, []);
-
-  // 设置窗口的 localStorage 不应作为运行中跨窗口同步机制。
-  useEffect(() => {
-    const unlistenTheme = subscribeThemePreferences();
-    return () => {
-      unlistenTheme.then((fn) => fn()).catch(console.error);
-    };
-  }, []);
+  /** 强调态：本阶段只剩最后 URGENT_SECONDS 秒且计时中，环与数字统一切到警示色 */
+  const urgent = running && remaining > 0 && remaining <= URGENT_SECONDS;
+  /** 环描边色：平时按阶段取色，临近结束时转警示色（内联 stroke 无法被 CSS 覆盖，故在此判定） */
+  const ringStroke = urgent ? "var(--color-danger)" : ringColor;
 
   // 拉取初始状态与配置（窗口可能关闭过，状态以后端为准）
   useEffect(() => {
@@ -112,9 +71,7 @@ function PomodoroTool() {
       })
       .catch(() => {});
     fetchPomodoroConfig().then((stored) => {
-      if (!cancelled) {
-        setConfig(stored);
-      }
+      if (!cancelled) setConfig(stored);
     });
     return () => {
       cancelled = true;
@@ -152,7 +109,7 @@ function PomodoroTool() {
       setFocusTitle(item && item.status !== "completed" ? item.title : null);
     } catch (error) {
       // 瞬时查询失败时保留上一次标题：active_todo_id 未变化不会触发重新解析，
-      // 直接清空会导致悬浮窗在下次 todo-changed 前一直缺失任务名。
+      // 直接清空会导致面板在下次 todo-changed 前一直缺失任务名。
       console.error("resolve pomodoro todo title failed:", error);
     }
   }, []);
@@ -172,8 +129,8 @@ function PomodoroTool() {
     };
   }, [refreshFocusTitle]);
 
-  // 窗口重新获焦（重新显示/从托盘打开，show_pomodoro_window 会 set_focus）时兜底刷新，
-  // 覆盖隐藏期间可能遗漏 todo-changed 导致标题停留在旧值的场景（同 ScreenshotTool 获焦重试模式）。
+  // 面板所在的窗口重新获焦（从待办「开始专注」打开、从托盘唤出）时兜底刷新，
+  // 覆盖隐藏期间可能遗漏 todo-changed 导致标题停留在旧值的场景。
   useEffect(() => {
     const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
       if (focused) void refreshFocusTitle();
@@ -203,20 +160,6 @@ function PomodoroTool() {
       if (un) un.forEach((fn) => fn());
     };
   }, []);
-
-  // Esc 关窗（仅隐藏，计时继续）
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        invoke("hide_pomodoro_window").catch(console.error);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  // 记忆窗口位置：拖动结束后持久化，下次打开恢复上次位置
-  useEffect(() => persistWindowPositionOnMove("pomodoro-overlay"), []);
 
   const toggleRunning = useCallback(async () => {
     if (actionPending.current) return;
@@ -254,96 +197,82 @@ function PomodoroTool() {
     }
   }, []);
 
-  const onTitleBarMouseDown = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      if (event.button !== 0) return;
-      if ((event.target as HTMLElement).closest(".pomo-icon-btn")) return;
-      event.preventDefault();
-      win.startDragging().catch((error) => {
-        console.error("Failed to start dragging pomodoro window:", error);
-      });
-    },
-    [win],
-  );
-
   return (
-    <div className="pomo-container">
-      <div className={`pomo-body${running ? " is-running" : ""} pomo-stage-${stage}`}>
-        <div className="pomo-titlebar" onMouseDown={onTitleBarMouseDown}>
-          <span className="pomo-title">番茄钟</span>
-          {state?.active_todo_id && focusTitle && (
-            <span className="pomo-title-focus" title={focusTitle}>
-              {focusTitle}
-            </span>
-          )}
-          <button
-            className="pomo-icon-btn"
-            aria-label="关闭番茄钟"
-            data-tooltip="关闭番茄钟"
-            onClick={() => invoke("hide_pomodoro_window").catch(console.error)}
-          >
-            <Icon name="X" size={14} />
-          </button>
-        </div>
-
-        <div className="pomo-ring-wrap">
-          <svg className="pomo-ring" viewBox="0 0 120 120" aria-hidden>
-            <circle cx="60" cy="60" r={RING_RADIUS} className="pomo-ring-bg" />
+    <main className={`timer-pomodoro-view${running ? " is-running" : ""}${urgent ? " is-urgent" : ""}`}>
+      <span className="timer-eyebrow">番茄钟</span>
+      {state?.active_todo_id && focusTitle && (
+        // 只作展示，不发命令：用 span 而不是 button，避免面板里出现一个
+        // 可聚焦却没有任何动作的控件。
+        <span className="timer-pomodoro-focus" title={`正在专注：${focusTitle}`}>
+          <Icon name="Flag" size={11} />
+          <span className="timer-pomodoro-focus-text">{focusTitle}</span>
+        </span>
+      )}
+      {/* key=阶段：换阶段时重挂进度环，让弧线重放一次「画入」动画，切换更明确 */}
+      <div
+        className="timer-ring-view"
+        key={stage}
+        style={{ "--ring-color": ringStroke, "--ring-from": String(RING_CIRCUMFERENCE) } as CSSProperties}
+      >
+        <svg viewBox="0 0 120 120" aria-hidden>
+          <circle className="timer-ring-bg" cx="60" cy="60" r={RING_RADIUS} />
+          {/* 与倒计时页签同一处理：进度为 0 时不画前景弧——`stroke-linecap: round`
+              会把零长度弧渲染成 12 点方向的一个小圆点（在最后一秒暂停就会命中）。 */}
+          {progress > 0 && (
             <circle
+              className="timer-ring-fg"
               cx="60"
               cy="60"
               r={RING_RADIUS}
-              className="pomo-ring-fg"
               style={{
-                stroke: ringColor,
+                stroke: ringStroke,
                 strokeDasharray: RING_CIRCUMFERENCE,
                 strokeDashoffset: RING_CIRCUMFERENCE * (1 - progress),
               }}
             />
-          </svg>
-          <div className="pomo-ring-center">
-            <div className="pomo-time">{formatTime(remaining)}</div>
-            <div className="pomo-stage-label">{POMODORO_STAGE_LABELS[stage]}</div>
-          </div>
-        </div>
-
-        <div
-          className="pomo-rounds"
-          aria-label={`本循环已完成 ${roundsInCycle}/${roundsBeforeLongBreak} 轮`}
-        >
-          {Array.from({ length: roundsBeforeLongBreak }, (_, i) => (
-            <span key={i} className={`pomo-round-dot${i < roundsInCycle ? " is-done" : ""}`} />
-          ))}
-          <span className="pomo-rounds-text">
-            {roundsInCycle}/{roundsBeforeLongBreak} 轮
-          </span>
-        </div>
-
-        <div className="pomo-controls">
-          <button className="pomo-btn pomo-btn-primary" onClick={toggleRunning}>
-            <Icon name={running ? "Pause" : "Play"} size={16} />
-            <span>{running ? "暂停" : "开始"}</span>
-          </button>
-          <button
-            className="pomo-btn"
-            aria-label="重置当前阶段"
-            data-tooltip="重置当前阶段"
-            onClick={doReset}
-          >
-            <Icon name="RotateCcw" size={15} />
-          </button>
-          <button
-            className="pomo-btn"
-            aria-label="跳过当前阶段"
-            data-tooltip="跳过当前阶段"
-            onClick={doSkip}
-          >
-            <Icon name="SkipForward" size={15} />
-          </button>
+          )}
+          {/* 环头珠子贴在弧尖上随剩余进度绕圈（旋转量见 ringHeadRotation），
+              只在运行时出现（暂停即消失，兼作运行指示） */}
+          {running && progress > 0 && (
+            <g className="timer-ring-head" style={{ transform: `rotate(${ringHeadRotation(progress)}deg)` }}>
+              <circle cx="60" cy="10" r="4.2" />
+            </g>
+          )}
+        </svg>
+        <div className="timer-ring-center">
+          {/* key=剩余秒数：每秒重挂一次，重放数字跳动动画，让「减少」被看见 */}
+          <span className="timer-ring-time" key={remaining}>{formatTime(remaining)}</span>
+          <span className="timer-stage-label" key={stage}>{POMODORO_STAGE_LABELS[stage]}</span>
         </div>
       </div>
-    </div>
+      <div
+        className="timer-rounds"
+        aria-label={`本循环已完成 ${roundsInCycle}/${roundsBeforeLongBreak} 轮`}
+      >
+        {Array.from({ length: roundsBeforeLongBreak }, (_, index) => (
+          <span
+            key={index}
+            className={`timer-round-dot${index < roundsInCycle ? " is-done" : ""}`}
+          />
+        ))}
+        <span className="timer-rounds-text">
+          {roundsInCycle}/{roundsBeforeLongBreak} 轮
+        </span>
+      </div>
+      <div className="timer-controls">
+        <button className="timer-play" onClick={toggleRunning}>
+          <Icon name={running ? "Pause" : "Play"} size={16} />
+          {running ? "暂停" : "开始"}
+        </button>
+        <button aria-label="重置当前阶段" data-tooltip="重置" onClick={doReset}>
+          <Icon name="RotateCcw" size={15} />
+        </button>
+        <button aria-label="跳过当前阶段" data-tooltip="跳过" onClick={doSkip}>
+          <Icon name="SkipForward" size={15} />
+        </button>
+      </div>
+    </main>
   );
 }
 
-export default PomodoroTool;
+export default PomodoroPanel;

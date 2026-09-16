@@ -2035,6 +2035,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "image",
+ "minisign-verify",
  "ndarray",
  "ort",
  "reqwest 0.12.28",
@@ -2052,6 +2053,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
+ "webview2-com",
  "windows 0.61.3",
 ]
 

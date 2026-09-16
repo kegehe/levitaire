@@ -739,16 +739,19 @@ fn get_battery() -> BatteryStat {
     }
     // BatteryFlag：128=NoBattery，255=Unknown，其余为位组合（1高/2低/4临界/8充电）
     let no_battery = s.BatteryFlag == 128 || s.BatteryFlag == 255;
-    // BatteryLifePercent 为 255 表示未知
-    let percent = if s.BatteryLifePercent == 255 {
+    // BatteryLifePercent 为 255 表示**未知**（并非 0%）。旧实现把它当 0% 显示，于是
+    // 「BatteryFlag 可用但电量未知」的机型会一直显示「0% · 使用中」，是明确的错误读数；
+    // 未知时按「无电池」处理，让前端隐藏电池区块。
+    let percent_unknown = s.BatteryLifePercent == 255;
+    let percent = if percent_unknown {
         0
     } else {
         s.BatteryLifePercent
     };
     // charging：BatteryFlag 第 3 位（8）表示正在充电
-    let charging = !no_battery && (s.BatteryFlag & 8) != 0;
+    let charging = !no_battery && !percent_unknown && (s.BatteryFlag & 8) != 0;
     BatteryStat {
-        has_battery: !no_battery,
+        has_battery: !no_battery && !percent_unknown,
         percent,
         charging,
     }

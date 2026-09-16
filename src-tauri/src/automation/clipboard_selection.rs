@@ -34,7 +34,7 @@ pub fn store_detected_image(data: Vec<u8>) {
 }
 
 /// 通过模拟 Ctrl+C 从剪贴板获取选中文字
-/// 流程：保存原剪贴板 → 模拟 Ctrl+C → 读取 → 恢复原剪贴板
+/// 流程：保存原剪贴板 → 模拟 Ctrl+C → 读取 → **确认剪贴板里仍是自己写进去的那份内容**才恢复快照
 /// 返回 (SelectionInfo, foreground_hwnd) — foreground_hwnd 用于后续替换时恢复焦点
 pub fn get_selection_via_clipboard(
 ) -> Result<Option<(SelectionInfo, isize)>, Box<dyn std::error::Error>> {
@@ -60,26 +60,24 @@ pub fn get_selection_via_clipboard(
         // 模拟 Ctrl+C
         if !simulate_copy() {
             crate::utils::logger::log("clipboard_sel", "Failed to simulate Ctrl+C");
-            // #6: simulate_copy 失败时恢复剪贴板
-            if let Some(ref saved) = saved_clipboard {
-                restore_clipboard_text(saved);
-            }
+            // 本次没有向剪贴板写入任何东西，也就没有「我们造成的变化」需要回滚。
+            // 旧实现在这里也回滚一次快照，那反而会覆盖用户此刻自己复制的内容 ——
+            // 详见 restore_clipboard_after_check 的说明。
             return Ok(None);
         }
 
         // 等待剪贴板更新（最多 500ms）
         // 必须传入 saved_clipboard 以区分新内容与旧内容，
         // 防止 simulate_copy 未生效时返回剪贴板中的残留数据
-        let text = wait_for_clipboard_text_changed(500, saved_clipboard.as_deref());
+        //
+        // ⚠️ 返回 None = **没观察到**这次模拟复制落地（目标程序不响应注入按键，或复制出的
+        // 内容与原来完全一样）。此时剪贴板里的内容不是我们写的，绝不能回滚：这段最长 500ms
+        // 的等待窗口里，用户往往已经自己按下了 Ctrl+C / Ctrl+X。
+        let observed = wait_for_clipboard_text_changed(500, saved_clipboard.as_deref());
 
-        // 检测并保存剪贴板中的图片数据（必须在恢复剪贴板之前）
+        // 检测并保存剪贴板中的图片数据（必须在回滚之前）
         let image_data = read_clipboard_image();
         let has_image = image_data.is_some();
-
-        // 立即恢复原始剪贴板
-        if let Some(ref saved) = saved_clipboard {
-            restore_clipboard_text(saved);
-        }
 
         let cursor_pos = crate::automation::selection::get_cursor_pos();
         let rect = Rect {
@@ -93,8 +91,8 @@ pub fn get_selection_via_clipboard(
         // Scintilla（Notepad++）等控件响应 EM_GETSEL/EM_SETSEL
         let (focus_hwnd, focus_class, sel_start, sel_end) = get_focus_selection(foreground);
 
-        match text {
-            Some(t) if !t.is_empty() => {
+        match observed {
+            Some((t, observed_sequence)) => {
                 crate::utils::logger::log(
                     "clipboard_sel",
                     &format!(
@@ -135,6 +133,9 @@ pub fn get_selection_via_clipboard(
                     },
                 );
 
+                // 确认剪贴板里仍是这次模拟复制写进去的内容，才把快照写回去
+                restore_clipboard_after_check(saved_clipboard.as_deref(), Some(observed_sequence));
+
                 let info = SelectionInfo {
                     text: t,
                     rect,
@@ -148,6 +149,9 @@ pub fn get_selection_via_clipboard(
                 if let Some(img_data) = image_data {
                     store_detected_image(img_data);
                 }
+                // 不回滚：等待窗口里没有可归因于我们的文本变化，无法证明这张图是我们写进去的，
+                // 而回滚的代价可能是抹掉用户自己刚复制的内容。用户刚选中的图片留在剪贴板里，
+                // 与「复制」按钮的语义也一致。
                 let info = SelectionInfo {
                     text: String::new(),
                     rect,
@@ -163,6 +167,56 @@ pub fn get_selection_via_clipboard(
                 Ok(None)
             }
         }
+    }
+}
+
+/// 回滚本模块自己写进剪贴板的内容（选区检测的模拟 Ctrl+C、替换文本的剪贴板粘贴），
+/// **只有能确认剪贴板里现在这份内容就是我们自己写进去的**，才允许回滚：
+///
+/// - `saved_text`：写入前的剪贴板文本（None = 本来没有可回滚的文本）；
+/// - `observed_sequence`：观察到「我们这次写入落地」时，与内容同一次读取到的剪贴板序号
+///   （None = 没观察到变化，即这次模拟按键没生效）。
+///
+/// 为什么非要这层守卫：`wait_for_clipboard_text_changed` 在目标程序不响应注入按键时要展满
+/// 500ms 才返回，而「选中 → 立刻 Ctrl+C」的间隔常常就落在这半秒里 —— 旧实现无条件把快照
+/// 写回去，会把用户刚复制 / 剪切进剪贴板的内容覆盖掉，现象就是「选中文字弹出工具栏后，
+/// Ctrl+C / Ctrl+X 失效」。剪切更严重：文本已从文档删除、剪贴板又被覆盖，内容直接丢失。
+///
+/// 与快速输入转盘的粘贴恢复是同一条约定（见 `quick_input.rs` 的 `write_sequence` 守卫）。
+unsafe fn restore_clipboard_after_check(
+    saved_text: Option<&str>,
+    observed_sequence: Option<u32>,
+) -> bool {
+    let current_sequence = clipboard_sequence_number();
+    if !should_restore_clipboard(saved_text, observed_sequence, current_sequence) {
+        // 只在「本来确实会回滚」的场景记一条：便于事后区分「剪贴板被用户改写而放过」
+        // 与「压根没检测到复制」这两种情况。
+        if saved_text.is_some() && observed_sequence.is_some() {
+            crate::utils::logger::log(
+                "clipboard_sel",
+                "clipboard changed since our write; skip restoration",
+            );
+        }
+        return false;
+    }
+    restore_clipboard_text(saved_text.unwrap_or_default())
+}
+
+/// 是否可以把检测前的剪贴板快照写回去。
+///
+/// 抽成纯函数是为了把四种情形钉死（Win32 调用无法在单测里跑）：
+/// - 没有可回滚的文本 → 不动剪贴板；
+/// - 没观察到我们自己的复制落地（超时）→ 不动剪贴板（**用户 Ctrl+C / Ctrl+X 的关键保护**）；
+/// - 观察到落地后无人再写 → 回滚；
+/// - 观察到落地、但序号已变（用户中途自己复制/剪切过）→ 放过，绝不覆盖用户的内容。
+fn should_restore_clipboard(
+    saved_text: Option<&str>,
+    observed_sequence: Option<u32>,
+    current_sequence: u32,
+) -> bool {
+    match (saved_text, observed_sequence) {
+        (None, _) | (_, None) => false,
+        (Some(_), Some(observed)) => observed == current_sequence,
     }
 }
 
@@ -246,19 +300,20 @@ pub fn replace_text_via_clipboard(ctx: &SelectionContext, new_text: &str) -> Res
         // 保存当前剪贴板
         let saved_clipboard = save_clipboard_text();
 
-        // 设置剪贴板为新文本（EmptyClipboard 不清除 Scintilla 选区）
-        if !set_clipboard_text(new_text) {
+        // 设置剪贴板为新文本（EmptyClipboard 不清除 Scintilla 选区），
+        // 并**同时**取回写入后的序号：回滚时用它判断这之后有没有人再写过
+        // （用户中途自己按了 Ctrl+C / Ctrl+X 就绝不回滚，见 restore_clipboard_after_check）。
+        // 序号由写入函数内部紧贴采样返回 —— 不能写完再单独取一次。
+        let Some(write_sequence) = set_clipboard_text(new_text) else {
             return Err("设置剪贴板失败".to_string());
-        }
+        };
 
         // 粘贴前释放所有修饰键，防止 Ctrl 卡住导致 Ctrl+Shift+V
         release_all_modifiers();
 
         // 模拟 Ctrl+V
         if !simulate_paste() {
-            if let Some(ref saved) = saved_clipboard {
-                restore_clipboard_text(saved);
-            }
+            restore_clipboard_after_check(saved_clipboard.as_deref(), Some(write_sequence));
             return Err("模拟 Ctrl+V 失败".to_string());
         }
 
@@ -289,10 +344,9 @@ pub fn replace_text_via_clipboard(ctx: &SelectionContext, new_text: &str) -> Res
             );
         }
 
-        // 恢复原始剪贴板
-        if let Some(ref saved) = saved_clipboard {
-            restore_clipboard_text(saved);
-        }
+        // 恢复原始剪贴板：只在这之后没人再写过剪贴板时才恢复
+        //（用户在等待期间复制了新内容时放过，避免覆盖用户的最新剪贴板）
+        restore_clipboard_after_check(saved_clipboard.as_deref(), Some(write_sequence));
 
         crate::utils::logger::log("clipboard_sel", "Clipboard replace success");
         Ok(())
@@ -306,54 +360,70 @@ unsafe fn save_clipboard_text() -> Option<String> {
     if OpenClipboard(None).is_err() {
         return None;
     }
-
-    let result = (|| -> Option<String> {
-        let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
-        if handle.is_invalid() {
-            return None;
-        }
-        let hmem = HGLOBAL(handle.0);
-        let ptr = GlobalLock(hmem);
-        if ptr.is_null() {
-            return None;
-        }
-        let mem_size = GlobalSize(hmem);
-        let max_u16 = if mem_size > 0 {
-            (mem_size / 2).min(MAX_CLIPBOARD_U16)
-        } else {
-            MAX_CLIPBOARD_U16
-        };
-        let text = read_u16_string(ptr, max_u16);
-        let _ = GlobalUnlock(hmem);
-        text
-    })();
-
+    let result = read_clipboard_text_locked();
     let _ = CloseClipboard();
     result
 }
 
-/// 恢复剪贴板文本
-unsafe fn restore_clipboard_text(text: &str) -> bool {
-    write_clipboard_text(text)
+/// 在**已打开**剪贴板的状态下读取文本（Open/Close 由调用方负责）。
+///
+/// 需要「已打开」这一前提的场景是「文本 + 剪贴板序号」成对采样：持有剪贴板期间没有别的
+/// 进程能改写内容，所以同一次锁内读到的文本与序号严格属于同一份剪贴板状态
+/// （见 `wait_for_clipboard_text_changed`）。
+unsafe fn read_clipboard_text_locked() -> Option<String> {
+    let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
+    if handle.is_invalid() {
+        return None;
+    }
+    let hmem = HGLOBAL(handle.0);
+    let ptr = GlobalLock(hmem);
+    if ptr.is_null() {
+        return None;
+    }
+    let mem_size = GlobalSize(hmem);
+    // GlobalSize == 0 说明句柄不可信（拿不到边界）。**不能**回退成「按 MAX_CLIPBOARD_U16
+    // 一路扫到 NUL」—— 那是拿一个未知边界去读内存，越界就是访问违例。剪贴板里的文本句柄
+    // 正常时必然取得到大小，取不到即视为本次读取失败（调用方按「剪贴板里没有文本」处理，
+    // 与 `clipboard::manager` 的 `read_text_inner` 保持同一口径）。
+    if mem_size == 0 {
+        let _ = GlobalUnlock(hmem);
+        return None;
+    }
+    let text = read_u16_string(ptr, (mem_size / 2).min(MAX_CLIPBOARD_U16));
+    let _ = GlobalUnlock(hmem);
+    text
 }
 
-/// 设置剪贴板为指定文本
-unsafe fn set_clipboard_text(text: &str) -> bool {
+/// 恢复剪贴板文本
+unsafe fn restore_clipboard_text(text: &str) -> bool {
+    write_clipboard_text(text).is_some()
+}
+
+/// 设置剪贴板为指定文本，返回**写入后**的剪贴板序号（`None` = 写入失败）。
+///
+/// 调用方拿到序号后才能在回滚时判断「这之后有没有人再写过剪贴板」。
+/// 序号必须紧贴写入采样 —— 见 [`write_clipboard_text`] 的注释。
+unsafe fn set_clipboard_text(text: &str) -> Option<u32> {
     write_clipboard_text(text)
 }
 
 /// 写入文本到剪贴板（公开，供 quick_input 模块调用）
 pub unsafe fn set_clipboard_text_pub(text: &str) -> bool {
-    write_clipboard_text(text)
+    write_clipboard_text(text).is_some()
 }
 
-/// 写入文本到剪贴板（内部公共实现）
-unsafe fn write_clipboard_text(text: &str) -> bool {
+/// 写入文本到剪贴板（内部公共实现）。
+///
+/// 返回 `Some(写入后的剪贴板序号)` / `None`（失败）。
+/// **序号在这里就取**，而不是让调用方写完再单独调 `clipboard_sequence_number()`：
+/// 那样两次调用之间若有人（用户自己按 Ctrl+C）写了剪贴板，拿到的是**对方**的序号，
+/// 之后 `current == write_sequence` 会误判「没人改过」，回滚时把用户自己的复制覆盖掉。
+unsafe fn write_clipboard_text(text: &str) -> Option<u32> {
     // 标记为应用自写：剪贴板监听器（WM_CLIPBOARDUPDATE）据此跳过，
     // 避免把粘贴/替换/恢复的原内容误入快速输入转盘历史。
     crate::clipboard::listener::mark_self_write(text);
     if OpenClipboard(None).is_err() {
-        return false;
+        return None;
     }
 
     let _ = EmptyClipboard();
@@ -364,7 +434,7 @@ unsafe fn write_clipboard_text(text: &str) -> bool {
         Ok(h) => h,
         Err(_) => {
             let _ = CloseClipboard();
-            return false;
+            return None;
         }
     };
     let ptr = GlobalLock(hmem);
@@ -372,7 +442,7 @@ unsafe fn write_clipboard_text(text: &str) -> bool {
         // GlobalLock 失败，hmem 仍有效但无法写入，必须释放避免泄漏
         let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
         let _ = CloseClipboard();
-        return false;
+        return None;
     }
     std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr as *mut u16, utf16.len());
     let _ = GlobalUnlock(hmem);
@@ -381,7 +451,7 @@ unsafe fn write_clipboard_text(text: &str) -> bool {
         let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
     }
     let _ = CloseClipboard();
-    set_ok
+    set_ok.then(|| clipboard_sequence_number())
 }
 
 /// 模拟 Ctrl+C 按键
@@ -796,52 +866,36 @@ unsafe fn simulate_key_combo(modifier: VIRTUAL_KEY, key: u16) -> bool {
     complete
 }
 
-/// 等待剪贴板中出现与旧内容不同的文本
+/// 等待剪贴板中出现与旧内容不同的文本，返回 `(新文本, 该内容对应的剪贴板序号)`。
+///
+/// 序号与文本在**同一次 Open/Close 内**读取：持有剪贴板期间别的进程无法改写，两者因此
+/// 严格对应同一份剪贴板状态。调用方用这个序号判断「从观察到这一刻起，有没有人再写过剪贴板」
+/// （见 `restore_clipboard_after_check`），这一步是「不覆盖用户自己复制的内容」的关键。
+///
 /// 防止 simulate_copy 未生效时返回剪贴板中的残留数据
-unsafe fn wait_for_clipboard_text_changed(max_ms: u32, old_text: Option<&str>) -> Option<String> {
+unsafe fn wait_for_clipboard_text_changed(
+    max_ms: u32,
+    old_text: Option<&str>,
+) -> Option<(String, u32)> {
     let mut elapsed = 0;
     while elapsed < max_ms {
         std::thread::sleep(std::time::Duration::from_millis(10));
         elapsed += 10;
 
-        if let Some(text) = read_clipboard_text() {
+        if OpenClipboard(None).is_err() {
+            continue;
+        }
+        let text = read_clipboard_text_locked();
+        let sequence = clipboard_sequence_number();
+        let _ = CloseClipboard();
+
+        if let Some(text) = text {
             if !text.is_empty() && Some(text.as_str()) != old_text {
-                return Some(text);
+                return Some((text, sequence));
             }
         }
     }
     None
-}
-
-/// 读取当前剪贴板的文本内容
-unsafe fn read_clipboard_text() -> Option<String> {
-    if OpenClipboard(None).is_err() {
-        return None;
-    }
-
-    let result = (|| -> Option<String> {
-        let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
-        if handle.is_invalid() {
-            return None;
-        }
-        let hmem = HGLOBAL(handle.0);
-        let ptr = GlobalLock(hmem);
-        if ptr.is_null() {
-            return None;
-        }
-        let mem_size = GlobalSize(hmem);
-        let max_u16 = if mem_size > 0 {
-            (mem_size / 2).min(MAX_CLIPBOARD_U16)
-        } else {
-            MAX_CLIPBOARD_U16
-        };
-        let text = read_u16_string(ptr, max_u16);
-        let _ = GlobalUnlock(hmem);
-        text
-    })();
-
-    let _ = CloseClipboard();
-    result
 }
 
 /// 从内存指针读取 UTF-16 字符串，带长度上限保护
@@ -1064,6 +1118,101 @@ mod tests {
         let mut dummy = [0u16; 4];
         let result = unsafe { read_u16_string(dummy.as_mut_ptr() as *mut _, 0) };
         assert!(result.is_none());
+    }
+
+    // ─── 剪贴板回滚守卫 ───────────────────────────────────────────
+
+    /// 去掉整行注释后再做源码断言：注释里提到某个调用名不该让哨兵误判
+    /// （与 `utils/process.rs` 的守卫同一手法）。
+    fn strip_line_comments(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 取出某个顶层函数（从签名到列 0 的收尾大括号）的函数体源码。
+    fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let after = source
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} 不见了：本哨兵依赖它仍在本文件内"));
+        &after[..after.find("\n}").unwrap_or(after.len())]
+    }
+
+    /// 用户报的「选中文字弹出工具栏后，Ctrl+C / Ctrl+X 复制剪切失效」就是这条：
+    /// 模拟 Ctrl+C 没生效（等待超时）时绝不能回滚，否则会把用户在这半秒里自己写进
+    /// 剪贴板的内容覆盖掉。
+    #[test]
+    fn should_restore_clipboard_skips_when_our_copy_never_landed() {
+        assert!(!should_restore_clipboard(Some("原内容"), None, 100));
+    }
+
+    #[test]
+    fn should_restore_clipboard_skips_without_saved_text() {
+        // 本来就没有可回滚的文本（例如剪贴板里只有图片）
+        assert!(!should_restore_clipboard(None, Some(100), 100));
+        assert!(!should_restore_clipboard(None, None, 100));
+    }
+
+    #[test]
+    fn should_restore_clipboard_restores_when_nothing_wrote_since() {
+        // 观察到我们自己的复制落地（序号 100），且此后无人再写 → 可以回滚
+        assert!(should_restore_clipboard(Some("原内容"), Some(100), 100));
+    }
+
+    #[test]
+    fn should_restore_clipboard_skips_when_user_copied_meanwhile() {
+        // 观察到落地时序号 100，现在已是 101：这半秒里有人写过剪贴板
+        //（用户自己按了 Ctrl+C / Ctrl+X）→ 放过，绝不覆盖用户的内容
+        assert!(!should_restore_clipboard(Some("原内容"), Some(100), 101));
+    }
+
+    /// 源码级哨兵：选区检测路径不得再出现「无条件回滚快照」的写法。
+    /// 变异（把 restore_clipboard_after_check 换回 `if let Some(ref saved) = ... { restore_clipboard_text(saved) }`）
+    /// 必须让这条变红。
+    #[test]
+    fn selection_check_never_restores_the_clipboard_unconditionally() {
+        let source = include_str!("clipboard_selection.rs");
+        let body = strip_line_comments(function_body(source, "pub fn get_selection_via_clipboard"));
+        assert!(
+            body.contains("restore_clipboard_after_check("),
+            "检测路径的回滚必须走带守卫的 restore_clipboard_after_check"
+        );
+        assert!(
+            !body.contains("restore_clipboard_text("),
+            "不要在检测路径里直接回滚：没有序号守卫就会覆盖用户自己复制的内容"
+        );
+        assert!(
+            body.contains("wait_for_clipboard_text_changed("),
+            "回滚依据必须来自「观察到我们自己的复制落地」"
+        );
+    }
+
+    /// 源码级哨兵：「文本 + 序号」必须同锁采样。
+    /// 分两次读（读完文本先 CloseClipboard 再取序号）会让「这以后有没有人写过」的判断
+    /// 出现空窗，守卫就会失效。
+    #[test]
+    fn clipboard_text_and_sequence_are_read_under_one_lock() {
+        let source = include_str!("clipboard_selection.rs");
+        let body = strip_line_comments(function_body(
+            source,
+            "unsafe fn wait_for_clipboard_text_changed",
+        ));
+        let text_read = body
+            .find("read_clipboard_text_locked()")
+            .expect("必须用「已打开剪贴板」版本的读取函数");
+        let sequence_read = body
+            .find("clipboard_sequence_number()")
+            .expect("必须同锁读取剪贴板序号");
+        let close = body
+            .find("CloseClipboard()")
+            .expect("循环里必须显式关闭剪贴板");
+        assert!(
+            text_read < sequence_read && sequence_read < close,
+            "文本与序号必须在同一次 Open/Close 之间读取"
+        );
     }
 
     // ─── 虚拟键码 ────────────────────────────────────────────────

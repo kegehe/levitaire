@@ -39,6 +39,7 @@ import { clearText } from "../../utils/clearText";
 import { charCount } from "../../utils/charCount";
 import { numbering } from "../../utils/numbering";
 import { convertToSimplified, convertToTraditional } from "../../utils/chineseConvert";
+import { clampWindowToWorkArea } from "../../utils/panelWindow";
 import { useAiOptimize } from "../../hooks/useAiOptimize";
 import {
   applyThemePreferences,
@@ -116,6 +117,20 @@ function truncateToUtf8Bytes(
 // smaller than two physical pixels in the toolbar and phone cameras cannot scan
 // them reliably, even though qrcode can generate one.
 const QR_MAX_BYTES = 1000;
+
+/**
+ * 窗口四周透明投影留白的宽度（逻辑像素，见 utils/panelWindow.ts）。
+ *
+ * 窗口尺寸 = 容器尺寸 + 留白：等于容器尺寸时，.toolbar-container 的投影没有任何
+ * 展开空间，只在容器圆角的「缺口」里露出一小块，被窗口边界硬切成直角 —— 表现为
+ * 工具栏下缘两个「贴着圆角的直角阴影」。
+ *
+ * 顶部不需要额外留白：body.toolbar-window 已有 24px tooltip 安全区（比留白宽）。
+ * 比常规面板的 20px 小：工具栏投影是紧凑型（--toolbar-shadow，范围约 8px）。
+ *
+ * ⚠️ 必须与 global.css 的 `body.toolbar-window { padding }` 保持一致。
+ */
+const TOOLBAR_SHADOW_MARGIN = 10;
 
 type ToolbarState =
   | "default"
@@ -272,15 +287,30 @@ function FloatingToolbar() {
   // 图片是否已加载完成并完成精确校准；用于避免 onLoad 先于扩窗 effect 触发时的尺寸竞态
   const qrImageLoadedRef = useRef(false);
 
+  /**
+   * 下发窗口尺寸，并把窗口夹回显示器工作区。
+   *
+   * 为什么需要夹：本窗口的落点由后端按选区/光标算出（`hooks/mouse.rs`、`hooks/keyboard.rs`
+   * 都不做工作区裁剪），而尺寸是这里量完内容才定的 —— 屏幕下半部或右侧选中文字时，
+   * 扩窗（二维码预览高 560）会让整扇窗大半跑到屏幕外：二维码被裁、按钮点不到。
+   * 而且此状态下鼠标钩子会忽略「点击外部」，只剩 Esc 能退。
+   */
+  const applyWindowSize = useCallback((w: number, h: number) => {
+    if (!(w > 0 && h > 0)) return;
+    getCurrentWebviewWindow()
+      .setSize(new LogicalSize(w, h))
+      .catch(() => {});
+    clampWindowToWorkArea(w, h);
+  }, []);
+
   // 进入二维码预览时，先用足够容纳内容的尺寸扩窗，防止图片渲染瞬间被裁切
   // （body.toolbar-window 顶部预留了 24px tooltip 空间，需计入高度）；
   // 图片 onLoad 后再精确校准（见 handleQrImageLoad）。
   // 若图片已加载（onLoad 先于本 effect 触发），说明精确尺寸已设置，跳过扩窗避免反向放大。
   useEffect(() => {
     if (state !== "qrcode-preview" || !qrCodeDataUrl || qrImageLoadedRef.current) return;
-    const win = getCurrentWebviewWindow();
-    win.setSize(new LogicalSize(460, 560)).catch(() => {});
-  }, [state, qrCodeDataUrl]);
+    applyWindowSize(460 + TOOLBAR_SHADOW_MARGIN * 2, 560 + TOOLBAR_SHADOW_MARGIN);
+  }, [state, qrCodeDataUrl, applyWindowSize]);
 
   /** 图片加载完成后精确校准窗口尺寸（仅在二维码预览状态下有效） */
   const handleQrImageLoad = useCallback(() => {
@@ -292,16 +322,13 @@ function FloatingToolbar() {
     const PAD_BORDER_Y = 14;
     const rect = el.getBoundingClientRect();
     // body.toolbar-window 在容器上方预留 tooltip 空间，窗口高度必须一并计入，
-    // 否则容器下半部分（含底部圆角）会被窗口下缘裁成直角
+    // 否则容器下半部分（含底部圆角）会被窗口下缘裁成直角。
     const bodyPt = parseInt(getComputedStyle(document.body).paddingTop) || 0;
-    const w = Math.ceil(rect.width + PAD_BORDER_X);
-    const h = Math.ceil(rect.height + PAD_BORDER_Y + bodyPt);
-    if (w > 0 && h > 0) {
-      getCurrentWebviewWindow()
-        .setSize(new LogicalSize(w, h))
-        .catch(() => {});
-    }
-  }, []);
+    // 再让出投影留白（左右各一圈、底部一圈），否则投影会被窗口边界硬切成直角。
+    const w = Math.ceil(rect.width + PAD_BORDER_X) + TOOLBAR_SHADOW_MARGIN * 2;
+    const h = Math.ceil(rect.height + PAD_BORDER_Y + bodyPt) + TOOLBAR_SHADOW_MARGIN;
+    applyWindowSize(w, h);
+  }, [applyWindowSize]);
 
   // 状态变化或新选区时主动同步窗口尺寸（解决 ResizeObserver 在 WebView 中不触发的问题）
   // useLayoutEffect 在 DOM 更新后、浏览器绘制前同步执行，用户不会看到闪烁
@@ -314,14 +341,11 @@ function FloatingToolbar() {
     const PAD_BORDER_X = 22; // padding 8×2 + border 1×2 + 拖拽手柄净增(width 14→16 + margin-right 0→2 = 4)
     const PAD_BORDER_Y = 14; // padding 6×2 + border 1×2
     const bodyPt = parseInt(getComputedStyle(document.body).paddingTop) || 0;
-    const w = Math.ceil(el.scrollWidth + PAD_BORDER_X);
-    const h = Math.ceil(el.scrollHeight + PAD_BORDER_Y + bodyPt);
-    if (w > 0 && h > 0) {
-      getCurrentWebviewWindow()
-        .setSize(new LogicalSize(w, h))
-        .catch(() => {});
-    }
-  }, [state, isVisible, selection]);
+    // 末尾加投影留白：窗口尺寸若等于容器尺寸，投影会被窗口边界硬切成直角。
+    const w = Math.ceil(el.scrollWidth + PAD_BORDER_X) + TOOLBAR_SHADOW_MARGIN * 2;
+    const h = Math.ceil(el.scrollHeight + PAD_BORDER_Y + bodyPt) + TOOLBAR_SHADOW_MARGIN;
+    applyWindowSize(w, h);
+  }, [state, isVisible, selection, applyWindowSize]);
 
   useEffect(() => {
     stateRef.current = state;
@@ -352,7 +376,6 @@ function FloatingToolbar() {
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const win = getCurrentWebviewWindow();
     const PAD_BORDER_X = 22; // padding 8×2 + border 1×2 + 拖拽手柄净增(width 14→16 + margin-right 0→2 = 4)
     const PAD_BORDER_Y = 14; // padding 6×2 + border 1×2
     const ro = new ResizeObserver(([entry]) => {
@@ -360,15 +383,14 @@ function FloatingToolbar() {
       // 跳过避免 ResizeObserver 测量到图片加载前的瞬时小尺寸，把窗口缩回
       if (stateRef.current === "qrcode-preview") return;
       const bodyPt = parseInt(getComputedStyle(document.body).paddingTop) || 0;
-      const w = Math.ceil(entry.contentRect.width + PAD_BORDER_X);
-      const h = Math.ceil(entry.contentRect.height + PAD_BORDER_Y + bodyPt);
-      if (w > 0 && h > 0) {
-        win.setSize(new LogicalSize(w, h)).catch(() => {});
-      }
+      // 末尾加投影留白：窗口尺寸若等于容器尺寸，投影会被窗口边界硬切成直角。
+      const w = Math.ceil(entry.contentRect.width + PAD_BORDER_X) + TOOLBAR_SHADOW_MARGIN * 2;
+      const h = Math.ceil(entry.contentRect.height + PAD_BORDER_Y + bodyPt) + TOOLBAR_SHADOW_MARGIN;
+      applyWindowSize(w, h);
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [applyWindowSize]);
 
   const resetToDefault = useCallback(() => {
     setState("default");

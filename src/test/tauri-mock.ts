@@ -30,6 +30,12 @@ vi.mock("@tauri-apps/api/event", () => ({
 // Mock @tauri-apps/api/webviewWindow
 const mockSetSize = vi.fn().mockResolvedValue(undefined);
 const mockHide = vi.fn().mockResolvedValue(undefined);
+/**
+ * 原生窗口可见性。默认 true（多数用例里的窗口是"显示中"的）。
+ * 用例可覆盖，例如面板的「点悬浮球开合」分支按它决定 show 还是 hide：
+ *   mockIsVisible.mockResolvedValueOnce(false) // 模拟面板已被原生流程收起
+ */
+const mockIsVisible = vi.fn().mockResolvedValue(true);
 const mockStartDragging = vi.fn().mockResolvedValue(undefined);
 const mockSetAlwaysOnBottom = vi.fn().mockResolvedValue(undefined);
 const mockSetAlwaysOnTop = vi.fn().mockResolvedValue(undefined);
@@ -87,6 +93,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     toggleMaximize: vi.fn().mockResolvedValue(undefined),
     isMaximized: vi.fn().mockResolvedValue(false),
     isFocused: vi.fn().mockResolvedValue(false),
+    isVisible: mockIsVisible,
     close: vi.fn().mockResolvedValue(undefined),
     onResized: vi.fn(() => Promise.resolve(() => {})),
     onMoved: vi.fn(() => Promise.resolve(() => {})),
@@ -94,6 +101,8 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 
 // Mock @tauri-apps/api/dpi
+// PhysicalPosition 供录屏控制栏 `controls.setPosition(...)` 使用；缺了它会让
+// 区域录制路径在测试里直接抛异常，整条路径再也测不到。
 vi.mock("@tauri-apps/api/dpi", () => ({
   LogicalSize: class LogicalSize {
     width: number;
@@ -101,6 +110,14 @@ vi.mock("@tauri-apps/api/dpi", () => ({
     constructor(w: number, h: number) {
       this.width = w;
       this.height = h;
+    }
+  },
+  PhysicalPosition: class PhysicalPosition {
+    x: number;
+    y: number;
+    constructor(x: number, y: number) {
+      this.x = x;
+      this.y = y;
     }
   },
 }));
@@ -152,4 +169,4 @@ export function clearMockListeners() {
   listeners.clear();
 }
 
-export { mockSetSize, mockHide, mockStartDragging, menuState };
+export { mockSetSize, mockHide, mockIsVisible, mockStartDragging, menuState };

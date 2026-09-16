@@ -62,9 +62,8 @@ pub fn start_long_capture(
         if let Some(window) = app.get_webview_window("orb") {
             let _ = window.hide();
         }
-        if let Some(window) = app.get_webview_window("toolbar") {
-            let _ = window.hide();
-        }
+        // 统一入口：隐藏 + 复位后端侧工具栏状态（qrcode_preview 残留会让下次弹出后关不掉）
+        hide_toolbar_and_reset_state(&app);
         if let Some(window) = app.get_webview_window("time-overlay") {
             let _ = window.hide();
         }
@@ -246,17 +245,24 @@ pub fn stop_long_capture(
             let _ = orb.set_always_on_top(true);
         }
     }
-    if TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.swap(false, Ordering::SeqCst) {
+    // 恢复会话前可见的浮窗；工具已被用户关掉时不再恢复（标记无条件消费），
+    // 避免「全部关闭」之后又被长截图的收尾逻辑重新弹出来。
+    if TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.swap(false, Ordering::SeqCst)
+        && tool_still_enabled(&app, "text-toolbar")
+    {
         if let Some(toolbar) = app.get_webview_window("toolbar") {
             let _ = toolbar.show();
         }
     }
-    if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+    if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+        && tool_still_enabled(&app, "timer")
+    {
         if let Some(timer) = app.get_webview_window("time-overlay") {
             let _ = timer.show();
         }
     }
-    if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+    if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) && tool_still_enabled(&app, "todo")
+    {
         if let Some(todo) = app.get_webview_window("todo-overlay") {
             let _ = todo.show();
         }
@@ -345,9 +351,16 @@ pub async fn save_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<
         .await
         .map_err(|e| format!("保存任务失败: {e}"))?;
     }
-    let dialog = rfd::FileDialog::new()
+    // 长截图控制条是 alwaysOnTop，而 rfd 不带 parent 时 owner 为 NULL ⇒ 保存对话框会被
+    // 控制条**完全盖住**（实测：置顶窗压住无主对话框，SetForegroundWindow 也抬不上来）。
+    // 守卫会取可见控制条作 owner 并临时取消自有置顶窗的置顶，Drop 时恢复。
+    let guard = DialogTopmostGuard::suspend(&app, &["long-capture-controls"]);
+    let mut dialog = rfd::FileDialog::new()
         .set_file_name("long_screenshot.png")
         .add_filter("PNG 图片", &["png"]);
+    if let Some(owner) = guard.owner() {
+        dialog = dialog.set_parent(owner);
+    }
     let result = tokio::task::spawn_blocking(move || {
         let bytes = crate::scroll_capture::encode_png_direct(&bgra, width, height)?;
         match dialog.save_file() {
@@ -360,6 +373,7 @@ pub async fn save_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<
     })
     .await
     .map_err(|e| format!("保存任务失败: {e}"))?;
+    drop(guard); // 恢复被临时取消的置顶（成功/取消/panic 都要走到）
     result
 }
 

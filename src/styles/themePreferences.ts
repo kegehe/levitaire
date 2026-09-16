@@ -559,11 +559,16 @@ export function applyThemePreferences(preferences: ThemePreferences): ThemePrefe
     "--palette-border",
     glass ? "1px solid rgb(255 255 255 / .16)" : "1px solid rgb(105 122 141 / .26)",
   );
+  // 浮层面板投影。⚠️ 模糊半径/垂直偏移必须收在 ToolPalette 的窗口留白内
+  // （.palette-stage 的 20px padding）：留白外的部分会被窗口边界硬切，
+  // 在四个圆角缺口处留下带直角的残影。
+  // 约束 = 模糊半径/2 + 垂直偏移 ≤ 20，这里各留 1px 余量（19）。
+  // 该变量同时被 UtilityHub / ScrollNavigator 的面板复用。
   root.style.setProperty(
     "--palette-shadow",
     glass
-      ? `0 0 60px color-mix(in srgb, ${values.accent} 16%, transparent), 0 22px 55px rgb(0 0 0 / .42), inset 0 1px 0 rgb(255 255 255 / .13)`
-      : `0 0 42px color-mix(in srgb, ${values.accent} 12%, transparent), 0 18px 42px rgb(31 36 45 / .18), inset 0 1px 0 rgb(255 255 255 / .95)`,
+      ? `0 0 30px color-mix(in srgb, ${values.accent} 16%, transparent), 0 6px 24px rgb(0 0 0 / .45), inset 0 1px 0 rgb(255 255 255 / .13)`
+      : `0 0 30px color-mix(in srgb, ${values.accent} 10%, transparent), 0 6px 26px rgb(31 36 45 / .2), inset 0 1px 0 rgb(255 255 255 / .95)`,
   );
   root.style.setProperty(
     "--palette-card-bg",
@@ -630,10 +635,11 @@ export function applyThemePreferences(preferences: ThemePreferences): ThemePrefe
   root.style.setProperty("--settings-nav-active-bg", values.subtle);
   root.style.setProperty("--settings-nav-active-color", values.accent);
   root.style.setProperty("--settings-nav-active-border", values.accent);
-  root.style.setProperty("--color-chart-cpu", values.accent);
-  root.style.setProperty("--color-chart-mem", values.hover);
-  root.style.setProperty("--color-chart-net", values.accent);
-  root.style.setProperty("--color-chart-disk", values.hover);
+  // ⚠️ 有意**不**给 --color-chart-* 注入强调色。
+  // 这里原来把 cpu/net 一起写成 accent、mem/disk 一起写成 hover，于是监控窗 5 条折线
+  // 永远只有 2 种颜色（并且换强调色也还是 2 种）；图表是**分类色板**，必须五色互相可区分
+  // 且与 UI 装饰色解耦，故只由 tokens.css 按明暗主题声明。守卫：themePreferences.test.ts
+  // 「强调色不改写图表色板」。
 
   localStorage.setItem("levitaire-theme", normalized.theme);
   localStorage.setItem("levitaire-theme-accent", normalized.accent);

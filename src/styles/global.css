@@ -48,16 +48,24 @@ body {
   padding: 0;
 }
 
-/* 工具栏窗口：上方预留 tooltip 空间（body 背景透明，不会露白） */
+/* 工具栏窗口：上方预留 tooltip 空间（body 背景透明，不会露白）。
+   左右/底部是同宽度的投影留白（见 utils/panelWindow.ts）——窗口尺寸由前端算成
+   「工具栏 + 2×留白」，留白供 .toolbar-container 的投影展开；窗口尺寸若等于容器
+   尺寸，投影会被窗口边界硬切，在容器圆角处留下带直角的残影。
+   留白取 10px（小于常规面板的 20px）：工具栏投影是紧凑型，范围约 8px。
+   ⚠️ 与 TextToolbar.tsx 的 TOOLBAR_SHADOW_MARGIN 保持一致。 */
 body.toolbar-window {
   overflow: visible;
-  padding-top: 24px;
+  padding: 24px 10px 10px;
 }
 
-/* 通用工具窗口：顶部为向上展开的 tooltip 保留透明安全区。 */
+/* 通用工具窗口：顶部为向上展开的 tooltip 保留透明安全区。
+   左右/底部是同宽度的投影留白（见 utils/panelWindow.ts 的 PANEL_SHADOW_MARGIN）：
+   窗口尺寸由前端算成「面板 + 2×留白」，留白供面板投影展开，否则投影会被窗口边界
+   硬切，在面板圆角处留下带直角的残影。顶部已有 26px 安全区，覆盖留白需求。 */
 body.utility-hub-window {
   overflow: visible;
-  padding-top: 26px;
+  padding: 26px 20px 20px;
 }
 
 /* 设置窗口：滚动由内容面板内部处理 */

@@ -129,11 +129,8 @@ pub struct AppConfig {
     /// 系统监控配置（JSON 字符串，前端解析）：如 {"intervalMs":1000}。空串表示使用默认值
     #[serde(default)]
     pub system_monitor_config: String,
-    /// 番茄钟工具是否启用（仅启用时 palette 卡片可激活）。默认 false
-    #[serde(default = "default_pomodoro_enabled")]
-    pub pomodoro_enabled: bool,
     /// 番茄钟配置（JSON 字符串，前端解析）：如 {"workMinutes":25,"roundsBeforeLongBreak":4}。
-    /// 空串表示使用默认值
+    /// 空串表示使用默认值。番茄钟已并入时间工具（time-overlay），随 timer_enabled 启停。
     #[serde(default)]
     pub pomodoro_config: String,
     /// 通用时钟与计时工具是否启用
@@ -185,7 +182,7 @@ pub struct AppConfig {
     /// 自启动工具 ID 列表（应用启动时自动打开窗口的工具，如 ["system-monitor"]）
     #[serde(default)]
     pub tools_autostart: Vec<String>,
-    /// 悬浮窗位置记忆（窗口 id → 物理坐标），如 "orb"、"monitor-overlay"、"pomodoro-overlay"。
+    /// 悬浮窗位置记忆（窗口 id → 物理坐标），如 "orb"、"monitor-overlay"、"time-overlay"。
     /// 空 map 表示尚未记忆任何位置，各窗口回退到默认定位
     #[serde(default)]
     pub window_positions: HashMap<String, WindowPosition>,
@@ -214,6 +211,11 @@ pub struct AppConfig {
     /// 便利贴工具是否启用（仅启用时 palette 卡片可激活）。默认 false，避免新增常驻窗口打扰现有用户。
     #[serde(default)]
     pub sticky_notes_enabled: bool,
+    /// 通用工具是否启用。默认 true（与 registry 的 defaultEnabled 一致）。
+    /// 该工具没有热键，启用态只用于「面板勾选」与「禁用时收起悬浮窗」——
+    /// 缺了它，palette 的「全部关闭」就只改前端勾选、关不掉已打开的通用工具窗口。
+    #[serde(default = "default_utility_hub_enabled")]
+    pub utility_hub_enabled: bool,
 }
 
 fn default_quick_input_enabled() -> bool {
@@ -266,6 +268,10 @@ fn default_sketch_enabled() -> bool {
     true
 }
 
+fn default_utility_hub_enabled() -> bool {
+    true
+}
+
 fn default_text_toolbar_enabled() -> bool {
     true
 }
@@ -276,10 +282,6 @@ fn default_system_monitor_enabled() -> bool {
 
 fn default_system_monitor_interval_ms() -> u64 {
     1000
-}
-
-fn default_pomodoro_enabled() -> bool {
-    false
 }
 
 pub const DEFAULT_PIN_BORDER_COLOR: &str = "#00C8FF";
@@ -333,7 +335,6 @@ impl Default for AppConfig {
             system_monitor_enabled: default_system_monitor_enabled(),
             system_monitor_interval_ms: default_system_monitor_interval_ms(),
             system_monitor_config: String::new(),
-            pomodoro_enabled: default_pomodoro_enabled(),
             pomodoro_config: String::new(),
             timer_enabled: false,
             timer_reminders_enabled: default_timer_reminders_enabled(),
@@ -361,6 +362,7 @@ impl Default for AppConfig {
             quick_input_snippets: String::new(),
             quick_input_snippets_enabled: default_quick_input_snippets_enabled(),
             sticky_notes_enabled: false,
+            utility_hub_enabled: default_utility_hub_enabled(),
         }
     }
 }
@@ -977,26 +979,6 @@ impl ConfigManager {
         self.save_config()
     }
 
-    /// 获取番茄钟工具启用状态
-    pub fn get_pomodoro_enabled(&self) -> Result<bool, String> {
-        self.config
-            .lock()
-            .map_err(|e| format!("获取配置锁失败: {}", e))
-            .map(|c| c.pomodoro_enabled)
-    }
-
-    /// 更新番茄钟工具启用状态并持久化
-    pub fn update_pomodoro_enabled(&self, enabled: bool) -> Result<(), String> {
-        {
-            let mut config = self
-                .config
-                .lock()
-                .map_err(|e| format!("获取配置锁失败: {}", e))?;
-            config.pomodoro_enabled = enabled;
-        }
-        self.save_config()
-    }
-
     pub fn get_timer_enabled(&self) -> Result<bool, String> {
         self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_enabled)
     }
@@ -1537,6 +1519,26 @@ impl ConfigManager {
         }
         self.save_config()
     }
+
+    /// 获取通用工具启用状态
+    pub fn get_utility_hub_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.utility_hub_enabled)
+    }
+
+    /// 更新通用工具启用状态并持久化
+    pub fn update_utility_hub_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.utility_hub_enabled = enabled;
+        }
+        self.save_config()
+    }
 }
 
 // ─── 开机自启动（Windows 注册表） ────────────────────────────────
@@ -1712,10 +1714,47 @@ mod tests {
         assert!(config.text_toolbar_enabled);
         assert_eq!(config.system_monitor_interval_ms, 1000);
         assert!(!config.system_monitor_enabled);
-        assert!(!config.pomodoro_enabled);
         assert_eq!(config.pin_border_color, "#00C8FF");
         assert_eq!(config.pin_border_width, 1);
         assert!(config.tools_autostart.is_empty());
+        // 通用工具默认启用：与 registry 的 defaultEnabled 一致，否则升级后
+        // 老用户的「通用工具」会在首次同步后端真值时被静默取消勾选。
+        assert!(config.utility_hub_enabled);
+    }
+
+    #[test]
+    fn test_app_config_utility_hub_enabled_defaults_true_for_legacy_config() {
+        // 旧 config.json 没有 utility_hub_enabled 字段：反序列化必须回落到 true，
+        // 若回落成 false，升级后 ToolPalette.syncFromBackend 会以后端「未启用」为准，
+        // 把用户本来就勾选着的通用工具静默取消勾选。
+        // 注意 `ai` 是无 default 的必填字段，JSON 里必须带上，否则 serde 会先报
+        // "missing field `ai`"（`{}` 不能用来表示「空配置」）。
+        let json = r#"{"ai":{"api_key":"","base_url":"","model":"","api_type":"anthropic"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.utility_hub_enabled);
+    }
+
+    #[test]
+    fn test_config_manager_utility_hub_enabled_roundtrip() {
+        // getter/update 必须读写同一个字段：复制粘贴错字段（例如 getter 读成
+        // sticky_notes_enabled）在前端会表现为「开关点不动」，且不报任何错。
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_utility_hub_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let manager = ConfigManager {
+            config: Mutex::new(AppConfig::default()),
+            config_path: tmp.join("config.json"),
+        };
+
+        // 默认启用（与 registry 的 defaultEnabled 一致）
+        assert!(manager.get_utility_hub_enabled().unwrap());
+        manager.update_utility_hub_enabled(false).unwrap();
+        assert!(!manager.get_utility_hub_enabled().unwrap());
+        manager.update_utility_hub_enabled(true).unwrap();
+        assert!(manager.get_utility_hub_enabled().unwrap());
+        // 不得串写到其它工具的启用态
+        assert!(!manager.get_sticky_notes_enabled().unwrap());
+        assert!(manager.get_screenshot_enabled().unwrap());
     }
 
     #[test]

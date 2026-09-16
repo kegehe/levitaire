@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { FLOATING_TOOLS, CATEGORY_LABELS, getEnabledTools, setEnabledTools } from "./registry";
+import {
+  FLOATING_TOOLS,
+  BACKEND_TOOLS,
+  CATEGORY_LABELS,
+  backendSetterFor,
+  getEnabledTools,
+  setEnabledTools,
+} from "./registry";
 
 const STORAGE_KEY = "levitaire-tools-enabled";
 const LEGACY_KEY = "floatory-toolbar-features";
@@ -34,6 +41,42 @@ describe("registry FLOATING_TOOLS", () => {
       expect(mod.default).toBeDefined();
     }
   }, 15_000);
+});
+
+describe("BACKEND_TOOLS", () => {
+  it("覆盖全部悬浮工具：漏登记会让该工具的开关只改前端状态", () => {
+    // 通用工具就曾漏登记：面板开关既不持久化，也不会在禁用时收起已打开的浮窗，
+    // 于是「全部关闭」关不掉它。这条用例守住这个契约。
+    const registered = new Set(BACKEND_TOOLS.map((tool) => tool.id));
+    const missing = FLOATING_TOOLS.map((tool) => tool.id).filter((id) => !registered.has(id));
+    expect(missing).toEqual([]);
+  });
+
+  it("不含已下线工具的残留项", () => {
+    const known = new Set(FLOATING_TOOLS.map((tool) => tool.id));
+    expect(BACKEND_TOOLS.filter((tool) => !known.has(tool.id))).toEqual([]);
+  });
+
+  it("命令名与工具 id 一一对应（防止复制上一行忘了改命令名）", () => {
+    // 这张表是手写的，最容易犯的错是「复制上一行、只改了 id、没改命令名」：
+    // 那样禁用 A 会去禁 B，前后端都不报错。约定 = <get|set>_<id 连字符转下划线>_enabled
+    for (const tool of BACKEND_TOOLS) {
+      const suffix = `${tool.id.replace(/-/g, "_")}_enabled`;
+      expect(tool.getter).toBe(`get_${suffix}`);
+      expect(tool.setter).toBe(`set_${suffix}`);
+    }
+  });
+
+  it("每个工具的 getter / setter 都能取到", () => {
+    for (const tool of BACKEND_TOOLS) {
+      expect(tool.getter).toMatch(/^get_.+_enabled$/);
+      expect(backendSetterFor(tool.id)).toBe(tool.setter);
+    }
+  });
+
+  it("未登记的工具取不到 setter（调用方据此跳过后端下发）", () => {
+    expect(backendSetterFor("not-a-tool")).toBeUndefined();
+  });
 });
 
 describe("CATEGORY_LABELS", () => {
@@ -105,7 +148,20 @@ describe("getEnabledTools", () => {
     expect(result).not.toContain("removed-tool");
   });
 
-  it("STORAGE_KEY 存在但 LEGACY_KEY 也存在时，优先用 STORAGE_KEY", () => {
+  it("下线工具别名：pomodoro 映射为 timer，避免并入后用户配置丢失", () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(["pomodoro", "screenshot"]));
+    const result = getEnabledTools();
+    expect(result).toEqual(["timer", "screenshot"]);
+    // 归一化结果写回，避免每次启动都重复迁移
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual(["timer", "screenshot"]);
+  });
+
+  it("别名映射后与原 ID 重复时只保留一项", () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(["timer", "pomodoro"]));
+    expect(getEnabledTools()).toEqual(["timer"]);
+  });
+
+  it("storage key 存在但 LEGACY_KEY 也存在时，优先用 STORAGE_KEY", () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(["text-toolbar"]));
     localStorage.setItem(LEGACY_KEY, JSON.stringify(["copy"]));
     const result = getEnabledTools();

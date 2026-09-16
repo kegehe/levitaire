@@ -24,6 +24,11 @@ export interface UseAnnotations {
   undo: () => void;
   redo: () => void;
   clear: () => void;
+  /**
+   * 整体平移全部标注（含 redo 尾巴），用于选区移动/缩放后让标注继续锚定在同一块屏幕内容上。
+   * 平移是坐标系换算而非用户编辑动作，**不进撤销栈**（否则一次拖动会塞进一条无法理解的撤销项）。
+   */
+  translate: (dx: number, dy: number) => void;
   canUndo: boolean;
   canRedo: boolean;
   nextNumber: number;
@@ -36,6 +41,23 @@ export interface UseAnnotations {
 interface ItemsState {
   items: Annotation[];
   index: number;
+}
+
+// 平移单个标注。坐标语义随 kind 而异（矩形是左上角、箭头是两端、序号是圆心……），
+// 这里逐个改，而不是给整个数组套一个统一偏移。
+function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
+  switch (a.kind) {
+    case "rect":
+    case "mosaic":
+      return { ...a, x: a.x + dx, y: a.y + dy };
+    case "arrow":
+      return { ...a, x1: a.x1 + dx, y1: a.y1 + dy, x2: a.x2 + dx, y2: a.y2 + dy };
+    case "brush":
+      return { ...a, points: a.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+    case "text":
+    case "number":
+      return { ...a, x: a.x + dx, y: a.y + dy };
+  }
 }
 
 export function useAnnotations(): UseAnnotations {
@@ -94,6 +116,14 @@ export function useAnnotations(): UseAnnotations {
     draftRef.current = null;
   }, []);
 
+  const translate = useCallback((dx: number, dy: number) => {
+    if (dx === 0 && dy === 0) return;
+    const s = itemsStateRef.current;
+    const newState = { items: s.items.map((a) => shiftAnnotation(a, dx, dy)), index: s.index };
+    itemsStateRef.current = newState;
+    setItemsState(newState);
+  }, []);
+
   const getCommitted = useCallback(
     () => itemsStateRef.current.items.slice(0, itemsStateRef.current.index),
     [],
@@ -117,6 +147,7 @@ export function useAnnotations(): UseAnnotations {
     undo,
     redo,
     clear,
+    translate,
     canUndo,
     canRedo,
     nextNumber,

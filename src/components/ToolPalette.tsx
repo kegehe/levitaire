@@ -3,17 +3,20 @@ import type { CSSProperties } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
   subscribeThemePreferences,
 } from "../styles/themePreferences";
 import ToolIcon from "./ToolIcon";
+import OrbIcon from "./OrbIcon";
+import { getOrbIcon, type OrbIconId } from "../constants/orbAppearance";
 import {
   FLOATING_TOOLS,
   BACKEND_TOOLS,
   CATEGORY_LABELS,
+  backendSetterFor,
   getEnabledTools,
   setEnabledTools,
   type FloatingTool,
@@ -23,13 +26,13 @@ import {
   ensureScreenshotWindow,
   ensureSketchWindow,
   ensureMonitorWindow,
-  ensurePomodoroWindow,
   ensureTimerWindow,
   ensureTodoWindow,
   ensureUtilityHubWindow,
   ensureStickyNotesManagerWindow,
   waitForNewMonitorWindowReady,
 } from "../utils/toolWindows";
+import { clampWindowToWorkArea } from "../utils/panelWindow";
 import "./ToolPalette.css";
 
 const TOOL_COLORS: Record<string, string> = {
@@ -39,7 +42,6 @@ const TOOL_COLORS: Record<string, string> = {
   "text-toolbar": "#378add",
   screenshot: "#d4537e",
   "system-monitor": "#1d9e75",
-  pomodoro: "#d85a30",
   timer: "#7f77dd",
   recording: "#e24b4a",
   "quick-input": "#1d9e75",
@@ -70,6 +72,8 @@ function ToolPalette() {
   const [activateError, setActivateError] = useState<string | null>(null);
   const activationLock = useRef(false);
   const [isVisible, setIsVisible] = useState(true);
+  // 标题左侧的品牌标记用悬浮球当前角色图标：外观与 orb 完全一致，且跟随设置实时变化
+  const [orbIcon, setOrbIcon] = useState<OrbIconId>(() => getOrbIcon());
   const [toolOrder, setToolOrder] = useState<string[]>(() => {
     const ids = FLOATING_TOOLS.map((tool) => tool.id);
     try {
@@ -149,19 +153,37 @@ function ToolPalette() {
     };
   }, []);
 
-  // 窗口尺寸自适应：渲染后测量内容实际高度，调整窗口大小消除空白
-  const containerRef = useRef<HTMLDivElement>(null);
-  const lastHeightRef = useRef(0);
+  // orb 角色图标变更：面板窗口是常驻的（关闭只 hide），只在挂载时读一次
+  // localStorage 会一直停在旧图标，必须跟着设置窗口的全局广播更新。
+  useEffect(() => {
+    const unlisten = listen<{ id: string }>("levitaire-orb-icon-changed", (event) => {
+      const icon = event.payload?.id as OrbIconId;
+      if (icon) setOrbIcon(icon);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // 窗口尺寸自适应：测量「面板 + 阴影留白」的实际外框，调整窗口大小消除空白。
+  // 宽高都从测量值取——.palette-stage 的左右留白参与窗口宽度，写死面板宽度会把
+  // 右侧留白切掉，投影又被窗口边界裁出直角（面板宽度见 ToolPalette.css 的
+  // .palette-container 与 Rust 的 PALETTE_PANEL_WIDTH，三处必须同步）。
+  const stageRef = useRef<HTMLDivElement>(null);
+  const lastSizeRef = useRef("");
   useLayoutEffect(() => {
-    const el = containerRef.current;
+    const el = stageRef.current;
     if (!el) return;
     // useLayoutEffect 在 DOM 更新后、浏览器绘制前同步执行，
-    // offsetHeight 此时已是正确值，无需 requestAnimationFrame 延迟。
+    // offsetWidth/offsetHeight 此时已是正确值，无需 requestAnimationFrame 延迟。
+    const width = el.offsetWidth;
     const height = el.offsetHeight;
-    if (height > 0 && height !== lastHeightRef.current) {
-      lastHeightRef.current = height;
-      getCurrentWebviewWindow().setSize(new LogicalSize(330, height)).catch(console.error);
-    }
+    if (width <= 0 || height <= 0) return;
+    const size = `${width}:${height}`;
+    if (size === lastSizeRef.current) return;
+    lastSizeRef.current = size;
+    getCurrentWebviewWindow().setSize(new LogicalSize(width, height)).catch(console.error);
+    clampWindowToWorkArea(width, height);
   }, [enabledIds, activateError]);
 
   // 与后端真值同步：text-toolbar / screenshot 的启用状态持久化于 config.json，
@@ -203,6 +225,58 @@ function ToolPalette() {
     syncFromBackend();
   }, [syncFromBackend]);
 
+  // 隐藏面板：本地可见态 + 广播 + 原生隐藏三件事总是一起做。
+  // **所有**隐藏入口（Esc、关闭按钮、失焦、点击留白、激活工具后收起）都必须走这里：
+  // 只调 invoke("hide_palette") 会漏掉 is-visible 与广播，导致下次打开时不播入场动画、
+  // 悬浮球也停在「已展开」态。
+  // 返回 promise 供调用方按需等待原生隐藏完成（如启动截图前先收起面板）。
+  const hidePalette = useCallback(async () => {
+    setIsVisible(false);
+    void emit("levitaire-palette-visibility", false);
+    try {
+      await invoke("hide_palette");
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
+
+  /** 显示面板（后端命令）。与 hidePalette 相对，同样只有这一条路径。 */
+  const showPalette = useCallback(async () => {
+    try {
+      await invoke("show_palette");
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
+
+  // 「点悬浮球开合面板」的另一半：悬浮球只负责广播意图，**开合由本窗口用原生可见性裁决**
+  // （面板自己才是它可见性的权威），再走 hidePalette() / showPalette() 这两条既有路径 ——
+  // is-visible、入场动画状态与 levitaire-palette-visibility 广播都由它们维护。
+  //
+  // ⚠️ 为什么不能信悬浮球那边传来的"我这边是开着的"：截图 / 长截图等流程会**不经前端**
+  // 直接把面板 hide 掉（`commands/mod.rs`、`commands/long_capture.rs` 里的 `window.hide()`，
+  // 以及 `commands/tools.rs` 激活工具前的收起），任何缓存在前端的状态都会因此过期 ——
+  // 那种情况下按缓存判断会把「打开」当成「收起」，表现为点球空点一次。
+  useEffect(() => {
+    let disposed = false;
+    const win = getCurrentWebviewWindow();
+    const unlisten = listen("palette-toggle-requested", () => {
+      if (disposed) return;
+      void win
+        .isVisible()
+        .then((visible) => (visible ? hidePalette() : showPalette()))
+        .catch(() => {
+          // 读不到原生可见性（窗口异常）：按「打开」处理 —— show 是幂等的，
+          // 而误 hide 会让用户这一次点击落空。
+          void showPalette();
+        });
+    });
+    return () => {
+      disposed = true;
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, [hidePalette, showPalette]);
+
   // Esc 关闭 + 失焦隐藏。win 在 effect 内获取（getCurrentWebviewWindow 每次
   // 调用返回新对象，放组件顶层会导致本 effect 每次 render 重跑、监听器反复注册）。
   useEffect(() => {
@@ -210,7 +284,7 @@ function ToolPalette() {
     const win = getCurrentWebviewWindow();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        invoke("hide_palette").catch(console.error);
+        void hidePalette();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -231,15 +305,11 @@ function ToolPalette() {
             .isFocused()
             .then((stillFocused) => {
               if (disposed || stillFocused || generation !== focusGeneration.current) return;
-              setIsVisible(false);
-              void emit("levitaire-palette-visibility", false);
-              invoke("hide_palette").catch(console.error);
+              void hidePalette();
             })
             .catch(() => {
               if (disposed || generation !== focusGeneration.current) return;
-              setIsVisible(false);
-              void emit("levitaire-palette-visibility", false);
-              invoke("hide_palette").catch(console.error);
+              void hidePalette();
             });
         }, 150);
       } else {
@@ -260,7 +330,7 @@ function ToolPalette() {
       if (focusLossTimer.current) clearTimeout(focusLossTimer.current);
       unFocus.then((fn) => fn());
     };
-  }, [syncFromBackend]);
+  }, [syncFromBackend, hidePalette]);
 
   const toggleEnabled = async (id: string): Promise<boolean> => {
     // 用 ref 读取当前真值而非 render 闭包中的 enabledIds：
@@ -294,19 +364,14 @@ function ToolPalette() {
       enabledIdsRef.current = restored;
     };
     try {
-      const command = {
-        sketch: "set_sketch_enabled",
-        screenshot: "set_screenshot_enabled",
-        "text-toolbar": "set_text_toolbar_enabled",
-        "system-monitor": "set_system_monitor_enabled",
-        recording: "set_recording_enabled",
-        pomodoro: "set_pomodoro_enabled",
-        "quick-input": "set_quick_input_enabled",
-        todo: "set_todo_enabled",
-        timer: "set_timer_enabled",
-        "sticky-notes": "set_sticky_notes_enabled",
-      }[id as keyof Record<string, string>];
+      // 命令名统一由 registry 的 BACKEND_TOOLS 提供：这里曾手写第二张 id→命令表，
+      // 新增工具时两张表一旦不同步，开关就会静默退化成「只改前端状态」（通用工具踩过）。
+      const command = backendSetterFor(id);
       if (command) await invoke(command, { enabled });
+      else
+        console.warn(
+          `[ToolPalette] 工具 ${id} 未在 registry 的 BACKEND_TOOLS 登记，启用状态不会同步到后端`,
+        );
       pendingToggle.current = Math.max(0, pendingToggle.current - 1);
       if (enabled && id === "quick-input") {
         void invoke("ensure_quick_input_window").catch((err) =>
@@ -325,16 +390,37 @@ function ToolPalette() {
     }
   };
 
+  // 「全部开启 / 全部关闭」串行下发。
+  //
+  // 并发（原来那样 forEach + void toggleEnabled）会让后端的窗口清理互相打架：
+  // `set_screenshot_enabled(false)` 的会话清理会按 `*_VISIBLE_BEFORE_SESSION` 系列标记
+  // 把 time-overlay / todo-overlay / sketch-overlay 重新 show 回来；如果此时
+  // `set_timer_enabled(false)` 的 hide 已经执行完，就会出现「全部关闭之后浮窗又冒出来」。
+  // 串行后 hide 必然排在清理之后，结果稳定（后端侧另有一层「工具仍启用才恢复」的兜底）。
+  //
+  // 连点也要排队：第二次点击在第一轮跑完后才读取 enabledIdsRef，语义上才是最新的真值。
+  const batchQueue = useRef<Promise<void>>(Promise.resolve());
+  const applyToAll = (target: boolean) => {
+    // 先吞掉上一批可能留下的异常：`.then` 在 rejected 链上会跳过回调，
+    // 若队列里留下一环 rejected，之后所有排队的批次都不再执行
+    // ——「全部开启 / 全部关闭」就变成点了没反应。
+    batchQueue.current = batchQueue.current
+      .catch(() => {})
+      .then(async () => {
+        for (const tool of orderedTools) {
+          if (enabledIdsRef.current.includes(tool.id) === target) continue;
+          await toggleEnabled(tool.id);
+        }
+      });
+    return batchQueue.current;
+  };
+
   const enableAll = () => {
-    orderedTools.forEach((tool) => {
-      if (!enabledIdsRef.current.includes(tool.id)) void toggleEnabled(tool.id);
-    });
+    void applyToAll(true);
   };
 
   const disableAll = () => {
-    orderedTools.forEach((tool) => {
-      if (enabledIdsRef.current.includes(tool.id)) void toggleEnabled(tool.id);
-    });
+    void applyToAll(false);
   };
 
   const moveTool = (fromId: string, toId: string) => {
@@ -359,19 +445,15 @@ function ToolPalette() {
     if (activationLock.current || activating) return;
     activationLock.current = true;
     const wasEnabled = enabledIdsRef.current.includes(tool.id);
-    if (!wasEnabled && tool.id !== "utility-hub") {
+    if (!wasEnabled) {
+      // 点卡片 = 顺带启用，然后直接进入激活流程。通用工具也有后端启用态，
+      // 走的是与其它工具完全相同的一条路（曾在这里给它开过「只改前端状态」的后门）。
       const enabled = await toggleEnabled(tool.id);
       if (!enabled) {
         setActivateError(`${tool.name}启用失败，请重试`);
         activationLock.current = false;
         return;
       }
-    }
-    if (tool.id === "utility-hub" && !wasEnabled) {
-      const next = [...enabledIdsRef.current, tool.id];
-      setEnabledIds(next);
-      setEnabledTools(next);
-      enabledIdsRef.current = next;
     }
     // 激活进行中禁止重复触发
     setActivateError(null);
@@ -393,18 +475,18 @@ function ToolPalette() {
       if (tool.id === "utility-hub") {
         await ensureUtilityHubWindow();
         await invoke("start_utility_hub");
-        await invoke("hide_palette");
+        await hidePalette();
         return;
       }
       if (tool.activation === "immediate") {
         if (tool.id === "screenshot") {
           await ensureScreenshotWindow();
           await invoke("start_screenshot");
-          await invoke("hide_palette").catch(console.error);
+          await hidePalette();
         } else if (tool.id === "sketch") {
           await ensureSketchWindow();
           await invoke("show_sketch_window");
-          await invoke("hide_palette");
+          await hidePalette();
         } else if (tool.id === "system-monitor") {
           try {
             const monitorWindow = await ensureMonitorWindow();
@@ -418,35 +500,31 @@ function ToolPalette() {
             setActivateError(`系统监控启动失败: ${err}`);
             return;
           }
-          await invoke("hide_palette").catch(console.error);
+          await hidePalette();
         } else if (tool.id === "recording") {
           await ensureScreenshotWindow();
           await invoke("start_recording_select");
-          await invoke("hide_palette").catch(console.error);
-        } else if (tool.id === "pomodoro") {
-          await ensurePomodoroWindow();
-          await invoke("show_pomodoro_window");
-          await invoke("hide_palette").catch(console.error);
+          await hidePalette();
         } else if (tool.id === "timer") {
           await ensureTimerWindow();
           await invoke("show_timer_window");
-          await invoke("hide_palette").catch(console.error);
+          await hidePalette();
         } else if (tool.id === "todo") {
           await ensureTodoWindow();
           await invoke("show_todo_window");
-          await invoke("hide_palette").catch(console.error);
+          await hidePalette();
         } else if (tool.id === "sticky-notes") {
           await ensureStickyNotesManagerWindow();
           await invoke("show_sticky_notes_manager");
-          await invoke("hide_palette").catch(console.error);
+          await hidePalette();
         } else if (tool.id === "quick-input") {
           // 点击「快速输入」卡片：切换唤起/关闭转盘（语义与触发键单击一致）
           await invoke("toggle_quick_input_wheel");
-          await invoke("hide_palette").catch(console.error);
+          await hidePalette();
         }
       } else {
         // selection 类：工具 chunk 已在上方 loader() 预加载，隐藏面板，等待用户选中文字时由后端 selection-found 触发显示
-        await invoke("hide_palette").catch(console.error);
+        await hidePalette();
       }
     } catch (err) {
       console.error(`${tool.id} 启动失败:`, err);
@@ -459,196 +537,217 @@ function ToolPalette() {
 
   return (
     <div
-      className={`palette-container ${isVisible ? "is-visible" : ""}`}
-      ref={containerRef}
+      className="palette-stage"
+      ref={stageRef}
       onMouseDown={(event) => {
-        // Keep card sorting and all controls independent from window dragging.
-        if (event.button !== 0) return;
-        const target = event.target as HTMLElement;
-        if (target.closest("[data-tool-id], button")) return;
-        event.preventDefault();
-        paletteDragActive.current = true;
-        if (paletteDragReset.current) clearTimeout(paletteDragReset.current);
-        // startDragging consumes the native mouse-up. The timeout is a safety net
-        // for cancellation or platform-specific drag completion behavior.
-        paletteDragReset.current = setTimeout(() => {
-          paletteDragActive.current = false;
-          paletteDragReset.current = null;
-        }, 5000);
-        getCurrentWebviewWindow()
-          .startDragging()
-          .catch((error) => console.error("Failed to start palette dragging:", error))
-          .finally(() => {
-            window.setTimeout(() => {
-              paletteDragActive.current = false;
-              if (paletteDragReset.current) {
-                clearTimeout(paletteDragReset.current);
-                paletteDragReset.current = null;
-              }
-            }, 150);
-          });
+        // 阴影留白是一圈透明区域，但它仍属于本窗口，原生层不会把点击透给桌面，
+        // 面板也不会因此失焦。若不处理，留白就变成一圈「吞点击」的死区：
+        // 用户点在面板边上以为点到了桌面，面板却毫无反应。
+        // 这里按「点了面板外面」处理，与失焦隐藏的语义保持一致。
+        if (event.button !== 0 || event.target !== event.currentTarget) return;
+        void hidePalette();
       }}
     >
-      <div className="palette-header">
-        <div className="palette-title-wrap">
-          <span
-            className={`palette-status ${enabledIds.length ? "is-live" : ""}`}
-            aria-hidden="true"
-          />
-          <span className="palette-title">悬浮工具</span>
-        </div>
-        <button
-          className="palette-close"
-          aria-label="关闭"
-          type="button"
-          onClick={() => invoke("hide_palette").catch(console.error)}
-        >
-          <ToolIcon name="X" size={16} />
-        </button>
-      </div>
-      <div className="palette-body">
-        {activateError && (
-          <button className="palette-error" onClick={() => setActivateError(null)} type="button">
-            {activateError}
-          </button>
-        )}
-        {groupedTools.map(({ category, tools }) => (
-          <section
-            className="palette-section"
-            key={category}
-            aria-labelledby={`palette-group-${category}`}
+      <div
+        className={`palette-container ${isVisible ? "is-visible" : ""}`}
+        onMouseDown={(event) => {
+          // Keep card sorting and all controls independent from window dragging.
+          if (event.button !== 0) return;
+          const target = event.target as HTMLElement;
+          if (target.closest("[data-tool-id], button")) return;
+          event.preventDefault();
+          paletteDragActive.current = true;
+          if (paletteDragReset.current) clearTimeout(paletteDragReset.current);
+          // startDragging consumes the native mouse-up. The timeout is a safety net
+          // for cancellation or platform-specific drag completion behavior.
+          paletteDragReset.current = setTimeout(() => {
+            paletteDragActive.current = false;
+            paletteDragReset.current = null;
+          }, 5000);
+          getCurrentWebviewWindow()
+            .startDragging()
+            .catch((error) => console.error("Failed to start palette dragging:", error))
+            .finally(() => {
+              window.setTimeout(() => {
+                paletteDragActive.current = false;
+                if (paletteDragReset.current) {
+                  clearTimeout(paletteDragReset.current);
+                  paletteDragReset.current = null;
+                }
+              }, 150);
+            });
+        }}
+      >
+        <div className="palette-header">
+          {/* 面板的中文名。字标换成品牌后，可访问名里只剩 "Levitaire"，
+              这里把「悬浮工具」补回给屏幕阅读器，不占视觉空间。 */}
+          <span className="palette-sr-only">悬浮工具</span>
+          <div className="palette-title-wrap">
+            <span className="palette-title">
+              {/* 品牌标记 = 悬浮球当前角色图标（同一份 ICON_MARKUP + OrbIcon 组件，
+                  含各自的待机动画），不额外画圆底：20px 的小圆底会糊成一坨。 */}
+              <OrbIcon icon={orbIcon} size={20} />
+              Levitaire
+            </span>
+          </div>
+          <button
+            className="palette-close"
+            aria-label="关闭"
+            type="button"
+            onClick={() => void hidePalette()}
           >
-            <h3 className="palette-group-heading" id={`palette-group-${category}`}>
-              {CATEGORY_LABELS[category]}
-            </h3>
-            <div className="palette-grid">
-              {tools.map((tool) => {
-                const enabled = enabledIds.includes(tool.id);
-                return (
-                  <div
-                    className={`palette-card ${enabled ? "is-enabled" : ""} ${activating ? "is-busy" : ""}${draggingToolId === tool.id ? " is-dragging" : ""}${dragOverToolId === tool.id && draggingToolId !== tool.id ? " is-drag-over" : ""}`}
-                    key={tool.id}
-                    data-tool-id={tool.id}
-                    title={`${tool.name}：${tool.description}`}
-                    style={{ "--tool-color": TOOL_COLORS[tool.id] ?? "#1d9e75" } as CSSProperties}
-                    onClick={() => {
-                      if (Date.now() - lastDragAt.current > 220) handleActivate(tool);
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    onPointerDown={(e) => {
-                      if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
-                      pointerDrag.current = {
-                        pointerId: e.pointerId,
-                        fromId: tool.id,
-                        startX: e.clientX,
-                        startY: e.clientY,
-                        active: false,
-                      };
-                      e.currentTarget.setPointerCapture(e.pointerId);
-                    }}
-                    onPointerMove={(e) => {
-                      const drag = pointerDrag.current;
-                      if (!drag || drag.pointerId !== e.pointerId) return;
-                      const distance = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY);
-                      if (!drag.active && distance < 6) return;
-                      drag.active = true;
-                      setDraggingToolId(drag.fromId);
-                      const target = document
-                        .elementFromPoint(e.clientX, e.clientY)
-                        ?.closest<HTMLElement>("[data-tool-id]");
-                      const targetId = target?.dataset.toolId;
-                      const sameCategory =
-                        !!targetId && categoryById.get(targetId) === categoryById.get(drag.fromId);
-                      setDragOverToolId(sameCategory ? targetId : null);
-                      if (sameCategory && targetId !== drag.fromId) moveTool(drag.fromId, targetId);
-                    }}
-                    onPointerUp={(e) => {
-                      const drag = pointerDrag.current;
-                      if (!drag || drag.pointerId !== e.pointerId) return;
-                      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-                        e.currentTarget.releasePointerCapture(e.pointerId);
-                      }
-                      if (drag.active) lastDragAt.current = Date.now();
-                      pointerDrag.current = null;
-                      setDraggingToolId(null);
-                      setDragOverToolId(null);
-                    }}
-                    onPointerCancel={(e) => {
-                      const drag = pointerDrag.current;
-                      if (!drag || drag.pointerId !== e.pointerId) return;
-                      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-                        e.currentTarget.releasePointerCapture(e.pointerId);
-                      }
-                      pointerDrag.current = null;
-                      lastDragAt.current = Date.now();
-                      setDraggingToolId(null);
-                      setDragOverToolId(null);
-                    }}
-                    onLostPointerCapture={(e) => {
-                      const drag = pointerDrag.current;
-                      if (!drag || drag.pointerId !== e.pointerId) return;
-                      pointerDrag.current = null;
-                      lastDragAt.current = Date.now();
-                      setDraggingToolId(null);
-                      setDragOverToolId(null);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.target !== e.currentTarget || e.repeat) return;
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        handleActivate(tool);
-                      }
-                    }}
-                  >
-                    <span className="palette-grip" aria-hidden="true">
-                      <ToolIcon name="GripVertical" size={14} />
-                    </span>
-                    <div className="palette-card-icon">
-                      <ToolIcon name={tool.icon} size={22} />
-                    </div>
-                    <div className="palette-card-name">{tool.name}</div>
-                    <button
-                      className={`palette-toggle ${enabled ? "is-on" : ""}`}
-                      aria-label={enabled ? "禁用" : "启用"}
-                      role="switch"
-                      aria-checked={enabled}
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleEnabled(tool.id);
+            <ToolIcon name="X" size={16} />
+          </button>
+        </div>
+        <div className="palette-body">
+          {activateError && (
+            <button className="palette-error" onClick={() => setActivateError(null)} type="button">
+              {activateError}
+            </button>
+          )}
+          {groupedTools.map(({ category, tools }) => (
+            <section
+              className="palette-section"
+              key={category}
+              aria-labelledby={`palette-group-${category}`}
+            >
+              <h3 className="palette-group-heading" id={`palette-group-${category}`}>
+                {CATEGORY_LABELS[category]}
+              </h3>
+              <div className="palette-grid">
+                {tools.map((tool) => {
+                  const enabled = enabledIds.includes(tool.id);
+                  return (
+                    <div
+                      className={`palette-card ${enabled ? "is-enabled" : ""} ${activating ? "is-busy" : ""}${draggingToolId === tool.id ? " is-dragging" : ""}${dragOverToolId === tool.id && draggingToolId !== tool.id ? " is-drag-over" : ""}`}
+                      key={tool.id}
+                      data-tool-id={tool.id}
+                      title={`${tool.name}：${tool.description}`}
+                      style={{ "--tool-color": TOOL_COLORS[tool.id] ?? "#1d9e75" } as CSSProperties}
+                      onClick={() => {
+                        if (Date.now() - lastDragAt.current > 220) handleActivate(tool);
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+                        pointerDrag.current = {
+                          pointerId: e.pointerId,
+                          fromId: tool.id,
+                          startX: e.clientX,
+                          startY: e.clientY,
+                          active: false,
+                        };
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                      }}
+                      onPointerMove={(e) => {
+                        const drag = pointerDrag.current;
+                        if (!drag || drag.pointerId !== e.pointerId) return;
+                        const distance = Math.hypot(
+                          e.clientX - drag.startX,
+                          e.clientY - drag.startY,
+                        );
+                        if (!drag.active && distance < 6) return;
+                        drag.active = true;
+                        setDraggingToolId(drag.fromId);
+                        const target = document
+                          .elementFromPoint(e.clientX, e.clientY)
+                          ?.closest<HTMLElement>("[data-tool-id]");
+                        const targetId = target?.dataset.toolId;
+                        const sameCategory =
+                          !!targetId &&
+                          categoryById.get(targetId) === categoryById.get(drag.fromId);
+                        setDragOverToolId(sameCategory ? targetId : null);
+                        if (sameCategory && targetId !== drag.fromId)
+                          moveTool(drag.fromId, targetId);
+                      }}
+                      onPointerUp={(e) => {
+                        const drag = pointerDrag.current;
+                        if (!drag || drag.pointerId !== e.pointerId) return;
+                        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                          e.currentTarget.releasePointerCapture(e.pointerId);
+                        }
+                        if (drag.active) lastDragAt.current = Date.now();
+                        pointerDrag.current = null;
+                        setDraggingToolId(null);
+                        setDragOverToolId(null);
+                      }}
+                      onPointerCancel={(e) => {
+                        const drag = pointerDrag.current;
+                        if (!drag || drag.pointerId !== e.pointerId) return;
+                        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                          e.currentTarget.releasePointerCapture(e.pointerId);
+                        }
+                        pointerDrag.current = null;
+                        lastDragAt.current = Date.now();
+                        setDraggingToolId(null);
+                        setDragOverToolId(null);
+                      }}
+                      onLostPointerCapture={(e) => {
+                        const drag = pointerDrag.current;
+                        if (!drag || drag.pointerId !== e.pointerId) return;
+                        pointerDrag.current = null;
+                        lastDragAt.current = Date.now();
+                        setDraggingToolId(null);
+                        setDragOverToolId(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.target !== e.currentTarget || e.repeat) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          handleActivate(tool);
+                        }
                       }}
                     >
-                      {enabled && <ToolIcon name="Check" size={11} />}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        ))}
-      </div>
-      <div className="palette-footer">
-        <span className="palette-count">
-          <strong>{enabledIds.length}</strong>/{FLOATING_TOOLS.length} 已启用
-        </span>
-        <div className="palette-all-group">
-          <button
-            className="palette-all"
-            type="button"
-            onClick={enableAll}
-            disabled={enabledIds.length === FLOATING_TOOLS.length}
-          >
-            全部开启
-          </button>
-          <button
-            className="palette-all palette-all-off"
-            type="button"
-            onClick={disableAll}
-            disabled={enabledIds.length === 0}
-          >
-            全部关闭
-          </button>
+                      <span className="palette-grip" aria-hidden="true">
+                        <ToolIcon name="GripVertical" size={14} />
+                      </span>
+                      <div className="palette-card-icon">
+                        <ToolIcon name={tool.icon} size={22} />
+                      </div>
+                      <div className="palette-card-name">{tool.name}</div>
+                      <button
+                        className={`palette-toggle ${enabled ? "is-on" : ""}`}
+                        aria-label={enabled ? "禁用" : "启用"}
+                        role="switch"
+                        aria-checked={enabled}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleEnabled(tool.id);
+                        }}
+                      >
+                        {enabled && <ToolIcon name="Check" size={11} />}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+        <div className="palette-footer">
+          <span className="palette-count">
+            <strong>{enabledIds.length}</strong>/{FLOATING_TOOLS.length} 已启用
+          </span>
+          <div className="palette-all-group">
+            <button
+              className="palette-all"
+              type="button"
+              onClick={enableAll}
+              disabled={enabledIds.length === FLOATING_TOOLS.length}
+            >
+              全部开启
+            </button>
+            <button
+              className="palette-all palette-all-off"
+              type="button"
+              onClick={disableAll}
+              disabled={enabledIds.length === 0}
+            >
+              全部关闭
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -92,13 +92,50 @@ pub fn show_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 
-/// Destroy recording controls and restore interaction with the main overlay.
+/// 显示全屏录制专用的原生指示层（屏幕边缘呼吸框 + 录制控制栏）。
+///
+/// 只应在录制范围**铺满屏幕**时调用：此时 WebView2 控制栏在录制区域外无处可放，
+/// 压在区域内又会被 BitBlt 截进成片，故改用 `WDA_EXCLUDEFROMCAPTURE` 排除出捕获的
+/// 原生窗（详见 `recording::indicator` 的模块注释）。区域/窗口录制不调用本命令，
+/// 仍走原来的 `ensureRecordingControlsWindow` 路径。
+///
+/// `dark` 由前端按当前主题传入，让原生窗配色与 WebView2 控制栏保持一致。
+#[tauri::command]
+pub fn show_recording_indicator(
+    app: tauri::AppHandle,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+    dark: bool,
+) -> Result<(), String> {
+    let state = app.state::<crate::recording::RecordingState>();
+    if !state.is_running() {
+        return Err("录制未开始".to_string());
+    }
+    let region = windows::Win32::Foundation::RECT {
+        left,
+        top,
+        right: left.saturating_add(width as i32),
+        bottom: top.saturating_add(height as i32),
+    };
+    crate::recording::indicator::show(&app, region, dark)
+}
+
+
+/// 销毁录制控制栏并恢复主 overlay 的交互。
+///
+/// 录制控制栏有两套：区域/窗口录制的 WebView2 控制窗（`recording-controls`）与
+/// 全屏录制的原生指示层（`recording::indicator`）。二者都在这里销毁 —— 停止、取消、
+/// Esc 清理、45s 编码超时、关闭录屏开关等路径全都调本函数，挂在这里才不会漏掉某条
+/// 异常路径而在屏幕上留下一扇置顶幽灵窗。
 #[tauri::command]
 pub fn finish_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
     let _lifecycle = RECORDING_CONTROLS_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     destroy_recording_controls_window(&app);
+    crate::recording::indicator::destroy();
     set_recording_capture_protection(&app);
     crate::hooks::mouse::set_recording_mode(false);
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
@@ -293,9 +330,18 @@ pub async fn save_video_file(
 
 
 /// 枚举可见窗口（窗口识别模式）
+/// 枚举可录制的窗口列表。
+///
+/// 排除自有窗口必须按 HWND 精确匹配（`own_window_root_hwnds`）：只按标题前缀会漏掉
+/// 标题不以 `Levitaire` 开头的自有窗（`pin-ocr` 的标题是 `Pin OCR`），它会出现在
+/// 录屏的「窗口识别」列表里被当成可录目标。
 #[tauri::command]
-pub fn enumerate_windows() -> Result<Vec<crate::recording::window_detect::WindowInfo>, String> {
-    Ok(crate::recording::window_detect::enumerate_windows())
+pub fn enumerate_windows(
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::recording::window_detect::WindowInfo>, String> {
+    Ok(crate::recording::window_detect::enumerate_windows(
+        &crate::commands::own_window_root_hwnds(&app),
+    ))
 }
 
 

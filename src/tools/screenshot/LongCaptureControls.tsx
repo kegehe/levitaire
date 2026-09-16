@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import Icon from "../../components/Icon";
+import {
+  applyThemePreferences,
+  getStoredThemePreferences,
+  subscribeThemePreferences,
+} from "../../styles/themePreferences";
 import "./LongCaptureControls.css";
 
 type CaptureStatus = {
@@ -18,13 +23,29 @@ type CaptureStatus = {
 type View = { kind: "capturing"; result: CaptureStatus } | { kind: "preview"; result: CaptureStatus; preview: string };
 
 function LongCaptureControls() {
-  const win = getCurrentWebviewWindow();
+  // ⚠️ 必须 memo 化：getCurrentWebviewWindow() 每次返回**新对象**。capturing 阶段
+  // 每 350ms 轮询一次状态（setView 新对象）→ 渲染 → win 变化 → 依赖 [win] 的监听
+  // （含 long-capture-completed）反复重建，存在丢事件导致控制条卡在「正在截长图」的窗口。
+  const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [view, setView] = useState<View | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const viewRef = useRef<View | null>(null);
   const actionPending = useRef(false);
   viewRef.current = view;
+
+  // 主题接入：长截图控制条/预览是常驻窗口，必须在挂载时着色并订阅广播，
+  // 否则主题在窗口创建之后被修改时不会刷新，且样式会一直停在首次加载的取值上。
+  useLayoutEffect(() => {
+    applyThemePreferences(getStoredThemePreferences());
+  }, []);
+
+  useEffect(() => {
+    const unlistenTheme = subscribeThemePreferences();
+    return () => {
+      unlistenTheme.then((fn) => fn());
+    };
+  }, []);
 
   const showPreview = useCallback(async (result: CaptureStatus) => {
     try {

@@ -1,11 +1,17 @@
 import Icon from "../../../components/Icon";
-import { COLOR_AUTO, DEFAULT_COLOR, PRESET_COLORS, STROKE_WIDTHS, type ToolKind } from "./types";
+import {
+  COLOR_AUTO,
+  DEFAULT_COLOR,
+  PRESET_COLORS,
+  STROKE_WIDTHS,
+  type ActiveTool,
+} from "./types";
 import type { UseAnnotations } from "./useAnnotations";
 import type { CSSProperties, Ref } from "react";
 
 interface Props {
-  tool: ToolKind;
-  setTool: (t: ToolKind) => void;
+  tool: ActiveTool;
+  setTool: (t: ActiveTool) => void;
   color: string;
   setColor: (c: string) => void;
   widthIndex: number;
@@ -21,9 +27,12 @@ interface Props {
   onCancel: () => void;
   toolbarRef?: Ref<HTMLDivElement>;
   style?: CSSProperties;
+  /** 工具栏被翻到选区上方（下方放不下）：决定 tooltip 向上还是向下弹（见 .ss-toolbar-above） */
+  above?: boolean;
 }
 
-const TOOLS: { kind: ToolKind; icon: Parameters<typeof Icon>[0]["name"]; label: string }[] = [
+const TOOLS: { kind: ActiveTool; icon: Parameters<typeof Icon>[0]["name"]; label: string }[] = [
+  { kind: "move", icon: "Move", label: "移动" },
   { kind: "rect", icon: "Square", label: "矩形" },
   { kind: "arrow", icon: "ArrowUpRight", label: "箭头" },
   { kind: "brush", icon: "Pencil", label: "画笔" },
@@ -51,11 +60,16 @@ function AnnotationToolbar(props: Props) {
     onCancel,
     toolbarRef,
     style,
+    above = false,
   } = props;
   const { undo, redo, canUndo, canRedo } = annotations;
 
   return (
-    <div className="ss-toolbar-wrap" ref={toolbarRef} style={style}>
+    <div
+      className={`ss-toolbar-wrap${above ? " ss-toolbar-above" : ""}`}
+      ref={toolbarRef}
+      style={style}
+    >
       {error && <div className="ss-error">{error}</div>}
       <div className="ss-toolbar ss-annotate-toolbar">
         {/* 工具组 */}

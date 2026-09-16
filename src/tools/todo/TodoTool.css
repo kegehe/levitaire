@@ -1,5 +1,7 @@
-.todo-container { width: 100%; height: 100%; animation: todo-window-enter 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-.todo-body { width: 100%; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; padding: 12px; color: var(--color-fg); background: var(--color-bg-elevated); border: 1px solid var(--color-border); border-radius: 12px; font-size: 12px; }
+/* 面板高度由内容决定（不是 height: 100%）：窗口高度是按 .todo-body 实测值下发的，
+   撑满窗口就会量到窗口自身，形成「越测越大」的反馈环。见 TodoTool.tsx 的 resize 逻辑。 */
+.todo-container { width: 100%; height: auto; animation: todo-window-enter 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.todo-body { width: 100%; height: auto; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; padding: 12px; color: var(--color-fg); background: var(--color-bg-elevated); border: 1px solid var(--color-border); border-radius: 12px; font-size: 12px; }
 .todo-titlebar { display: flex; align-items: center; gap: 7px; padding-bottom: 8px; border-bottom: 1px solid var(--color-border); cursor: default; }
 .todo-title { flex: 1; font-weight: 650; font-size: 14px; }
 .todo-count { min-width: 18px; padding: 2px 6px; border-radius: 10px; color: var(--color-fg-muted); background: var(--color-bg-sunken); text-align: center; font-size: 10px; }
@@ -30,9 +32,12 @@
 .todo-sort-row { display: flex; align-items: center; gap: 5px; color: var(--color-fg-subtle); font-size: 10px; }
 .todo-sort-row button { padding: 3px 7px; border: 1px solid transparent; border-radius: 4px; color: var(--color-fg-muted); background: transparent; cursor: pointer; font: inherit; }
 .todo-sort-row button.is-active { color: var(--color-fg); border-color: var(--color-border); background: var(--color-bg-sunken); }
-.todo-list { min-height: 0; flex: 1; overflow: auto; }
-.todo-empty { padding: 38px 0; color: var(--color-fg-subtle); text-align: center; }
+/* 任务多时靠 max-height 收口 + 滚动，不能让列表无限把窗口撑高（撑出工作区就被裁）。
+   ⚠️ 不能写 flex: 1：面板高度是 auto，flex-basis: 0 会把列表压成 0 高。 */
+.todo-list { min-height: 0; max-height: 320px; overflow-x: hidden; overflow-y: auto; }
+.todo-empty { padding: 18px 0; color: var(--color-fg-subtle); text-align: center; }
 .todo-empty-trash { width: 100%; margin-bottom: 5px; padding: 5px; border: 1px solid var(--color-border); border-radius: 5px; color: var(--color-danger-fg); background: transparent; cursor: pointer; font: inherit; }
+.todo-empty-trash.is-confirming { border-color: var(--color-danger-fg); background: var(--color-danger-subtle); font-weight: 600; }
 .todo-item { --todo-check-size: 22px; --todo-item-gap: 8px; --todo-row-inset: 2px; position: relative; display: block; min-height: 0; padding: 0; border-bottom: 1px solid var(--color-border); animation: todo-item-enter 180ms ease-out both; }
 .todo-item.is-focused { background: color-mix(in srgb, var(--color-accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--color-accent); }
 .todo-check { width: var(--todo-check-size); height: var(--todo-check-size); flex-shrink: 0; border: 1px solid var(--color-border); border-radius: 50%; transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast); }
@@ -144,6 +149,25 @@
 .todo-edit-buttons button { padding: 5px 13px; border-radius: 6px; font-size: 11px; }
 .todo-edit-buttons button:first-child { border-color: var(--color-accent); }
 .todo-edit-buttons button:not(:first-child):hover { background: var(--button-hover-bg); }
+
+/* ── 折叠态（指针移开后自动收起） ─────────────────────────────────────────
+   长期挂在桌面时只留「标题栏 + 任务列表」：添加行、清单栏、页签、标签筛选、搜索框、
+   更多面板全部撤掉，窗口高度随之塌下来（ResizeObserver 量到新高度后下发）。
+   标题栏必须保留 —— 它是唯一的拖拽抓手，也是指针重新移入展开的落点。
+   ⚠️ 这里只用 display: none，不做高度过渡：窗口尺寸是 JS 量完再下发的，
+   过渡会让 ResizeObserver 逐帧改窗口大小，看着就是窗口一路抖动。 */
+.todo-container.is-collapsed .todo-add-row,
+.todo-container.is-collapsed .todo-add-options,
+.todo-container.is-collapsed .todo-more-panel,
+.todo-container.is-collapsed .todo-list-bar,
+.todo-container.is-collapsed .todo-list-manager,
+.todo-container.is-collapsed .todo-search,
+.todo-container.is-collapsed .todo-filters,
+.todo-container.is-collapsed .todo-tag-filter,
+.todo-container.is-collapsed .todo-trash-state { display: none; }
+
+/* 折叠态标题栏只留计数与关闭：搜索/更多同样属于「设置项」，随折叠一起撤掉 */
+.todo-container.is-collapsed .todo-titlebar .todo-icon-btn:not(.todo-close-btn) { display: none; }
 
 .todo-undo-toast, .todo-io-toast, .todo-reminder-toast { animation: todo-toast-enter 180ms ease-out both; }
 

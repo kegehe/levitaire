@@ -1,19 +1,31 @@
 /* 独立更新提示窗（update-prompt） */
 
+/* 四周留出投影留白。见 utils/panelWindow.ts 的 PANEL_SHADOW_MARGIN —— 窗口尺寸由
+   Rust 侧（updater/mod.rs）算成「卡片 + 2×留白」，留白供卡片投影展开；窗口尺寸若
+   等于卡片尺寸，投影会被窗口边界硬切成卡片圆角处的直角残影。
+   ⚠️ 留白是逻辑像素常量，与 panelWindow.ts、Rust 的 UPDATE_PROMPT_SHADOW_MARGIN 同步。 */
+body.update-prompt-window {
+  padding: 20px;
+}
+
 .update-prompt {
   display: flex;
   flex-direction: column;
   gap: 10px;
   box-sizing: border-box;
   width: 100%;
-  height: 100vh;
+  /* 不是 100vh：body 已留出四周 padding，用视口高度会让卡片溢出窗口底边 */
+  height: 100%;
   padding: 14px 16px;
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border);
   border-radius: 12px;
   color: var(--color-fg);
   font-family: var(--font-sans, system-ui, sans-serif);
-  box-shadow: var(--shadow-lg);
+  /* 投影自包含字面值，不引用 --shadow-*：themePreferences 运行时会把它覆盖成
+     scheme 的大浮层投影（伸展范围超出上面的 20px 留白，仍会被窗口边界硬切）。
+     当前范围 = 模糊半径/2 + 垂直偏移 ≤ 20。 */
+  box-shadow: 0 6px 22px rgb(31 36 45 / 0.2);
 }
 
 .update-prompt-header {
@@ -23,6 +35,11 @@
   color: var(--color-accent);
   font-weight: 600;
   font-size: 13px;
+}
+
+/* 失败卡头部：与「已就绪」的 accent 色区分开，一眼看出这次没装成 */
+.update-prompt-header-error {
+  color: var(--color-danger-fg);
 }
 
 .update-prompt-version {
@@ -71,23 +88,22 @@
   filter: brightness(1.05);
 }
 
-.update-prompt-progress {
+/* 安装中提示。这里没有进度条 —— 安装包在后端静默下载阶段就已经下完了，
+   窗口只会在「已就绪」时出现，所以此处只需要一行状态文案。 */
+.update-prompt-status {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   margin-top: auto;
 }
-.update-prompt-progress-track {
-  height: 6px;
-  border-radius: 4px;
-  background: var(--button-hover-bg);
-  overflow: hidden;
+.update-prompt-spinner {
+  color: var(--color-accent);
+  animation: update-prompt-spin 900ms linear infinite;
 }
-.update-prompt-progress-fill {
-  height: 100%;
-  border-radius: 4px;
-  background: var(--color-accent);
-  transition: width 0.2s ease;
+@keyframes update-prompt-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .update-prompt-hint {
   font-size: 12px;
@@ -131,7 +147,8 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .update-prompt,
-  .update-prompt-error {
+  .update-prompt-error,
+  .update-prompt-spinner {
     animation: none;
   }
 }

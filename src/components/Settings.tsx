@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "./Icon";
 import type { IconName } from "./Icon";
@@ -65,10 +65,13 @@ import {
 import {
   DEFAULT_SYSTEM_MONITOR_CONFIG,
   MONITOR_INTERVAL_OPTIONS,
+  MONITOR_LAYOUT_OPTIONS,
   fetchSystemMonitorConfig,
+  normalizeSystemMonitorConfig,
   saveSystemMonitorConfig,
   type SystemMonitorConfig,
   type SystemMonitorDisplayMode,
+  type SystemMonitorLayout,
 } from "../constants/systemMonitorConfig";
 import {
   DEFAULT_POMODORO_CONFIG,
@@ -123,6 +126,7 @@ import {
   type OrbIconId,
 } from "../constants/orbAppearance";
 import { useUpdater } from "../hooks/useUpdater";
+import { resolveToolIdAlias } from "../tools/registry";
 import "./Settings.css";
 import TitleBar from "./TitleBar";
 import {
@@ -144,8 +148,7 @@ const TOOL_SETTINGS_TABS = [
   { id: "sketch", label: "屏幕草稿", icon: "Pencil" as IconName },
   { id: "quick-input", label: "快速输入", icon: "Compass" as IconName },
   { id: "monitor", label: "系统监控", icon: "Activity" as IconName },
-  { id: "pomodoro", label: "番茄钟", icon: "Timer" as IconName },
-  { id: "timer", label: "时钟、倒计时、秒表与日历", icon: "Clock" as IconName },
+  { id: "timer", label: "时间工具", icon: "Clock" as IconName },
   { id: "todo", label: "待办清单", icon: "ListFilter" as IconName },
   { id: "toolbar", label: "文字工具栏", icon: "Grid3x3" as IconName },
 ] as const;
@@ -165,8 +168,7 @@ type HotkeyConflictResult = {
 const WINDOW_POSITION_TARGETS = [
   { id: "orb", label: "悬浮球", icon: "GripVertical" as IconName },
   { id: "monitor-overlay", label: "系统监控", icon: "Activity" as IconName },
-  { id: "pomodoro-overlay", label: "番茄钟", icon: "Timer" as IconName },
-  { id: "time-overlay", label: "时钟、倒计时、秒表与日历", icon: "Clock" as IconName },
+  { id: "time-overlay", label: "时间工具", icon: "Clock" as IconName },
   { id: "todo-overlay", label: "待办清单", icon: "ListFilter" as IconName },
 ] as const;
 
@@ -524,12 +526,14 @@ function Settings() {
 
   // 悬浮工具「启动时自动打开」配置（默认关闭，真值在后端 config.json）
   const [autostartIds, setAutostartIdsState] = useState<string[]>([]);
+  // 后端自启列表是否已读到。**必须拿它当勾选框的闸门**：`autostartIds` 初值是 `[]`，
+  // 而 `set_tools_autostart` 是**全量覆盖**语义 —— 用户抢在快照返回前点一下，
+  // 就会用 `["system-monitor"]` 把原有的自启项（待办 / 时间工具）整份抹掉。
+  const [autostartLoaded, setAutostartLoaded] = useState(false);
   // 保存失败时显示错误提示
   const [autostartError, setAutostartError] = useState(false);
   // 系统监控工具是否启用（自启动仅对已启用工具生效，未加载到后端状态前按启用处理）
   const [systemMonitorEnabled, setSystemMonitorEnabled] = useState(true);
-  // 番茄钟工具是否启用（自启动仅对已启用工具生效，未加载到后端状态前按启用处理）
-  const [pomodoroEnabled, setPomodoroEnabled] = useState(true);
   const [timerEnabled, setTimerEnabled] = useState(false);
   const [timerRemindersEnabled, setTimerRemindersEnabled] = useState(true);
   const [timerReminderSound, setTimerReminderSound] = useState("tone");
@@ -542,7 +546,7 @@ function Settings() {
   const [todoQuickAddStatus, setTodoQuickAddStatus] = useState<"idle" | "saved" | "error">("idle");
   const [todoQuickAddError, setTodoQuickAddError] = useState("");
 
-  // 悬浮窗默认位置恢复状态（key 为窗口 id：orb / monitor-overlay / pomodoro-overlay）
+  // 悬浮窗默认位置恢复状态（key 为窗口 id：orb / monitor-overlay / time-overlay / todo-overlay）
   const [resetPosStatus, setResetPosStatus] = useState<
     Record<string, "idle" | "saving" | "saved" | "error">
   >({});
@@ -845,6 +849,38 @@ function Settings() {
       });
   };
 
+  // 监控配置也可能在**监控浮窗**里被改（点标题栏切换「显示样式 / 迷你模式」）。本窗口只在
+  // 进入该页签时读一次后端真值，若不订阅广播就会一直抱着陈旧副本 —— 之后改「刷新间隔」时
+  // `saveSystemMonitorConfig` 是**整份 JSON 回写**，会把用户在浮窗里选的样式静默改回去
+  // （设置页这边显示的还是旧值，用户看不到任何提示）。
+  // ⚠️ 比较必须覆盖**每一个**字段：漏掉 layout 时，"只在浮窗里换了样式"会被当成自己发出的
+  // 回声而跳过，随后任何一次设置页改动都会用旧样式整份回写。
+  useEffect(() => {
+    let disposed = false;
+    const unlisten = listen<SystemMonitorConfig>(
+      "levitaire-system-monitor-config-changed",
+      (event) => {
+        if (disposed) return;
+        const incoming = normalizeSystemMonitorConfig(event.payload);
+        const current = systemMonitorConfigRef.current;
+        // 本窗口自己发出的广播也会回到这里：值与 ref 相同，跳过（别把乐观写入又 setState 一遍）
+        if (
+          incoming.intervalMs === current.intervalMs &&
+          incoming.displayMode === current.displayMode &&
+          incoming.layout === current.layout
+        ) {
+          return;
+        }
+        systemMonitorConfigRef.current = incoming;
+        setSystemMonitorConfig(incoming);
+      },
+    );
+    return () => {
+      disposed = true;
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, []);
+
   const updatePomodoroConfig = (partial: Partial<PomodoroConfig>) => {
     const previous = pomodoroConfigRef.current;
     const next = { ...previous, ...partial };
@@ -1079,16 +1115,6 @@ function Settings() {
           })
           .catch(() => {});
         break;
-      case "pomodoro":
-        fetchPomodoroConfig()
-          .then((config) => {
-            if (pomodoroSaveVersionRef.current === 0) {
-              pomodoroConfigRef.current = config;
-              setPomodoroConfig(config);
-            }
-          })
-          .catch(() => {});
-        break;
       case "timer":
         void Promise.allSettled([
           invoke<boolean>("get_timer_reminders_enabled"),
@@ -1101,6 +1127,15 @@ function Settings() {
           }
           if (lunar.status === "fulfilled") setTimerLunarEnabled(lunar.value);
         });
+        // 番茄钟已并入时间工具：配置跟随同一页签一起拉取
+        fetchPomodoroConfig()
+          .then((config) => {
+            if (pomodoroSaveVersionRef.current === 0) {
+              pomodoroConfigRef.current = config;
+              setPomodoroConfig(config);
+            }
+          })
+          .catch(() => {});
         break;
       case "todo":
         void Promise.allSettled([
@@ -1147,24 +1182,41 @@ function Settings() {
     }
   }, [activeTab]);
 
-  // 「启动时自动打开」勾选框依赖工具启用状态（系统监控/番茄钟/时钟与倒计时/待办）。
+  // 「启动时自动打开」勾选框依赖工具启用状态（系统监控/时间工具/待办）。
   // 这些开关可在悬浮球面板等外部入口被改动，而设置窗口隐藏后组件仍挂载，
   // 若只在首次挂载读取会导致勾选框状态滞后，这里单独抽出供重新聚焦时重新同步。
   const refreshToolEnableSnapshot = useCallback(() => {
     toolSnapshotLoadedRef.current = true;
     void Promise.allSettled([
       invoke<boolean>("get_system_monitor_enabled"),
-      invoke<boolean>("get_pomodoro_enabled"),
       invoke<boolean>("get_todo_enabled"),
       invoke<boolean>("get_timer_enabled"),
       invoke<string[]>("get_tools_autostart"),
-    ]).then(([monitor, pomodoro, todo, timer, autostart]) => {
-      if (monitor.status === "fulfilled") setSystemMonitorEnabled(monitor.value);
-      if (pomodoro.status === "fulfilled") setPomodoroEnabled(pomodoro.value);
-      if (todo.status === "fulfilled") setTodoEnabled(todo.value);
-      if (timer.status === "fulfilled") setTimerEnabled(timer.value);
-      if (autostart.status === "fulfilled") setAutostartIdsState(autostart.value);
-    });
+    ])
+      .then(([monitor, todo, timer, autostart]) => {
+        if (monitor.status === "fulfilled") setSystemMonitorEnabled(monitor.value);
+        if (todo.status === "fulfilled") setTodoEnabled(todo.value);
+        if (timer.status === "fulfilled") setTimerEnabled(timer.value);
+        if (autostart.status === "fulfilled") {
+          // 旧 ID 在这里就归一化（pomodoro → timer）：下面的勾选框只认新 ID。
+          // 后端存的是历史原值（`set_tools_autostart` 不做迁移），不归一化会出现
+          // 「设置里显示未勾选、但启动时仍然自动打开」且**用户无法关掉**的老配置 ——
+          // 勾选只加 "timer"、取消只删 "timer"，数组里那个 "pomodoro" 永远留着，
+          // 而 FloatingOrb 会把它别名成 "timer" 照常打开。
+          //
+          // 数组守卫不能省：`invoke<string[]>` 的类型参数只是**声明**，不是运行时保证
+          // （后端返回非数组时 `.map` 会抛）。这个 then 里抛出的异常没有 catch 兜，
+          // 会变成未处理的 rejection —— 既不上屏、也不回滚，问题完全静默。
+          const ids = Array.isArray(autostart.value) ? autostart.value : [];
+          setAutostartIdsState([...new Set(ids.map(resolveToolIdAlias))]);
+          // 读到之后才允许点击（见 autostartLoaded 的说明）
+          setAutostartLoaded(true);
+        }
+      })
+      .catch((error) => {
+        // 兜底：任何一步抛错都只记日志，不让它变成未处理的 rejection
+        console.error("同步工具启停状态失败:", error);
+      });
   }, []);
 
   // 首次进入展示「启动时自动打开」的页签时同步工具启停/自动打开快照。
@@ -1173,10 +1225,7 @@ function Settings() {
   useEffect(() => {
     if (
       !toolSnapshotLoadedRef.current &&
-      (activeTab === "monitor" ||
-        activeTab === "pomodoro" ||
-        activeTab === "timer" ||
-        activeTab === "todo")
+      (activeTab === "monitor" || activeTab === "timer" || activeTab === "todo")
     ) {
       refreshToolEnableSnapshot();
     }
@@ -1213,7 +1262,6 @@ function Settings() {
           if (activeTabRef.current === "quick-input") void refreshQiHistory();
           if (
             activeTabRef.current === "monitor" ||
-            activeTabRef.current === "pomodoro" ||
             activeTabRef.current === "timer" ||
             activeTabRef.current === "todo"
           ) {
@@ -2050,7 +2098,7 @@ function Settings() {
     }
   };
 
-  // 在线更新：检查/下载/安装，由 tauri-plugin-updater 提供
+  // 在线更新：状态由后端 updater 维护（检测 → 静默下载 → 就绪），本页只订阅快照
   const updater = useUpdater();
   const [appVersion, setAppVersion] = useState("0.0.0");
 
@@ -2379,21 +2427,25 @@ function Settings() {
                       <Icon name="Check" size={14} /> 已是最新版本
                     </span>
                   )}
-                  {updater.status === "available" && (
-                    <div className="settings-updater-available">
-                      <span className="settings-hint">
-                        发现新版本 <b>{updater.availableVersion}</b>
-                      </span>
-                      <button className="settings-save-btn" onClick={updater.downloadAndInstall}>
-                        <Icon name="Download" size={14} /> 下载并安装
-                      </button>
-                    </div>
-                  )}
                   {updater.status === "downloading" && (
                     <span className="settings-hint">
-                      <Icon name="Loader2" size={14} className="settings-save-spinner" /> 下载中
-                      {updater.progress != null ? ` ${updater.progress}%` : "…"}
+                      <Icon name="Loader2" size={14} className="settings-save-spinner" />{" "}
+                      正在后台下载{" "}
+                      {updater.availableVersion ? `v${updater.availableVersion} ` : "新版本 "}
+                      {updater.progress != null ? `${updater.progress}%` : "…"}
+                      （下载完成后会提示你安装）
                     </span>
+                  )}
+                  {updater.status === "ready" && (
+                    <div className="settings-updater-available">
+                      <span className="settings-hint">
+                        <Icon name="Check" size={14} /> 新版本 <b>{updater.availableVersion}</b>{" "}
+                        已下载完成
+                      </span>
+                      <button className="settings-save-btn" onClick={updater.installUpdate}>
+                        <Icon name="Download" size={14} /> 立即更新
+                      </button>
+                    </div>
                   )}
                   {updater.status === "installing" && (
                     <span className="settings-hint">
@@ -2404,14 +2456,18 @@ function Settings() {
                   {updater.status === "error" && (
                     <div className="settings-updater-error">
                       <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                        <Icon name="X" size={14} /> 检查更新失败
+                        <Icon name="X" size={14} /> 更新失败
                       </span>
                       {updater.errorMessage && (
                         <span className="settings-hint" title={updater.errorMessage}>
                           {updater.errorMessage.slice(0, 120)}
                         </span>
                       )}
-                      <button className="settings-toggle-btn" onClick={updater.reset} title="重试">
+                      <button
+                        className="settings-toggle-btn"
+                        onClick={updater.checkForUpdate}
+                        title="重试"
+                      >
                         <Icon name="RotateCcw" size={14} />
                       </button>
                     </div>
@@ -3164,7 +3220,9 @@ function Settings() {
           {activeTab === "monitor" && (
             <>
               <h2 className="settings-panel-title">系统监控</h2>
-              <p className="settings-panel-desc">配置监控悬浮窗的数据刷新频率和显示密度。</p>
+              <p className="settings-panel-desc">
+                配置监控悬浮窗的数据刷新频率、显示模式与显示样式（四套样式也可以在浮窗标题栏上一键轮换）。
+              </p>
               <div className="settings-item">
                 <label
                   className={`settings-checkbox-label${systemMonitorEnabled ? "" : " is-disabled"}`}
@@ -3172,12 +3230,13 @@ function Settings() {
                   <input
                     type="checkbox"
                     checked={autostartIds.includes("system-monitor")}
-                    disabled={!systemMonitorEnabled}
+                    disabled={!autostartLoaded || !systemMonitorEnabled}
                     onChange={() => handleToggleToolAutostart("system-monitor")}
                   />
                   <span>启动时自动打开</span>
                 </label>
-                {!systemMonitorEnabled && (
+                {!autostartLoaded && <span className="settings-hint">正在读取配置…</span>}
+                {autostartLoaded && !systemMonitorEnabled && (
                   <span className="settings-hint">该工具未启用，需先在悬浮球面板中启用</span>
                 )}
                 {autostartError && (
@@ -3225,6 +3284,37 @@ function Settings() {
                   </select>
                 </div>
               </div>
+              {/* 显示样式：只在标准模式下生效（mini 是固定形态）。也可以直接点浮窗标题栏的
+                  样式按钮轮换，两条路径写的是同一份配置、都会广播。 */}
+              <div className="settings-item settings-row">
+                <div className="settings-inline-group">
+                  <label className="settings-label" htmlFor="settings-monitor-layout">
+                    显示样式
+                  </label>
+                  <select
+                    id="settings-monitor-layout"
+                    value={systemMonitorConfig.layout}
+                    disabled={systemMonitorConfig.displayMode === "mini"}
+                    onChange={(e) =>
+                      updateSystemMonitorConfig({ layout: e.target.value as SystemMonitorLayout })
+                    }
+                    className="settings-select"
+                  >
+                    {MONITOR_LAYOUT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <span className="settings-hint">
+                  {systemMonitorConfig.displayMode === "mini"
+                    ? "迷你模式形态固定，切回标准后生效"
+                    : MONITOR_LAYOUT_OPTIONS.find(
+                        (option) => option.value === systemMonitorConfig.layout,
+                      )?.hint}
+                </span>
+              </div>
               {systemMonitorStatus === "saved" && <p className="settings-hint">已保存</p>}
               {systemMonitorStatus === "error" && (
                 <p className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
@@ -3234,25 +3324,78 @@ function Settings() {
             </>
           )}
 
-          {/* ── 番茄钟 ──────────────────────────────────── */}
-          {activeTab === "pomodoro" && (
+          {/* ── 时间工具（时钟 / 倒计时 / 番茄钟 / 秒表 / 日历） ──── */}
+          {activeTab === "timer" && (
             <>
-              <h2 className="settings-panel-title">番茄钟</h2>
-              <p className="settings-panel-desc">配置番茄钟悬浮窗的倒计时时长与自动循环。</p>
+              <h2 className="settings-panel-title">时间工具</h2>
+              <p className="settings-panel-desc">管理时钟、倒计时、番茄钟、秒表和日历悬浮工具。</p>
               <div className="settings-item">
-                <label
-                  className={`settings-checkbox-label${pomodoroEnabled ? "" : " is-disabled"}`}
-                >
+                <label className="settings-checkbox-label">
                   <input
                     type="checkbox"
-                    checked={autostartIds.includes("pomodoro")}
-                    disabled={!pomodoroEnabled}
-                    onChange={() => handleToggleToolAutostart("pomodoro")}
+                    checked={timerRemindersEnabled}
+                    onChange={(event) => {
+                      const value = event.target.checked;
+                      setTimerRemindersEnabled(value);
+                      invoke("set_timer_reminders_enabled", { enabled: value }).catch(() =>
+                        setTimerRemindersEnabled(!value),
+                      );
+                    }}
+                  />
+                  <span>启用倒计时提醒</span>
+                </label>
+              </div>
+              <div className="settings-item">
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={timerLunarEnabled}
+                    onChange={(event) => {
+                      const value = event.target.checked;
+                      setTimerLunarEnabled(value);
+                      invoke("set_timer_lunar_enabled", { enabled: value }).catch(() =>
+                        setTimerLunarEnabled(!value),
+                      );
+                    }}
+                  />
+                  <span>显示农历日期</span>
+                </label>
+              </div>
+              <div className="settings-item settings-row">
+                <div className="settings-inline-group">
+                  <label className="settings-label" htmlFor="settings-timer-sound">
+                    提醒声音
+                  </label>
+                  <select
+                    id="settings-timer-sound"
+                    className="settings-select"
+                    value={timerReminderSound}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setTimerReminderSound(value);
+                      invoke("set_timer_reminder_sound", { sound: value }).catch(() =>
+                        setTimerReminderSound(timerReminderSound),
+                      );
+                    }}
+                  >
+                    <option value="tone">提示音</option>
+                    <option value="none">静音</option>
+                  </select>
+                </div>
+              </div>
+              <div className="settings-item">
+                <label className={`settings-checkbox-label${timerEnabled ? "" : " is-disabled"}`}>
+                  <input
+                    type="checkbox"
+                    checked={autostartIds.includes("timer")}
+                    disabled={!autostartLoaded || !timerEnabled}
+                    onChange={() => handleToggleToolAutostart("timer")}
                   />
                   <span>启动时自动打开</span>
                 </label>
-                {!pomodoroEnabled && (
-                  <span className="settings-hint">该工具未启用，需先在悬浮球面板中启用</span>
+                {!autostartLoaded && <span className="settings-hint">正在读取配置…</span>}
+                {autostartLoaded && !timerEnabled && (
+                  <span className="settings-hint">请先在悬浮球面板中启用时间工具</span>
                 )}
                 {autostartError && (
                   <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
@@ -3260,6 +3403,16 @@ function Settings() {
                   </span>
                 )}
               </div>
+              <div className="settings-item">
+                <span className="settings-hint">
+                  倒计时结束时会播放提示音并发送系统通知；计时器状态会在应用重启后恢复。
+                </span>
+              </div>
+
+              <h3 className="settings-subsection-title">番茄钟</h3>
+              <p className="settings-panel-desc">
+                番茄钟是时间工具里的一个页签，计时在后端持续运行，隐藏窗口不会中断专注。
+              </p>
               <div className="settings-item settings-row">
                 <div className="settings-inline-group">
                   <label className="settings-label" htmlFor="settings-pomodoro-work">
@@ -3380,92 +3533,6 @@ function Settings() {
             </>
           )}
 
-          {/* ── 待办清单 ──────────────────────────────────── */}
-          {activeTab === "timer" && (
-            <>
-              <h2 className="settings-panel-title">时钟、倒计时、秒表与日历</h2>
-              <p className="settings-panel-desc">管理桌面时钟、倒计时、日历和秒表悬浮工具。</p>
-              <div className="settings-item">
-                <label className="settings-checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={timerRemindersEnabled}
-                    onChange={(event) => {
-                      const value = event.target.checked;
-                      setTimerRemindersEnabled(value);
-                      invoke("set_timer_reminders_enabled", { enabled: value }).catch(() =>
-                        setTimerRemindersEnabled(!value),
-                      );
-                    }}
-                  />
-                  <span>启用倒计时提醒</span>
-                </label>
-              </div>
-              <div className="settings-item">
-                <label className="settings-checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={timerLunarEnabled}
-                    onChange={(event) => {
-                      const value = event.target.checked;
-                      setTimerLunarEnabled(value);
-                      invoke("set_timer_lunar_enabled", { enabled: value }).catch(() =>
-                        setTimerLunarEnabled(!value),
-                      );
-                    }}
-                  />
-                  <span>显示农历日期</span>
-                </label>
-              </div>
-              <div className="settings-item settings-row">
-                <div className="settings-inline-group">
-                  <label className="settings-label" htmlFor="settings-timer-sound">
-                    提醒声音
-                  </label>
-                  <select
-                    id="settings-timer-sound"
-                    className="settings-select"
-                    value={timerReminderSound}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setTimerReminderSound(value);
-                      invoke("set_timer_reminder_sound", { sound: value }).catch(() =>
-                        setTimerReminderSound(timerReminderSound),
-                      );
-                    }}
-                  >
-                    <option value="tone">提示音</option>
-                    <option value="none">静音</option>
-                  </select>
-                </div>
-              </div>
-              <div className="settings-item">
-                <label className={`settings-checkbox-label${timerEnabled ? "" : " is-disabled"}`}>
-                  <input
-                    type="checkbox"
-                    checked={autostartIds.includes("timer")}
-                    disabled={!timerEnabled}
-                    onChange={() => handleToggleToolAutostart("timer")}
-                  />
-                  <span>启动时自动打开</span>
-                </label>
-                {!timerEnabled && (
-                  <span className="settings-hint">请先在悬浮球面板中启用时钟与倒计时</span>
-                )}
-                {autostartError && (
-                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
-                    设置失败
-                  </span>
-                )}
-              </div>
-              <div className="settings-item">
-                <span className="settings-hint">
-                  倒计时结束时会播放提示音并发送系统通知；计时器状态会在应用重启后恢复。
-                </span>
-              </div>
-            </>
-          )}
-
           {activeTab === "todo" && (
             <>
               <h2 className="settings-panel-title">待办清单</h2>
@@ -3475,12 +3542,13 @@ function Settings() {
                   <input
                     type="checkbox"
                     checked={autostartIds.includes("todo")}
-                    disabled={!todoEnabled}
+                    disabled={!autostartLoaded || !todoEnabled}
                     onChange={() => handleToggleToolAutostart("todo")}
                   />
                   <span>启动时自动打开</span>
                 </label>
-                {!todoEnabled && (
+                {!autostartLoaded && <span className="settings-hint">正在读取配置…</span>}
+                {autostartLoaded && !todoEnabled && (
                   <span className="settings-hint">请先在悬浮球面板中启用待办清单</span>
                 )}
                 {autostartError && (

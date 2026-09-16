@@ -2,6 +2,17 @@ pub mod hotkey;
 pub mod keyboard;
 pub mod mouse;
 
+/// 文字工具栏窗口四周的透明投影留白（逻辑像素）。
+///
+/// 窗口尺寸 = 工具栏容器 + 留白。窗口尺寸若等于容器尺寸，容器的 CSS 投影会被窗口
+/// 边界硬切成容器圆角处的直角残影。容器在窗口内左上角内缩一个留白，所以按选区/光标
+/// 计算窗口位置时要相应左移一个留白，工具栏才会落回原位（顶部不用补偿：body
+/// 已有 24px tooltip 安全区，比留白宽）。
+///
+/// ⚠️ 必须与前端 `src/tools/text-toolbar/TextToolbar.tsx` 的 `TOOLBAR_SHADOW_MARGIN`
+///    以及 `src/styles/global.css` 的 `body.toolbar-window` padding 保持一致。
+pub const TOOLBAR_SHADOW_MARGIN: f64 = 10.0;
+
 /// 钩子管理器
 ///
 /// 目前仅作为 Tauri managed state 的占位结构体。

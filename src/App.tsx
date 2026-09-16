@@ -22,7 +22,6 @@ const ToolPalette = lazy(() => import("./components/ToolPalette"));
 const ScreenshotTool = lazy(() => import("./tools/screenshot/ScreenshotTool"));
 const RecordingTool = lazy(() => import("./tools/recording/RecordingTool"));
 const SystemMonitor = lazy(() => import("./tools/system-monitor/SystemMonitor"));
-const PomodoroTool = lazy(() => import("./tools/pomodoro/PomodoroTool"));
 const TimerTool = lazy(() => import("./tools/timer/TimerTool"));
 const TodoTool = lazy(() => import("./tools/todo/TodoTool"));
 const QuickInputTool = lazy(() => import("./tools/quick-input/QuickInputTool"));
@@ -381,8 +380,6 @@ function App() {
     content = <LongCaptureFrame />;
   } else if (windowLabel === "monitor-overlay") {
     content = <SystemMonitor />;
-  } else if (windowLabel === "pomodoro-overlay") {
-    content = <PomodoroTool />;
   } else if (windowLabel === "time-overlay") {
     content = <TimerTool />;
   } else if (windowLabel === "todo-overlay") {

@@ -9,6 +9,7 @@ import {
   saveEnabledFeatures,
   saveToolbarFeatureOrder,
 } from "./toolbarFeatures";
+import { NONE_SELECTED_SENTINEL, decodeSelection, encodeSelection } from "./selectionPersistence";
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -207,6 +208,44 @@ describe("saveEnabledFeatures", () => {
     expect(mockInvoke).toHaveBeenCalledWith("set_toolbar_features", {
       features: ["copy", "unicode-encode"],
     });
+  });
+});
+
+/**
+ * 「全部取消勾选」必须存得住。
+ *
+ * 后端存的是**启用**列表，空列表既可能表示"从没设置过"（应回退默认全量），
+ * 也可能表示"用户把每一项都关掉了"（应保持为空）。老实现一律按前者处理，
+ * 于是全关之后重开/重启就全选回来了 —— 与「老配置里的 pomodoro 自启项关不掉」同类。
+ */
+describe("「全部取消勾选」必须能存住", () => {
+  it("保存空选择时写入哨兵，而不是空数组", async () => {
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await saveEnabledFeatures([]);
+    expect(mockInvoke).toHaveBeenCalledWith("set_toolbar_features", {
+      features: [NONE_SELECTED_SENTINEL],
+    });
+  });
+
+  it("读到哨兵时返回空列表（不回退默认全量），且不触发重置写回", async () => {
+    mockInvoke.mockResolvedValueOnce([NONE_SELECTED_SENTINEL]);
+    const result = await fetchEnabledFeatures();
+    expect(result).toEqual([]);
+    expect(mockInvoke).not.toHaveBeenCalledWith("set_toolbar_features", expect.anything());
+  });
+
+  it("空列表（从未设置）与哨兵（显式全关）必须区分开", async () => {
+    mockInvoke.mockResolvedValueOnce([]);
+    expect(await fetchEnabledFeatures()).toEqual(expect.arrayContaining(DEFAULT_FEATURE_IDS));
+  });
+
+  it("编码/解码可往返", () => {
+    for (const ids of [[], ["copy"], [...DEFAULT_FEATURE_IDS]]) {
+      expect(decodeSelection(encodeSelection(ids))).toEqual(ids);
+    }
+    expect(decodeSelection([])).toBeNull();
+    expect(decodeSelection(undefined)).toBeNull();
+    expect(decodeSelection(null)).toBeNull();
   });
 });
 

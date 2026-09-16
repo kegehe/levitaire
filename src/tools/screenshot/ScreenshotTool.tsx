@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useLayoutEffect } from "react";
+import { useEffect, useRef, useState, useCallback, useLayoutEffect, useMemo } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -6,7 +6,7 @@ import Icon from "../../components/Icon";
 import AnnotationCanvas, { type AnnotationCanvasHandle } from "./annotate/AnnotationCanvas";
 import AnnotationToolbar from "./annotate/AnnotationToolbar";
 import { useAnnotations } from "./annotate/useAnnotations";
-import { DEFAULT_COLOR, DEFAULT_TOOL, DEFAULT_WIDTH_INDEX, type ToolKind } from "./annotate/types";
+import { DEFAULT_COLOR, DEFAULT_TOOL, DEFAULT_WIDTH_INDEX, type ActiveTool } from "./annotate/types";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
@@ -51,6 +51,131 @@ type SelectMode = "region" | "window";
 type CaptureKind = "normal" | "long";
 type TargetScope = "element" | "window";
 
+/**
+ * 选区调整方向：整体移动 + 四边缩放 + 四角缩放。
+ * 缩放方向刻意用单字符 token 拼写（"n"/"s"/"e"/"w" 及其组合），
+ * 这样一条 `dir.includes("n")` 就能覆盖「北边」和「东北/西北角」两种情况。
+ */
+type AdjustMode = "move" | "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+
+const ADJUST_MODES: AdjustMode[] = ["move", "n", "s", "e", "w", "ne", "nw", "se", "sw"];
+
+/** 需要渲染手柄的方向（除掉整体移动） */
+const ADJUST_HANDLE_MODES: AdjustMode[] = ADJUST_MODES.filter((m) => m !== "move");
+
+/** 选区的最小尺寸（CSS px）：拖动到比这更小就停住，避免选区塌成一条线后再也拉不回来 */
+const MIN_SELECTION_SIZE = 8;
+
+/**
+ * 计算调整后的选区。纯函数，便于单测。
+ *
+ * @param anchor 调整开始时的选区（拖动过程中保持不变）
+ * @param mode   调整方向
+ * @param dx     指针相对起点的水平位移（CSS px，已对齐物理像素）
+ * @param dy     指针相对起点的垂直位移（CSS px，已对齐物理像素）
+ * @param bounds 允许的活动范围（CSS px，一般为 overlay 的视口尺寸）
+ *
+ * 缩放时**对侧边固定**：拖东边则左边不动，拖西北角则右下角不动——与所有截图/绘图工具一致。
+ */
+export function adjustSelection(
+  anchor: Selection,
+  mode: AdjustMode,
+  dx: number,
+  dy: number,
+  bounds: { width: number; height: number },
+): Selection {
+  if (mode === "move") {
+    const maxLeft = Math.max(0, bounds.width - anchor.width);
+    const maxTop = Math.max(0, bounds.height - anchor.height);
+    return {
+      left: clamp(anchor.left + dx, 0, maxLeft),
+      top: clamp(anchor.top + dy, 0, maxTop),
+      width: anchor.width,
+      height: anchor.height,
+    };
+  }
+
+  const right0 = anchor.left + anchor.width;
+  const bottom0 = anchor.top + anchor.height;
+  // 各边独立夹到视口内。未参与本次拖动的边保持 anchor 原值。
+  const left = mode.includes("w") ? clamp(anchor.left + dx, 0, bounds.width) : anchor.left;
+  const right = mode.includes("e") ? clamp(right0 + dx, 0, bounds.width) : right0;
+  const top = mode.includes("n") ? clamp(anchor.top + dy, 0, bounds.height) : anchor.top;
+  const bottom = mode.includes("s") ? clamp(bottom0 + dy, 0, bounds.height) : bottom0;
+
+  // 被拖过对侧边时，把「正在被拖动的那条边」退回最小尺寸，另一侧纹丝不动——
+  // 这样选区是停住而不是翻转，松手前后看到的是同一个东西。
+  // 下界取 min(原尺寸, MIN)：本来就不足 MIN 的窄选区（智能截图命中很小的控件时可能出现）
+  // 不该被一次原地点击撑大，那样会白白触发一次重截。
+  const width = shrinkToMin(
+    left,
+    right,
+    mode.includes("w"),
+    mode.includes("e"),
+    Math.min(anchor.width, MIN_SELECTION_SIZE),
+    bounds.width,
+  );
+  const height = shrinkToMin(
+    top,
+    bottom,
+    mode.includes("n"),
+    mode.includes("s"),
+    Math.min(anchor.height, MIN_SELECTION_SIZE),
+    bounds.height,
+  );
+  return {
+    left: width.start,
+    top: height.start,
+    width: width.end - width.start,
+    height: height.end - height.start,
+  };
+}
+
+// 保证 [start, end] 至少有 minSize 宽：退让被拖动的那一侧；两侧都在拖（角）则退 end。
+function shrinkToMin(
+  start: number,
+  end: number,
+  dragStart: boolean,
+  dragEnd: boolean,
+  minSize: number,
+  limit: number,
+): { start: number; end: number } {
+  if (end - start >= minSize) return { start, end };
+  if (dragStart && !dragEnd) return { start: Math.max(0, end - minSize), end };
+  return { start, end: Math.max(start, Math.min(limit, start + minSize)) };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+/** 手柄的定位方式：单边拉一条（沿边命中，比一个 8px 的点好抓），四角放方块 */
+function adjustHandleStyle(sel: Selection, mode: AdjustMode): React.CSSProperties {
+  if (mode === "n" || mode === "s") {
+    return { left: sel.left, width: sel.width, top: mode === "n" ? sel.top : sel.top + sel.height };
+  }
+  if (mode === "e" || mode === "w") {
+    return { top: sel.top, height: sel.height, left: mode === "w" ? sel.left : sel.left + sel.width };
+  }
+  return {
+    left: mode.includes("w") ? sel.left : sel.left + sel.width,
+    top: mode.includes("n") ? sel.top : sel.top + sel.height,
+  };
+}
+
+/**
+ * overlay 根节点的类名。两个修饰类都只在标注态生效：
+ * - `ss-move-tool`：当前是移动工具。此时 canvas 必须 `pointer-events: none`（见 CSS），
+ *   否则它会吃掉本该落到选区调整层上的指针事件。
+ * - `ss-adjusting`：正在拖动调整。遮罩要抬到 canvas 之上，挡住伸出新选区的旧底图。
+ */
+function overlayClassName(mode: Mode, tool: ActiveTool, adjusting: boolean): string {
+  const classes = ["ss-overlay"];
+  if (mode === "annotating" && tool === "move") classes.push("ss-move-tool");
+  if (adjusting) classes.push("ss-adjusting");
+  return classes.join(" ");
+}
+
 /** 后端智能截图目标的映射，坐标为虚拟桌面绝对物理像素。 */
 interface ScreenshotTarget {
   kind: TargetScope;
@@ -86,7 +211,12 @@ function initialOcrPanelPosition(selection: Selection): PanelPosition {
 }
 
 function ScreenshotTool() {
-  const win = getCurrentWebviewWindow();
+  // ⚠️ 必须 memo 化：getCurrentWebviewWindow() 每次调用都返回**新对象**
+  // （@tauri-apps/api 里是 `new WebviewWindow(label, {skip:true})`）。它同时是
+  // fetchReady / 挂载 effect / 焦点 effect 的依赖，写在渲染体里会让这些 effect
+  // 每次渲染都重跑；而挂载 effect 里又会 setMonitorWorkArea(新对象) → 状态恒变
+  // → 再渲染 → 自激循环（实测 ≈700 次/秒 IPC + 重渲染，且遮罩窗在启动时就被预加载）。
+  const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [mode, setMode] = useState<Mode>("selecting");
   const modeRef = useRef<Mode>("selecting");
   modeRef.current = mode;
@@ -116,6 +246,9 @@ function ScreenshotTool() {
     [],
   );
   const [selection, setSelection] = useState<Selection | null>(null);
+  // selection 的 ref 镜像：endAdjust 与在途重截需要同步读最新值，避免批处理下的陈旧闭包
+  const selectionRef = useRef<Selection | null>(null);
+  selectionRef.current = selection;
   const [image, setImage] = useState<CapturedImage | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -140,7 +273,34 @@ function ScreenshotTool() {
   const toolbarRef = useRef<HTMLDivElement>(null);
   const captureTabsRef = useRef<HTMLDivElement>(null);
   const monitorRequestRef = useRef(0);
+  // 上次已下发的显示器工作区。IPC 每次都返回**新对象**，直接 setState 会让状态恒变，
+  // 与「依赖 win 的 effect」叠加即自激；只在数值真的变化时才写状态（第二道保险：
+  // 即使将来有人又把 win 写回非 memo 的取值，这里也不会再触发循环）。
+  const monitorWorkAreaRef = useRef<MonitorWorkArea | null>(null);
   const ocrPanelDrag = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
+
+  /**
+   * 唯一的工作区写入口：同时更新 `monitorWorkAreaRef` 与 state。
+   *
+   * 两份数据必须同步。ref 用来做**值比较**（挡住「IPC 每次返回新对象 → 状态恒变 →
+   * 自激」），state 负责渲染。若只写一边，值比较就会读到过期值：例如会话结束把
+   * state 置 null、而 ref 仍留着旧值，再次打开遮罩时 IPC 返回**同一块屏**的相同数值，
+   * 比较判定「没变」→ 不写 state → 工作区永远停在 null，坐标换算静默退回兜底值。
+   */
+  const applyMonitorWorkArea = useCallback((next: MonitorWorkArea | null) => {
+    const prev = monitorWorkAreaRef.current;
+    const changed =
+      next === null
+        ? prev !== null
+        : prev === null ||
+          prev.left !== next.left ||
+          prev.top !== next.top ||
+          prev.right !== next.right ||
+          prev.bottom !== next.bottom;
+    if (!changed) return;
+    monitorWorkAreaRef.current = next;
+    setMonitorWorkArea(next);
+  }, []);
   // 失焦退出防抖计时器：失焦后延迟一小段时间再退出，期间若重新获焦则取消，
   // 兼顾「失焦应退出标注态」与「RDP/远程桌面等环境下 overlay 频繁瞬时失焦」。
   const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -265,16 +425,44 @@ function ScreenshotTool() {
   const annotations = useAnnotations();
   const clearRef = useRef(annotations.clear);
   clearRef.current = annotations.clear;
+  const translateRef = useRef(annotations.translate);
+  translateRef.current = annotations.translate;
   const annotateRef = useRef<AnnotationCanvasHandle>(null);
-  const [tool, setTool] = useState<ToolKind>(DEFAULT_TOOL);
+  const [tool, setTool] = useState<ActiveTool>(DEFAULT_TOOL);
   const [color, setColor] = useState<string>(DEFAULT_COLOR);
   const [widthIndex, setWidthIndex] = useState<number>(DEFAULT_WIDTH_INDEX);
+  // 选区的调整快照。非 null 表示「正在调整选区」：`adjustAnchor` 冻结调整前的选区，
+  // 底图 canvas 停在原处不动（旧裁剪的像素本来就等于桌面在那个位置的像素），
+  // 遮罩/选框跟随 selection 实时更新，露出的新区域直接透出下方的实时桌面，
+  // 接缝在视觉上无缝；抬手后才重新截取。见 adjustSelection / commitAdjusted。
+  const [adjustAnchor, setAdjustAnchor] = useState<Selection | null>(null);
+  const adjustAnchorRef = useRef<Selection | null>(null);
+  adjustAnchorRef.current = adjustAnchor;
+  const adjustRef = useRef<{
+    pointerId: number;
+    mode: AdjustMode;
+    startX: number;
+    startY: number;
+    anchor: Selection;
+  } | null>(null);
+  // 调整重截的代际计数：只有最新一次的结果允许落地，避免连续拖动时旧结果覆盖新选区
+  const adjustGenRef = useRef(0);
 
   // 显示一条临时错误提示（4 秒后自动清除），用于 OCR 等失败时给用户可见反馈
   const showError = useCallback((msg: string) => {
     setError(msg);
     if (errorTimer.current) clearTimeout(errorTimer.current);
     errorTimer.current = setTimeout(() => setError(null), 4000);
+  }, []);
+
+  /**
+   * 丢弃进行中的选区调整会话。会话重置（Esc / 全局 Esc / 长截图复位）时必须调用：
+   * 否则在途的 capture_region 会在取消之后落地，把已清空的截图状态"复活"。
+   */
+  const resetAdjust = useCallback(() => {
+    adjustGenRef.current++;
+    adjustRef.current = null;
+    setAdjustAnchor(null);
   }, []);
 
   // 透明背景 + scale + 虚拟桌面原点（用于把窗口相对坐标换算为虚拟桌面绝对物理坐标）
@@ -291,15 +479,15 @@ function ScreenshotTool() {
           bounds.right > bounds.left &&
           bounds.bottom > bounds.top
         ) {
-          setMonitorWorkArea(bounds);
+          applyMonitorWorkArea(bounds);
         }
       })
       .catch((e) => {
         if (requestId !== monitorRequestRef.current) return;
         console.error("get_screenshot_monitor_bounds failed:", e);
-        setMonitorWorkArea(null);
+        applyMonitorWorkArea(null);
       });
-  }, []);
+  }, [applyMonitorWorkArea]);
 
   const fetchReady = useCallback(() => {
     let scaleReady = false;
@@ -484,7 +672,7 @@ function ScreenshotTool() {
       genRef.current++;
       readyRef.current = false;
       setReady(false);
-      setMonitorWorkArea(null);
+      applyMonitorWorkArea(null);
       setCaptureTabsPosition(null);
       setSelection(null);
       setMode("selecting");
@@ -497,6 +685,9 @@ function ScreenshotTool() {
       setOcrSelection("");
       setOcrPanelPosition(null);
       dragStart.current = null;
+      resetAdjust();
+      // 每次新会话都从移动工具开始（与 Snipaste 一致）
+      setTool(DEFAULT_TOOL);
       // 同步清空标注与失焦抑制，避免下次截图残留
       clearRef.current();
       suppressFocusReset.current = false;
@@ -511,7 +702,7 @@ function ScreenshotTool() {
       genRef.current++;
       readyRef.current = false;
       setReady(false);
-      setMonitorWorkArea(null);
+      applyMonitorWorkArea(null);
       setCaptureTabsPosition(null);
       setSelection(null);
       setMode("selecting");
@@ -524,6 +715,8 @@ function ScreenshotTool() {
       setOcrSelection("");
       setOcrPanelPosition(null);
       dragStart.current = null;
+      resetAdjust();
+      setTool(DEFAULT_TOOL);
       clearRef.current();
     });
     return () => {
@@ -581,7 +774,7 @@ function ScreenshotTool() {
     genRef.current++;
     readyRef.current = false;
     setReady(false);
-    setMonitorWorkArea(null);
+    applyMonitorWorkArea(null);
     setCaptureTabsPosition(null);
     // 重置组件状态，避免 overlay 复用时残留上次的选区/图片
     setSelection(null);
@@ -596,6 +789,9 @@ function ScreenshotTool() {
     setOcrPanelPosition(null);
     setError(null);
     suppressFocusReset.current = false;
+    resetAdjust();
+    // 工具回到默认的移动工具，避免上一次会话选的画笔/文字残留到下一次截图
+    setTool(DEFAULT_TOOL);
     clearRef.current();
     if (errorTimer.current) {
       clearTimeout(errorTimer.current);
@@ -690,7 +886,7 @@ function ScreenshotTool() {
           setMode("selecting");
           readyRef.current = false;
           setReady(false);
-          setMonitorWorkArea(null);
+          applyMonitorWorkArea(null);
           setCaptureTabsPosition(null);
           setSelection(null);
           // start_long_capture may have cleaned up the native session. Re-open
@@ -737,6 +933,142 @@ function ScreenshotTool() {
     if (!annotateRef.current.isReady()) return null;
     return annotateRef.current.flushBase64();
   }, [image]);
+
+  /**
+   * 按下选区调整层（整体移动 / 四边四角缩放）。
+   *
+   * 刻意**不**调用 `e.preventDefault()`：让正在编辑的文字 textarea 自然失焦 →
+   * `finishText()` 提交 → 这条刚提交的标注随后被 `commitAdjusted` 的 translate 一并平移，
+   * 不会停留在旧坐标。
+   */
+  const startAdjust = (e: React.PointerEvent, adjustMode: AdjustMode) => {
+    if (mode !== "annotating" || tool !== "move" || !selection || busy || !ready) return;
+    // busy 期间不接受新的调整：这一次重截的 translate 与 setImage 是在同一个批里落地的，
+    // 若放行并发会话，被代际丢弃的那一次就没机会平移标注，坐标会错开。
+    // 代价是重截在途时（通常几十毫秒）的按下会被忽略。
+    if (adjustRef.current) return;
+    const anchor = adjustAnchorRef.current ?? selection;
+    adjustGenRef.current++;
+    adjustRef.current = {
+      pointerId: e.pointerId,
+      mode: adjustMode,
+      startX: snap(e.clientX),
+      startY: snap(e.clientY),
+      anchor,
+    };
+    setAdjustAnchor(anchor);
+    // 捕获到当前元素（手柄/移动层），拖动过程中指针移出窗口也不会丢事件
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const moveAdjust = (e: React.PointerEvent) => {
+    const drag = adjustRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const dx = snap(e.clientX) - drag.startX;
+    const dy = snap(e.clientY) - drag.startY;
+    const next = adjustSelection(drag.anchor, drag.mode, dx, dy, {
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+    // 同步写 ref：endAdjust 在同一个事件批次里读到的最新值，不能等下一次渲染
+    selectionRef.current = next;
+    setSelection(next);
+  };
+
+  const endAdjust = (e: React.PointerEvent) => {
+    const drag = adjustRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    adjustRef.current = null;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    const next = selectionRef.current ?? drag.anchor;
+    // 原地点击（没有真的拖动）：不重截、不平移标注，直接收尾
+    if (
+      next.left === drag.anchor.left &&
+      next.top === drag.anchor.top &&
+      next.width === drag.anchor.width &&
+      next.height === drag.anchor.height
+    ) {
+      selectionRef.current = drag.anchor;
+      setSelection(drag.anchor);
+      setAdjustAnchor(null);
+      return;
+    }
+    void commitAdjusted(next, drag.anchor);
+  };
+
+  /** 指针被系统中断（触摸被撤销、窗口被夺走等）：不重截，选区退回调整前 */
+  const cancelAdjust = (e: React.PointerEvent) => {
+    const drag = adjustRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    adjustRef.current = null;
+    selectionRef.current = drag.anchor;
+    setSelection(drag.anchor);
+    setAdjustAnchor(null);
+  };
+
+  /**
+   * 调整结束后重新截取新选区，并把标注平移到同一块屏幕内容上。
+   *
+   * 为什么必须重截：底图是旧选区的裁剪快照，选区变了就必须换底图。
+   * 为什么不拖动中实时重截：PNG 编码 + IPC 对大区域要几百毫秒，跟着 pointermove 跑会卡。
+   * 调整期间靠「底图停在原处 + 遮罩抬到 canvas 之上」撑住视觉（见 adjustAnchor 注释）。
+   */
+  const commitAdjusted = useCallback(
+    async (next: Selection, anchor: Selection) => {
+      const scale = scaleRef.current || 1;
+      const origin = originRef.current;
+      const gen = ++adjustGenRef.current;
+      setBusy("capture");
+      try {
+        const res = await invoke<{ pngBase64: string; width: number; height: number }>(
+          "capture_region",
+          {
+            left: Math.round(next.left * scale) + origin.x,
+            top: Math.round(next.top * scale) + origin.y,
+            width: Math.round(next.width * scale),
+            height: Math.round(next.height * scale),
+          },
+        );
+        if (gen !== adjustGenRef.current) return;
+        // 先把新底图解码完，再切换选区/底图：否则切换后的第一帧画布是空的（白闪一帧，
+        // 且马赛克标注会取到透明像素），同时 isReady() 短暂为 false —— 这段窗口里点导出
+        // 会静默退化成「未标注的原图」。这里 await 的代价是 busy 多停留一次解码的时间，
+        // 期间工具栏按钮保持禁用，正好挡住那次误导出。
+        // 预解码失败（base64 损坏等）就忽略，退回 canvas 自己的异步加载路径。
+        try {
+          await annotateRef.current?.preload(res.pngBase64);
+        } catch (preloadErr) {
+          console.error("preload adjusted base image failed:", preloadErr);
+        }
+        if (gen !== adjustGenRef.current) return;
+        // 标注坐标以「底图左上角」为原点，底图原点从 anchor 挪到 next，
+        // 标注就要反向平移相同的物理距离，才能继续贴在同一块屏幕内容上。
+        // 这是坐标系换算而非用户编辑动作，故不进撤销栈。
+        const dx = (anchor.left - next.left) * scale;
+        const dy = (anchor.top - next.top) * scale;
+        translateRef.current(dx, dy);
+        setImage({ base64: res.pngBase64, width: res.width, height: res.height });
+        setSelection(next);
+      } catch (err) {
+        if (gen !== adjustGenRef.current) return;
+        console.error("adjust capture_region failed:", err);
+        // 重截失败：选区退回 anchor，底图与标注都还是原样，视觉上等于这次调整没发生
+        setSelection(anchor);
+        showError(
+          typeof err === "string"
+            ? err
+            : ((err as { message?: string })?.message ?? "调整选区失败，请重试"),
+        );
+      } finally {
+        if (gen === adjustGenRef.current) {
+          // 底图已换成新选区（或已回退），锚定用不上了
+          setAdjustAnchor(null);
+          setBusy(null);
+        }
+      }
+    },
+    [showError],
+  );
 
 
   // 小工具栏按钮
@@ -899,7 +1231,7 @@ function ScreenshotTool() {
 
   return (
     <div
-      className="ss-overlay"
+      className={overlayClassName(mode, tool, adjustAnchor !== null)}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -987,7 +1319,8 @@ function ScreenshotTool() {
             }}
           />
           <div className="ss-selection-box" style={boxStyle(selection)} />
-          {mode === "selecting" && (
+          {/* 尺寸标签：框选时显示；标注态只在拖动调整期间短暂显示（静息时仍只留工具栏） */}
+          {(mode === "selecting" || adjustAnchor !== null) && (
             <div className="ss-size-badge" style={sizeBadgeStyle(selection)}>
               {Math.round(selection.width * (scaleRef.current || 1))} ×{" "}
               {Math.round(selection.height * (scaleRef.current || 1))}
@@ -1015,13 +1348,39 @@ function ScreenshotTool() {
           <AnnotationCanvas
             ref={annotateRef}
             image={image}
-            selection={selection}
+            // 调整期间底图停在 anchor 处（见 adjustAnchor 注释），不能跟着 selection 跑
+            selection={adjustAnchor ?? selection}
             scale={scaleRef.current || 1}
             tool={tool}
             color={color}
             widthIndex={widthIndex}
             annotations={annotations}
           />
+          {tool === "move" && (
+            <>
+              {/* 选区内部：按住拖动整体移动。透明层，只为接管指针事件与光标 */}
+              <div
+                className="ss-adjust-body"
+                style={boxStyle(selection)}
+                onPointerDown={(e) => startAdjust(e, "move")}
+                onPointerMove={moveAdjust}
+                onPointerUp={endAdjust}
+                onPointerCancel={cancelAdjust}
+              />
+              {/* 四边四角：透明命中区，随时可抓（光标随之变缩放样式），四角在拖动时显形 */}
+              {ADJUST_HANDLE_MODES.map((m) => (
+                <div
+                  key={m}
+                  className={`ss-adjust-handle ss-adjust-${m}`}
+                  style={adjustHandleStyle(selection, m)}
+                  onPointerDown={(e) => startAdjust(e, m)}
+                  onPointerMove={moveAdjust}
+                  onPointerUp={endAdjust}
+                  onPointerCancel={cancelAdjust}
+                />
+              ))}
+            </>
+          )}
           <AnnotationToolbar
             tool={tool}
             setTool={setTool}
@@ -1039,6 +1398,7 @@ function ScreenshotTool() {
             onPin={pinToDesktop}
             onCancel={cancel}
             toolbarRef={toolbarRef}
+            above={toolbarAbove}
             style={{
               left: selection.left,
               ...(toolbarAbove

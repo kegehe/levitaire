@@ -5,9 +5,28 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script>
-      // 同步设置 data-theme，防止暗黑模式下 FOUC（闪烁）
-      var t = localStorage.getItem('levitaire-theme') || 'light';
-      document.documentElement.setAttribute('data-theme', t);
+      // 同步设置 data-theme，防止暗黑模式下 FOUC（闪烁）。
+      // ⚠️ 必须在这里就把 `system` 解析成 light/dark：CSS 只有 `[data-theme="dark"]`
+      // 这一档覆盖，把原值 "system" 直接写上去会落到 :root 的浅色默认值 ——
+      // 选「跟随系统」且系统为深色时，首帧仍会闪一下浅色，要等 React 挂载后才纠正。
+      // 解析口径与 themePreferences.ts 的 resolveThemeMode() 保持一致。
+      (function () {
+        var mode = "light";
+        try {
+          mode = localStorage.getItem("levitaire-theme") || "light";
+          if (
+            mode === "system" &&
+            typeof window.matchMedia === "function" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches
+          ) {
+            mode = "dark";
+          }
+        } catch (error) {
+          // localStorage 不可用（隐私模式等）时退回浅色，不能因此中断首屏渲染
+          mode = "light";
+        }
+        document.documentElement.setAttribute("data-theme", mode === "dark" ? "dark" : "light");
+      })();
     </script>
     <title>Levitaire</title>
   </head>

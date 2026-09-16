@@ -165,7 +165,25 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             // 截图/录制模式：监听 Esc 全局退出（不依赖 overlay 焦点，可靠退出）
             // VK_ESCAPE = 0x1B
             if vk_code == 0x1B {
-                if in_screenshot {
+                // 窗口置顶点选：Esc 退出。该模式下左键被全局吞掉，除了回去点一次按钮
+                // 没有别的退出方式 —— 用户一旦忘记，整台机器都点不动。
+                //
+                // 必须挂在同一条 else-if 链上：这几件事都由 Esc 触发，但一次按键只该
+                // 做一件 —— 平铺成两个 if 的话，退出点选的同时会把可见的文字工具栏
+                // 也一并关掉。
+                if crate::hooks::mouse::is_window_pin_active() {
+                    // 钩子回调内不能阻塞（超时会被系统静默卸载钩子），收尾放独立线程。
+                    if let Some(app) = KB_STATE.app_handle.get() {
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            crate::hooks::mouse::stop_window_pin();
+                            crate::window_pin::publish(
+                                &app_clone,
+                                Some("已退出窗口置顶".to_string()),
+                            );
+                        });
+                    }
+                } else if in_screenshot {
                     // 防抖：连按 Esc 只触发一次退出线程（cancel 幂等，但避免无谓并发）
                     if KB_STATE
                         .cancelling
@@ -443,6 +461,24 @@ mod tests {
         assert!(!image_formats_equal(&[8, 2], &[8]));
         assert!(!image_formats_equal(&[8], &[2]));
     }
+
+    /// Ctrl+C 时工具栏已可见 → 不重新弹/搬/重置（用户是在自己复制）。
+    #[test]
+    fn ctrl_c_keeps_an_already_visible_toolbar_untouched() {
+        assert!(
+            !should_present_toolbar_at_cursor(true),
+            "工具栏已开着时按 Ctrl+C 不该再弹一次（会把窗口搬到光标处并重置前端状态）"
+        );
+    }
+
+    /// Ctrl+C 时工具栏不可见 → 仍要弹出来（键盘选词、右键复制等场景靠它唤出工具栏）。
+    #[test]
+    fn ctrl_c_still_presents_the_toolbar_when_hidden() {
+        assert!(
+            should_present_toolbar_at_cursor(false),
+            "工具栏没开时 Ctrl+C 仍应把工具栏弹到光标处"
+        );
+    }
 }
 
 /// 截图模式下 Esc 全局退出：隐藏 overlay + 重置 screenshot_mode
@@ -488,6 +524,20 @@ unsafe fn read_clipboard_snapshot() -> ClipSnapshot {
         text: None,
         has_image: false,
     }
+}
+
+/// Ctrl+C 检测到剪贴板变化后，是否应该把工具栏显示到光标处。
+///
+/// 只在「按下 Ctrl+C 时工具栏不可见」时才弹：工具栏已经开着说明用户正在看某个选区的
+/// 这套工具，这一按是用户自己在复制，不该把窗口搬走、更不该把它的状态重置掉
+/// （旧行为会 emit selection-found，正在看的二维码预览会被顶掉）。
+/// 反过来，工具栏本来就没开时 Ctrl+C 仍要弹（键盘选词、右键复制等场景仍靠它唤出工具栏）。
+///
+/// 抽成纯函数是为了把方向钉住：写成 `toolbar_visible_at_ctrl_c`（即「开着才弹」）就会让
+/// 工具栏在用户复制时被搬到光标处并重置（二维码预览被顶掉且之后点外部关不掉），
+/// 而本来该弹出的场景反而没反应。
+fn should_present_toolbar_at_cursor(toolbar_visible_at_ctrl_c: bool) -> bool {
+    !toolbar_visible_at_ctrl_c
 }
 
 /// 处理 Ctrl+C：等待剪贴板更新，读取内容，触发选区事件
@@ -542,13 +592,33 @@ fn handle_ctrl_c(
         return;
     }
 
-    // 抑制“刚消失又弹出”竞态：Ctrl+C 按下时工具栏本已可见（用户是在已有工具栏的
-    // 情况下复制的），但在等待剪贴板更新的这 ~500ms 内用户已点击外部/Esc 把它关闭，
-    // 说明用户此刻并不想看到工具栏，检测结果不再把它弹回。
-    if toolbar_visible_at_ctrl_c && !crate::hooks::is_toolbar_visible() {
+    // 工具栏在按下 Ctrl+C 时就已可见 → 保持原状直接返回：不重新显示、不搬到光标处、
+    // 也不重发 selection-found。
+    //
+    // 为什么：工具栏开着说明用户正看着某个选区的这套工具，此时按 Ctrl+C 是他自己
+    // 在复制，而不是要换一套工具。旧实现在这种情况下仍然 emit selection-found +
+    // 在光标处 show 窗口，后果是：
+    //   ① 窗口从选区下方跳到鼠标位置（用户没要求移动）；
+    //   ② 前端监听到 selection-found 会重置到默认态并清空二维码预览，但 **不会**
+    //      调 set_qrcode_preview(false) —— 后端 qrcode_preview 标志仍为 true，之后
+    //      「点击外部即关闭」这条路径全部被忽略，工具栏只能靠 Esc 关掉
+    //      （日志里成片的 "QR code preview active, ignoring outside click" 就是这个）；
+    //   ③ 后端暂存的选区上下文会被这条 Ctrl+C 路径覆盖成**粗粒度**版本
+    //      （method=Clipboard、focus_hwnd=0、sel_start/sel_end=0），鼠标拖选拿到的那份
+    //      （UIA/Win32 的精确上下文，或带焦点控件与选区范围的剪贴板上下文）就丢了 ——
+    //      之后用替换类工具（转大写/去重/编号…）会退回剪贴板模拟、依赖键盘选区还在，更脆。
+    // 覆盖两种子情况，日志分别可辨：
+    //   - 等待剪贴板更新的这 ~500ms 内用户已经点外部/Esc 把它关掉（用户此刻并不想
+    //     看到工具栏，检测结果不该再把它弹回来）；
+    //   - 工具栏仍在（用户的复制操作不该打扰它、也不该让它退化成粗粒度上下文）。
+    if !should_present_toolbar_at_cursor(toolbar_visible_at_ctrl_c) {
         crate::utils::logger::log(
             "keyboard",
-            "Toolbar dismissed while waiting for clipboard, skipping re-show",
+            if crate::hooks::is_toolbar_visible() {
+                "Toolbar already visible at Ctrl+C, keeping it where it is"
+            } else {
+                "Toolbar dismissed while waiting for clipboard, skipping re-show"
+            },
         );
         return;
     }
@@ -590,7 +660,13 @@ fn handle_ctrl_c(
     let _ = app.emit("selection-found", &info);
 
     if let Some(win) = app.get_webview_window("toolbar") {
-        let x = cursor_pos.x;
+        // 窗口四周有投影留白（见 hooks::TOOLBAR_SHADOW_MARGIN）：容器在窗口内左上角
+        // 内缩一个留白，窗口位置要相应左移，工具栏才落在光标原位（y 不补偿，留白
+        // 只在左右与底部）。
+        let toolbar_margin =
+            (crate::hooks::TOOLBAR_SHADOW_MARGIN * win.scale_factor().unwrap_or(1.0)).round()
+                as i32;
+        let x = cursor_pos.x - toolbar_margin;
         let y = cursor_pos.y + 20;
         let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
             x, y,
@@ -694,11 +770,15 @@ unsafe fn read_clipboard_text_inner() -> Option<String> {
         return None;
     }
     let mem_size = GlobalSize(hmem);
-    let max_u16 = if mem_size > 0 {
-        (mem_size / 2).min(MAX_CLIPBOARD_U16)
-    } else {
-        MAX_CLIPBOARD_U16
-    };
+    // GlobalSize == 0 说明句柄不可信（拿不到边界）。**不能**回退成「按 MAX_CLIPBOARD_U16
+    // 一路扫到 NUL」—— 那是拿一个未知边界去读内存，越界即访问违例。合法的剪贴板文本句柄
+    // 必然取得到大小，取不到就按「剪贴板里没有文本」处理（与 clipboard 模块两处、以及
+    // quick_input.rs 的同一读法保持一致）。
+    if mem_size == 0 {
+        let _ = GlobalUnlock(hmem);
+        return None;
+    }
+    let max_u16 = (mem_size / 2).min(MAX_CLIPBOARD_U16);
     let mut len = 0usize;
     let mut p = ptr as *const u16;
     while len < max_u16 && *p != 0 {

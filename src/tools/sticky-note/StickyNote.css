@@ -69,7 +69,7 @@
   filter: saturate(0.72) brightness(0.97);
 }
 
-/* 顶栏：左色点 · 中间拖拽留白 · 右收起 */
+/* 顶栏：左抓手 · 色点 · 中间留白 · 右收起 */
 .sn-head {
   display: flex;
   align-items: center;
@@ -80,6 +80,39 @@
 
 .sn-head:active {
   cursor: grabbing;
+}
+
+/* 拖拽把手：六点抓手，常显（很淡），悬停变实。
+   视觉语言与 UtilityHub 的 .utility-hub-grip 一致；用 mask 画点、不留子元素。
+   真正的拖拽面是整个窗口（StickyNote.tsx 的 startNoteDrag），把手只负责
+   把「这里可以按住拖动」这件事说清楚。 */
+.sn-grip {
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 14px;
+  border-radius: 3px;
+  cursor: grab;
+  /* 常显但很淡：纸面要干净，同时让「这里能按住拖」一眼可见（悬停才变实） */
+  opacity: 0.35;
+  background-color: rgb(40 34 18 / 0.95);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%23000'%3E%3Ccircle cx='9' cy='5' r='2'/%3E%3Ccircle cx='15' cy='5' r='2'/%3E%3Ccircle cx='9' cy='12' r='2'/%3E%3Ccircle cx='15' cy='12' r='2'/%3E%3Ccircle cx='9' cy='19' r='2'/%3E%3Ccircle cx='15' cy='19' r='2'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%23000'%3E%3Ccircle cx='9' cy='5' r='2'/%3E%3Ccircle cx='15' cy='5' r='2'/%3E%3Ccircle cx='9' cy='12' r='2'/%3E%3Ccircle cx='15' cy='12' r='2'/%3E%3Ccircle cx='9' cy='19' r='2'/%3E%3Ccircle cx='15' cy='19' r='2'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 12px;
+  mask-size: 12px;
+  transition: opacity var(--transition-fast, 120ms ease);
+}
+
+.sn-card:hover .sn-grip {
+  opacity: 0.7;
+}
+
+.sn-grip:active {
+  cursor: grabbing;
+  opacity: 0.85;
 }
 
 .sn-colors {
@@ -260,4 +293,22 @@
   line-height: 1.4;
   text-align: center;
   overflow-wrap: anywhere;
+}
+
+/* 读取失败的重试区：读取便签遇到瞬时错误（IPC/锁竞争）时不再自毁窗口，
+   而是在窗内给一张可重试的小卡片，避免留下「看不见内容的空窗」。 */
+.sn-load-retry {
+  display: flex;
+  justify-content: center;
+  padding: 4px 10px 10px;
+}
+/* 失败卡片里的「重试」是**文字按钮**，不是 .sn-btn 默认那种 24×24 图标按钮：
+   不覆盖的话热区只有 24px、两个中文字溢出、还带着默认的 45% 透明度（看着像禁用）。 */
+.sn-load-retry .sn-btn {
+  width: auto;
+  height: auto;
+  padding: 4px 14px;
+  border-radius: 7px;
+  font-size: 12px;
+  opacity: 1;
 }

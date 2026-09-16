@@ -14,9 +14,9 @@ use windows::Win32::Foundation::{HWND, POINT};
 
 use windows::Win32::UI::WindowsAndMessaging::{
 
-    GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, IsWindow,
-    SetForegroundWindow, SetWindowDisplayAffinity, SetWindowLongPtrW, WindowFromPoint, GA_ROOT,
-    GWL_EXSTYLE, WDA_NONE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowTextW,
+    IsWindow, SetForegroundWindow, SetWindowDisplayAffinity, SetWindowLongPtrW, WindowFromPoint,
+    GA_ROOT, GWL_EXSTYLE, WDA_NONE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 use crate::automation::SelectionInfo;
@@ -88,8 +88,6 @@ static SCREENSHOT_SESSION: AtomicU64 = AtomicU64::new(0);
 static UTILITY_HUB_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 static MONITOR_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
-
-static POMODORO_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 static TIMER_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
@@ -385,6 +383,28 @@ fn wait_for_screenshot_overlay_ready(app: &tauri::AppHandle, session: u64) -> Re
 }
 
 
+/// 该工具此刻是否仍处于启用状态（用于判断会话清理能否按「会话前可见」恢复浮窗）。
+///
+/// 用户可能在截图/录屏/长截图会话进行中通过 palette 关掉某个工具（「全部关闭」会逐个
+/// 下发 `set_*_enabled(false)`），此时不该再把它按会话前状态恢复出来。
+///
+/// 读不到配置、读取出错、或遇到未登记的工具名时都按**恢复**处理：恢复只是回到会话前的
+/// 状态，属于既有行为；反倒是「不恢复」会让用户看到浮窗凭空消失这种静默回归。
+fn tool_still_enabled(app: &tauri::AppHandle, tool: &str) -> bool {
+    let Some(config) = app.try_state::<ConfigManager>() else {
+        return true;
+    };
+    let enabled = match tool {
+        "timer" => config.get_timer_enabled(),
+        "todo" => config.get_todo_enabled(),
+        "sketch" => config.get_sketch_enabled(),
+        "text-toolbar" => config.get_text_toolbar_enabled(),
+        _ => return true,
+    };
+    enabled.unwrap_or(true)
+}
+
+
 /// End a screenshot session from every exit path without destroying the configured overlay.
 fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
     // 仅会话进行中被隐藏的 orb 才按会话前状态恢复，避免把用户经托盘已隐藏的 orb
@@ -443,24 +463,33 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
     }
     // 恢复会话前可见的时钟/待办悬浮窗：缓存截取期间被临时隐藏，
     // 若会话在恢复步骤前被取消（如截屏期间按 Esc），此处兜底恢复。
+    // 但工具已被用户关掉时不再恢复（标记无条件消费，避免残留到下一次清理误判）。
     if session_active {
-        if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+            && tool_still_enabled(app, "timer")
+        {
             if let Some(timer) = app.get_webview_window("time-overlay") {
                 let _ = timer.show();
             }
         }
-        if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+            && tool_still_enabled(app, "todo")
+        {
             if let Some(todo) = app.get_webview_window("todo-overlay") {
                 let _ = todo.show();
             }
         }
     }
-    if TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.swap(false, Ordering::SeqCst) {
+    if TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.swap(false, Ordering::SeqCst)
+        && tool_still_enabled(app, "text-toolbar")
+    {
         if let Some(toolbar) = app.get_webview_window("toolbar") {
             let _ = toolbar.show();
         }
     }
-    if SKETCH_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+    if SKETCH_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+        && tool_still_enabled(app, "sketch")
+    {
         if let Some(sketch) = app.get_webview_window("sketch-overlay") {
             let _ = sketch.show();
             let _ = sketch.set_focus();
@@ -484,48 +513,282 @@ pub fn cleanup_screenshot_session(app: &tauri::AppHandle) {
 }
 
 
-/// Returns whether a foreground/root HWND belongs to one of Levitaire's own
-/// windows. A screenshot started from the palette or orb must still target
-/// the external application underneath them.
-fn is_levitaire_window(app: &tauri::AppHandle, hwnd: HWND) -> bool {
+/// 自有窗口 label 清单。两处共用同一份，避免「判定自己的窗口」与「文件对话框 owner
+/// 候选」两张清单各自漂移。
+///
+/// 两处用途都对**完整性**敏感，漏一个就出问题：
+/// - `is_own_window`：用于判断前台窗口是不是自己（截图/录屏要穿透到下层应用）；
+/// - `DialogTopmostGuard::suspend`：要取消**所有可见自有置顶窗**的置顶，漏掉的那扇
+///   正好压在文件对话框上时，用户就看不到对话框（本清单漏过 `sticky-notes-manager`
+///   与 `scroll-navigator-overlay`，两者都是 `alwaysOnTop: true`）。
+/// - `own_window_root_hwnds`：录屏「窗口识别」列表要按 HWND 排除自己。
+///
+/// 注：便利贴是动态 label（`sticky-note-<id>`），不在本清单内；它们不会作为对话框
+/// owner（草稿/待办/长截图/钉图四条路径都用固定 label 的窗口），录屏列表那条另有
+/// 标题前缀兜底（`Levitaire 便利贴`）。新增固定 label 的浮窗时**必须**补进本清单。
+pub const OWN_WINDOW_LABELS: &[&str] = &[
+    "orb",
+    "toolbar",
+    "palette",
+    "settings",
+    "tool-config",
+    "context-menu",
+    "pin-ocr",
+    "update-prompt",
+    "screenshot-overlay",
+    "recording-controls",
+    "long-capture-controls",
+    "long-capture-frame",
+    "monitor-overlay",
+    "quick-input-overlay",
+    "time-overlay",
+    "todo-overlay",
+    "sketch-overlay",
+    "utility-hub-overlay",
+    "scroll-navigator-overlay",
+    "sticky-notes-manager",
+];
+
+
+/// 某个 HWND 是否属于 Levitaire 自己的窗口（**唯一权威实现**）。
+///
+/// 判定必须**三类都覆盖**，缺一类就会漏 —— 三类都踩过：
+/// 1. `OWN_WINDOW_LABELS` 里的固定 label webview 窗口；
+/// 2. **非 webview 的原生窗**：贴图窗是 `CreateWindowExW` 建的 Win32 窗（类名
+///    `LevitairePinWindow`），`get_webview_window()` 根本找不到它；
+/// 3. **动态 label 的 webview 窗**：便利贴是 `sticky-note-<id>`，不在清单里，但标题
+///    统一以 `Levitaire` 开头 —— 用标题前缀兜底（与 `recording::window_detect::
+///    enumerate_windows` 的排除口径保持一致，两处不能各拿一套）。
+///
+/// 调用方（都要求「自家窗不算外部窗」）：
+/// - `start_screenshot_inner` 取「用户的前台应用」作为长截图的恢复目标时；
+/// - 滚动导航的 `is_usable_target` —— 漏判的后果是用户点一下自己的贴图或便利贴，
+///   目标就被永久粘成自家窗口，之后面板每个按钮都**静默失效**（不报错、不位移）。
+///
+/// ⚠️ 不要再在别处复制一份 label 清单（`scroll_navigation.rs` 曾经自带 19 项副本，
+/// 少了 `sticky-notes-manager`）。守卫 `own_window_detection_is_single_sourced`。
+pub fn is_own_window(app: &tauri::AppHandle, hwnd: HWND) -> bool {
     if hwnd.0.is_null() {
         return false;
     }
     let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
     let root = if root.0.is_null() { hwnd } else { root };
-    [
-        "orb",
-        "toolbar",
-        "palette",
-        "settings",
-        "tool-config",
-        "context-menu",
-        "pin-ocr",
-        "update-prompt",
-        "screenshot-overlay",
-        "recording-controls",
-        "long-capture-controls",
-        "long-capture-frame",
-        "monitor-overlay",
-        "pomodoro-overlay",
-        "quick-input-overlay",
-        "time-overlay",
-        "todo-overlay",
-        "sketch-overlay",
-        "utility-hub-overlay",
-    ]
-    .iter()
-    .filter_map(|label| app.get_webview_window(label))
-    .filter_map(|window| window.hwnd().ok())
-    .map(|window| {
-        let window_root = unsafe { GetAncestor(window, GA_ROOT) };
-        if window_root.0.is_null() {
-            window
-        } else {
-            window_root
+
+    // ③ 标题前缀：覆盖动态 label 的 webview 窗（便利贴）与任何自有原生窗。
+    if window_text_starts_with(root, "Levitaire") {
+        return true;
+    }
+    // ② 贴图窗：用户可同时贴多张、标题不可靠，按**窗口类名**判定。
+    if window_class_equals(root, "LevitairePinWindow") {
+        return true;
+    }
+    // ① 固定 label 的 webview 窗口。
+    OWN_WINDOW_LABELS
+        .iter()
+        .filter_map(|label| app.get_webview_window(label))
+        .filter_map(|window| window.hwnd().ok())
+        .map(|window| {
+            let window_root = unsafe { GetAncestor(window, GA_ROOT) };
+            if window_root.0.is_null() {
+                window
+            } else {
+                window_root
+            }
+        })
+        .any(|window| window.0 == root.0)
+}
+
+
+/// 桌面 / 任务栏等 shell 窗口从来不是可用目标。
+///
+/// 选中它们只会让调用方进入「按钮都正常、点了没反应」的状态，而这还是**持久**的：
+/// 用户随手点一下桌面（用来收起面板之类）就会踩到。
+pub fn is_shell_window(hwnd: HWND) -> bool {
+    let mut buffer = [0u16; 64];
+    let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    if length <= 0 {
+        return false;
+    }
+    matches!(
+        String::from_utf16_lossy(&buffer[..length as usize]).as_str(),
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    )
+}
+
+
+/// 能当作「外部目标窗口」的窗口：存在 + 不属于 Levitaire 自己 + 不是桌面/任务栏。
+///
+/// 调用方：滚动导航的目标绑定、通用工具·窗口置顶的点选与清理。两处必须同口径 ——
+/// 曾各自持有一份实现，其中一份漏了动态 label 的便利贴，用户点一下自己的窗口就把
+/// 目标永久粘成了自家窗口。
+pub fn is_usable_target(app: &tauri::AppHandle, hwnd: HWND) -> bool {
+    !hwnd.is_invalid()
+        && unsafe { IsWindow(Some(hwnd)).as_bool() }
+        && !is_own_window(app, hwnd)
+        && !is_shell_window(hwnd)
+}
+
+
+/// 窗口标题是否以给定前缀开头（无标题返回 false）。
+fn window_text_starts_with(hwnd: HWND, prefix: &str) -> bool {
+    let mut buffer = [0u16; 512];
+    let length = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+    if length <= 0 {
+        return false;
+    }
+    String::from_utf16_lossy(&buffer[..length as usize]).starts_with(prefix)
+}
+
+
+/// 窗口类名是否**完全等于**给定值。
+fn window_class_equals(hwnd: HWND, class_name: &str) -> bool {
+    let mut buffer = [0u16; 256];
+    let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    if length <= 0 {
+        return false;
+    }
+    String::from_utf16_lossy(&buffer[..length as usize]) == class_name
+}
+
+
+/// 当前自有窗口的根 HWND（用于把「自己的窗口」排除出录屏的窗口识别列表）。
+///
+/// 便利贴不在 `OWN_WINDOW_LABELS` 里（动态 label），它们的标题统一以 `Levitaire`
+/// 开头，调用侧另有标题前缀兜底 —— 两条合起来才不会漏（`pin-ocr` 的标题是
+/// `Pin OCR`，只靠标题前缀就会漏，这正是本函数的用途）。
+pub fn own_window_root_hwnds(app: &tauri::AppHandle) -> Vec<isize> {
+    OWN_WINDOW_LABELS
+        .iter()
+        .filter_map(|label| app.get_webview_window(label))
+        .filter_map(|window| window.hwnd().ok())
+        .map(|hwnd| {
+            let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+            if root.0.is_null() {
+                hwnd.0 as isize
+            } else {
+                root.0 as isize
+            }
+        })
+        .collect()
+}
+
+
+/// 隐藏文字工具栏，并把**后端侧**的工具栏状态一并复位（所有非前端主动关闭的路径都要走它）。
+///
+/// 只调 `window.hide()` 会漏掉 `qrcode_preview` 标志：该标志为 true 时鼠标钩子会忽略
+/// 「点击工具栏外部」这一路径（`mouse.rs` 里显式 continue），于是下次工具栏再弹出时
+/// **点外部关不掉**，只能按 Esc。同时这里补发 `toolbar-hidden`，让前端把 QR 预览态
+/// 一并复位（否则窗口隐藏后 React 仍停在预览态，重新弹出时会带着旧面板）。
+pub fn hide_toolbar_and_reset_state(app: &tauri::AppHandle) {
+    crate::hooks::mouse::set_qrcode_preview(false);
+    if let Some(toolbar) = app.get_webview_window("toolbar") {
+        let _ = toolbar.hide();
+    }
+    crate::hooks::set_toolbar_visible(false);
+    let _ = app.emit("toolbar-hidden", ());
+}
+
+
+/// 打开原生文件对话框期间的置顶守卫（`Drop` 时自动恢复）。
+///
+/// **为什么必须有它**：本项目的浮窗几乎都是 `alwaysOnTop`，而 rfd 在没有
+/// `set_parent` 时给 `IFileDialog::Show` 传的是 NULL owner
+/// （rfd 源码：`parent.unwrap_or(std::ptr::null_mut())`）。实测（Z 序 + 像素采样）：
+/// 置顶窗会把**无主**的对话框完全盖住，且把它设为前台窗口也抬不上来
+/// ⇒ 用户点「保存」后看不到任何反应。反过来，把 owner 指向**当时可见的自有置顶窗**
+/// 时对话框会显示在该 owner 之上；但若挡住它的其实是另一扇（前台）置顶窗，
+/// 光设 owner 仍然不够 ⇒ 所以这里同时**临时取消所有可见自有窗的置顶**。
+///
+/// 「所有可见自有窗」有**三类**，缺一类都会漏（三类都踩过）：
+/// 1. `OWN_WINDOW_LABELS` 里的固定 label webview 窗；
+/// 2. 便利贴（动态 label `sticky-note-<id>`，含 `alwaysOnTop`）；
+/// 3. 贴图窗（原生 `WS_EX_TOPMOST`，不归 tao 管，只能自己 `SetWindowPos`）。
+///
+/// 用法（必须让 guard 活到对话框关闭之后）：
+/// ```ignore
+/// let guard = DialogTopmostGuard::suspend(&app, &["sketch-overlay", "screenshot-overlay"]);
+/// let mut dialog = rfd::FileDialog::new();
+/// if let Some(owner) = guard.owner() { dialog = dialog.set_parent(owner); }
+/// let path = dialog.save_file();
+/// drop(guard); // 恢复置顶（失败路径也要走到）
+/// ```
+pub struct DialogTopmostGuard {
+    owner: Option<tauri::WebviewWindow>,
+    suspended: Vec<tauri::WebviewWindow>,
+    /// 被临时取消置顶的原生贴图窗（恢复时要逐个置顶回去）。
+    suspended_pins: Vec<isize>,
+}
+
+impl DialogTopmostGuard {
+    /// `preferred`：按优先级给出「本次流程自己那扇窗」的 label；命中第一个可见者作为
+    /// owner，都没有就退回最后一扇可见自有窗。没有任何可见自有窗时 owner 为 None
+    /// （此时没有自有窗遮挡，对话框照常可见）。
+    pub fn suspend(app: &tauri::AppHandle, preferred: &[&str]) -> Self {
+        // owner 仍是「固定 label 清单里的可见窗」—— 不便让便利贴当 owner（它是个小窗，
+        // 位置随机），保持既有行为。
+        let visible: Vec<tauri::WebviewWindow> = OWN_WINDOW_LABELS
+            .iter()
+            .filter_map(|label| app.get_webview_window(label))
+            .filter(|window| window.is_visible().unwrap_or(false))
+            .collect();
+        let owner = preferred
+            .iter()
+            .find_map(|label| visible.iter().find(|window| window.label() == *label).cloned())
+            .or_else(|| visible.last().cloned());
+
+        // 取消置顶的范围要比 owner 候选**更宽**：便利贴（动态 label）与贴图窗（原生窗）
+        // 都可能正好压在对话框上，而它们都不在固定 label 清单里。
+        let note_labels: Vec<String> = app
+            .try_state::<crate::sticky_note::NoteStore>()
+            .and_then(|store| store.list().ok())
+            .map(|notes| {
+                notes
+                    .iter()
+                    .map(|note| crate::sticky_note::note_window_label(&note.id))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut suspended = Vec::new();
+        for window in visible.into_iter().chain(
+            note_labels
+                .iter()
+                .filter_map(|label| app.get_webview_window(label)),
+        ) {
+            // 只动「当前确实是置顶」的窗口：恢复时无条件置顶会把本来就非置顶的窗口改坏。
+            if window.is_visible().unwrap_or(false)
+                && window.is_always_on_top().unwrap_or(false)
+                && window.set_always_on_top(false).is_ok()
+            {
+                suspended.push(window);
+            }
         }
-    })
-    .any(|window| window.0 == root.0)
+
+        let suspended_pins = crate::screenshot::pin::topmost_pin_hwnds();
+        crate::screenshot::pin::set_pins_topmost(&suspended_pins, false);
+
+        Self {
+            owner,
+            suspended,
+            suspended_pins,
+        }
+    }
+
+    /// 供 `rfd::FileDialog::set_parent` 使用；None 表示没有合适的自有窗。
+    pub fn owner(&self) -> Option<&tauri::WebviewWindow> {
+        self.owner.as_ref()
+    }
+}
+
+impl Drop for DialogTopmostGuard {
+    fn drop(&mut self) {
+        // 贴图窗先恢复（原生 SetWindowPos 是同步的），webview 窗的 `set_always_on_top`
+        // 由 tao 异步投递，顺序对结果无影响。
+        crate::screenshot::pin::set_pins_topmost(&self.suspended_pins, true);
+        for window in &self.suspended {
+            let _ = window.set_always_on_top(true);
+        }
+    }
 }
 
 
@@ -739,7 +1002,7 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     // the region has been confirmed.
     let foreground = unsafe { GetForegroundWindow() };
     let foreground_target = if unsafe { IsWindow(Some(foreground)).as_bool() }
-        && !is_levitaire_window(&app, foreground)
+        && !is_own_window(&app, foreground)
     {
         let root = unsafe { GetAncestor(foreground, GA_ROOT) };
         if root.0.is_null() {
@@ -892,9 +1155,9 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         }
     }
     if toolbar_was_visible {
-        if let Some(w) = app.get_webview_window("toolbar") {
-            let _ = w.hide();
-        }
+        // 统一入口：隐藏 + 复位后端侧状态（qrcode_preview 标志）＋通知前端复位预览态。
+        // 只 `hide()` 会让标志残留，下次工具栏弹出后「点外部关不掉」，只能 Esc。
+        hide_toolbar_and_reset_state(&app);
     }
     if timer_was_visible {
         if let Some(w) = app.get_webview_window("time-overlay") {
@@ -1273,7 +1536,6 @@ fn default_orb_position(win_w: i32, win_h: i32) -> Option<(i32, i32)> {
 /// 计算悬浮窗的默认（未记忆）位置。
 /// - orb：主屏工作区右下角
 /// - monitor-overlay：跟随鼠标（偏移 8px，多显示器边界钳制）
-/// - pomodoro-overlay：创建时默认的左上角 (100, 100)
 /// - time-overlay / todo-overlay：创建时默认的左上角 (100, 100)
 ///
 /// 其余未知窗口一律回退 (100, 100)。
@@ -1295,7 +1557,7 @@ fn default_window_position(window_id: &str, win_w: i32, win_h: i32) -> (i32, i32
 // ─── 便利贴 ────────────────────────────────────────────────────
 
 /// 通知管理窗刷新列表（便签窗口不订阅，避免自己打字被刷新打断）。
-fn notify_sticky_notes_changed(app: &tauri::AppHandle) {
+pub fn notify_sticky_notes_changed(app: &tauri::AppHandle) {
     let _ = app.emit_to(
         "sticky-notes-manager",
         "sticky-notes-changed",
@@ -1414,9 +1676,8 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     if let Some(w) = app.get_webview_window("orb") {
         let _ = w.hide();
     }
-    if let Some(w) = app.get_webview_window("toolbar") {
-        let _ = w.hide();
-    }
+    // 统一入口：隐藏 + 复位后端侧状态（qrcode_preview 残留会让下次弹出后点外部关不掉）
+    hide_toolbar_and_reset_state(&app);
     if let Some(w) = app.get_webview_window("time-overlay") {
         let _ = w.hide();
     }
@@ -1575,6 +1836,10 @@ fn destroy_recording_controls_window(app: &tauri::AppHandle) {
 
 
 fn set_recording_capture_protection(app: &tauri::AppHandle) {
+    // ⚠ 这里**只**处理这两扇 WebView2 窗，不要改成"遍历所有自有窗统一设 WDA_NONE"：
+    // 全屏录制的原生指示层（`recording::indicator`）正是靠 WDA_EXCLUDEFROMCAPTURE
+    // 才做到"用户看得见、成片里没有"，被改成 WDA_NONE 就会重新被 BitBlt 录进视频。
+    //
     // The selection outline and mask sit outside the recorded region. Applying
     // WDA_EXCLUDEFROMCAPTURE to this transparent WebView2 window makes its
     // visible content disappear on some Windows versions, so keep it visible.
@@ -1603,14 +1868,17 @@ async fn save_gif_with_dialog(
     bytes: &[u8],
     filename: &str,
 ) -> Result<bool, String> {
+    // 与 save_image 同理：仅 set_parent 不足以防止「另一扇前台置顶窗盖住对话框」，
+    // 统一走 DialogTopmostGuard（取可见 overlay 作 owner + 临时取消自有置顶窗的置顶）。
+    let guard = DialogTopmostGuard::suspend(app, &["screenshot-overlay"]);
     let mut dialog = rfd::FileDialog::new()
         .set_file_name(filename)
         .add_filter("GIF 动图", &["gif"]);
-    if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
-        dialog = dialog.set_parent(&overlay);
+    if let Some(owner) = guard.owner() {
+        dialog = dialog.set_parent(owner);
     }
     let bytes = bytes.to_vec();
-    tokio::task::spawn_blocking(move || match dialog.save_file() {
+    let result = tokio::task::spawn_blocking(move || match dialog.save_file() {
         Some(path) => {
             std::fs::write(&path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
             Ok(true)
@@ -1618,7 +1886,9 @@ async fn save_gif_with_dialog(
         None => Ok(false),
     })
     .await
-    .map_err(|e| format!("任务执行失败: {}", e))?
+    .map_err(|e| format!("任务执行失败: {}", e))?;
+    drop(guard);
+    result
 }
 
 
@@ -1627,14 +1897,15 @@ async fn save_video_file_with_dialog(
     source: &std::path::Path,
     filename: &str,
 ) -> Result<bool, String> {
+    let guard = DialogTopmostGuard::suspend(app, &["screenshot-overlay"]);
     let mut dialog = rfd::FileDialog::new()
         .set_file_name(filename)
         .add_filter("MP4 视频", &["mp4"]);
-    if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
-        dialog = dialog.set_parent(&overlay);
+    if let Some(owner) = guard.owner() {
+        dialog = dialog.set_parent(owner);
     }
     let source = source.to_path_buf();
-    tokio::task::spawn_blocking(move || match dialog.save_file() {
+    let result = tokio::task::spawn_blocking(move || match dialog.save_file() {
         Some(path) => {
             std::fs::copy(&source, &path).map_err(|e| format!("写入文件失败: {}", e))?;
             Ok(true)
@@ -1642,7 +1913,9 @@ async fn save_video_file_with_dialog(
         None => Ok(false),
     })
     .await
-    .map_err(|e| format!("任务执行失败: {}", e))?
+    .map_err(|e| format!("任务执行失败: {}", e))?;
+    drop(guard);
+    result
 }
 
 
@@ -1670,14 +1943,19 @@ fn cancel_recording_select_inner(app: tauri::AppHandle) -> Result<(), String> {
             let _ = orb.set_always_on_top(true);
         }
     }
-    // 恢复会话前可见的时钟/待办悬浮窗（与截图会话清理保持一致）
+    // 恢复会话前可见的时钟/待办悬浮窗（与截图会话清理保持一致）。
+    // 工具已被用户关掉（例如 palette 的「全部关闭」）时不再恢复——标记无条件消费。
     if session_active {
-        if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        if TIMER_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+            && tool_still_enabled(&app, "timer")
+        {
             if let Some(timer) = app.get_webview_window("time-overlay") {
                 let _ = timer.show();
             }
         }
-        if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        if TODO_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+            && tool_still_enabled(&app, "todo")
+        {
             if let Some(todo) = app.get_webview_window("todo-overlay") {
                 let _ = todo.show();
             }
@@ -1735,6 +2013,123 @@ fn sync_quick_input_trigger(config: &ConfigManager) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// 工具级开关的契约：`set_<tool>_enabled(false)` 必须收起自己的窗口。
+    ///
+    /// 这条契约既没有编译期保护、也没有运行时测试（需要 AppHandle），漏写的症状只有用户看得到：
+    /// 「点了全部关闭，窗口还在」（通用工具就这么漏过一次）。这里直接扫描源码把它锁住。
+    #[test]
+    fn test_every_tool_toggle_closes_its_window_when_disabled() {
+        const SOURCES: &[&str] = &[
+            include_str!("tools.rs"),
+            include_str!("screenshot.rs"),
+            include_str!("sketch.rs"),
+            include_str!("text.rs"),
+            include_str!("monitor.rs"),
+            include_str!("timer.rs"),
+            include_str!("todo.rs"),
+            include_str!("recording.rs"),
+            include_str!("quick_input.rs"),
+            include_str!("sticky.rs"),
+        ];
+        // 收窗动作：隐藏窗口 / 销毁窗口 / 取消会话 / 收起转盘 / 关闭全部贴图 /
+        // 走统一入口隐藏文字工具栏（内含 hide + 状态复位）。
+        const CLOSING_ACTIONS: &[&str] = &[
+            ".hide()",
+            "hide_utility_hub",
+            "hide_toolbar_and_reset_state",
+            "destroy",
+            ".cancel(",
+            "end_wheel",
+            "close_all_pins",
+        ];
+        // 与前端 registry 的 BACKEND_TOOLS 一一对应的工具级开关
+        const TOGGLE_FNS: &[&str] = &[
+            "set_sketch_enabled",
+            "set_text_toolbar_enabled",
+            "set_screenshot_enabled",
+            "set_system_monitor_enabled",
+            "set_timer_enabled",
+            "set_todo_enabled",
+            "set_recording_enabled",
+            "set_quick_input_enabled",
+            "set_sticky_notes_enabled",
+            "set_utility_hub_enabled",
+        ];
+        for name in TOGGLE_FNS {
+            let body = SOURCES
+                .iter()
+                .find_map(|source| extract_fn_body(source, name))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} 未在上述 commands 模块中找到：函数被移动时请把新文件加进 SOURCES"
+                    )
+                });
+            // 必须先剥掉整行注释：把收窗调用注释掉（而不是删掉）在文本层面看起来「还在」，
+            // 那样这个守卫就形同虚设。
+            let code = strip_line_comments(body);
+            assert!(
+                CLOSING_ACTIONS.iter().any(|action| code.contains(action)),
+                "{name} 的禁用分支没有收起自己的窗口：palette 的「全部关闭」会关不掉它"
+            );
+        }
+    }
+
+    /// 契约：程序性夹取产生的位移不得被当成「用户摆的位置」写进位置记忆。
+    ///
+    /// 前端 `persistWindowPositionOnMove` 监听 `onMoved` —— **程序性移动同样会触发** ——
+    /// 并在 300ms 后写回记忆。贴屏幕右/下沿的窗口在内容变高后被夹取上移，若那个被挤过的
+    /// 位置被记住，内容缩回后窗口也不回落，几次之后就累积成肉眼可见的位置漂移。
+    /// `reset_window_position` 早就为程序性移动挂了 1500ms 抑制，夹取这条路径必须同样挂上。
+    #[test]
+    fn clamp_window_suppresses_position_memory_writeback() {
+        let body = extract_fn_body(include_str!("window.rs"), "clamp_window_to_workarea")
+            .expect("clamp_window_to_workarea 不见了：本契约依赖它仍在 commands/window.rs");
+        let code = strip_line_comments(body);
+        let suppress = code
+            .find("position_save_suppress()")
+            .expect("夹取窗口必须为本次移动挂上位置记忆抑制（否则被挤过的位置会被永久记住）");
+        let move_it = code
+            .find(".set_position(")
+            .expect("clamp_window_to_workarea 应当移动窗口");
+        assert!(
+            suppress < move_it,
+            "抑制必须在 set_position 之前落好，否则这次移动仍会被前端写回记忆"
+        );
+    }
+
+    /// 取出 `fn <name>` 的函数体（按大括号配平），供上一条契约测试做源码扫描。
+    fn extract_fn_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+        let start = source.find(&format!("fn {name}"))?;
+        let open = source[start..].find('{')? + start;
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[open..open + offset]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// 剥掉整行注释，避免「注释掉的代码」被当成有效调用。
+    /// 只在 `//` 之前全是空白时才判定为注释行——否则会误伤字符串里的 `https://`。
+    fn strip_line_comments(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(index) if line[..index].trim().is_empty() => "",
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// 「恢复默认位置」时，时钟/待办窗口与番茄钟一致回退到创建默认 (100, 100)，
     /// 与前端 ensureTimerWindow/ensureTodoWindow 的 x/y 初始值保持一致。
     #[test]
@@ -1779,4 +2174,194 @@ mod tests {
             "https://example.com"
         );
     }
+
+    /// 每个 `rfd` 文件对话框调用点都必须先处理「置顶 / owner」。
+    ///
+    /// 为什么这条要变成可执行约束：本项目的浮窗几乎都是 `alwaysOnTop`，而 rfd 在没有
+    /// parent 时给 `IFileDialog::Show` 传的是 **NULL owner**（`parent.unwrap_or(null)`）。
+    /// 实测（Z 序 + 像素采样）：置顶窗会把**无主**对话框完全盖住，把它设为前台也抬不上来
+    /// ⇒ 用户点「保存」后看不到任何反应，很可能以为程序卡死。仅设 owner 也不够：挡住
+    /// 对话框的可能是**另一扇**前台置顶窗，所以还必须临时取消自有置顶窗的置顶。
+    ///
+    /// 允许的两种写法（二者都做在打开对话框之前）：
+    /// ① 有 `AppHandle`：`DialogTopmostGuard::suspend(...)`；
+    /// ② 裸 HWND 窗口（贴图）：`apply_window_topmost(hwnd, ...)`。
+    #[test]
+    fn every_file_dialog_suspends_topmost_first() {
+        // (文件名, 源码, 该文件里预期的 rfd 调用点数)
+        let files: [(&str, &str, usize); 5] = [
+            ("commands/mod.rs", include_str!("mod.rs"), 2),
+            ("commands/screenshot.rs", include_str!("screenshot.rs"), 1),
+            ("commands/todo.rs", include_str!("todo.rs"), 2),
+            ("commands/long_capture.rs", include_str!("long_capture.rs"), 1),
+            ("screenshot/pin.rs", include_str!("../screenshot/pin.rs"), 1),
+        ];
+        for (name, raw, expected) in files {
+            // 只扫生产区：本用例自身的源码里也含 `rfd::FileDialog::new()` 这个匹配串，
+            // 不把测试模块切掉就会把自己扫进去、永远报红。
+            let production = raw.split("\n#[cfg(test)]").next().unwrap_or(raw);
+            // 先剥整行注释：把守卫调用注释掉（而不是删掉）在文本层面看起来「还在」，
+            // 不剥注释的守卫会被这种变异骗过。
+            let src = strip_line_comments(production);
+            let mut found = 0usize;
+            let mut rest = src.as_str();
+            while let Some(index) = rest.find("rfd::FileDialog::new()") {
+                found += 1;
+                // 只在该调用所在的函数体内找守卫：不能因为「文件别处有守卫」就放行。
+                let before = &rest[..index];
+                let fn_start = ["\npub async fn ", "\npub fn ", "\nasync fn ", "\nunsafe fn ", "\nfn "]
+                    .iter()
+                    .filter_map(|pat| before.rfind(pat))
+                    .max()
+                    .unwrap_or(0);
+                let body_prefix = &before[fn_start..];
+                assert!(
+                    body_prefix.contains("DialogTopmostGuard::suspend(")
+                        || body_prefix.contains("apply_window_topmost("),
+                    "{name} 里的 rfd 对话框没有先处理置顶/owner —— 它会被本项目的置顶窗\
+                     完全盖住（用户点保存没有任何反应）"
+                );
+                rest = &rest[index + 1..];
+            }
+            // 反向断言：调用点被挪走或 include_str! 路径写错时不能静默通过。
+            assert_eq!(
+                found, expected,
+                "{name} 里扫到 {found} 处 rfd 调用，预期 {expected} —— 守卫的扫描面已失效"
+            );
+        }
+    }
+
+    /// 前端 `ToolWindowLabel` 里的每个浮窗都必须出现在 `OWN_WINDOW_LABELS` 中。
+    ///
+    /// 这份清单有三处消费者，漏一个的后果都是用户可见的：`DialogTopmostGuard` 不会
+    /// 取消那扇窗的置顶（它正好压在文件对话框上时，用户点保存看不到任何反应）、
+    /// `is_own_window` 会把自家窗误判成外部窗口、录屏列表会把它当成可录目标。
+    /// 历史上就漏过 `sticky-notes-manager` 与 `scroll-navigator-overlay`（两者都是
+    /// `alwaysOnTop: true`），所以这里钉成可执行约束 —— 新增浮窗时前端加一行、
+    /// 这里就会报红提醒补 Rust 侧。
+    #[test]
+    fn own_window_labels_cover_frontend_tool_windows() {
+        let ts = include_str!("../../../src/utils/toolWindows.ts");
+        // 剥整行注释后再解析：TS 里把某一项注释掉（`// | "xxx"`）时，它是**真的不在**
+        // 联合类型里了，但裸文本匹配仍会把它提取出来 → `contains` 恰好命中时假绿。
+        // 剥注释后注释行变空串，其中的 `"…"` 自然不会被扫到。
+        let ts = strip_line_comments(ts);
+        let start = ts
+            .find("type ToolWindowLabel =")
+            .expect("未找到 ToolWindowLabel 定义（被改名/移动时请同步本守卫）");
+        let rest = &ts[start..];
+        let end = rest.find(';').expect("ToolWindowLabel 定义未以 `;` 结束");
+        let block = &rest[..end];
+
+        let mut checked = 0usize;
+        let mut cursor = 0usize;
+        while let Some(open_rel) = block[cursor..].find('"') {
+            let open = cursor + open_rel;
+            let Some(close_rel) = block[open + 1..].find('"') else {
+                break;
+            };
+            let label = &block[open + 1..open + 1 + close_rel];
+            cursor = open + 1 + close_rel + 1;
+            assert!(
+                OWN_WINDOW_LABELS.contains(&label),
+                "前端 ToolWindowLabel 里的 `{label}` 不在 OWN_WINDOW_LABELS 中：新增自有浮窗\
+                 必须补进该清单，否则文件对话框会被它挡住、录屏也会把它当成外部窗口"
+            );
+            checked += 1;
+        }
+        // 反向断言：解析面失效（类型改名、改成单行联合等）时不能静默通过。
+        assert!(
+            checked >= 13,
+            "只从 ToolWindowLabel 提取到 {checked} 个 label，预期 ≥13 —— 守卫的解析面已失效"
+        );
+    }
+
+    /// 自有窗口的判定只能有**一处**实现（三类窗口都必须覆盖）。
+    ///
+    /// 历史上漂移过三次：`commands` 里那份清单（当时叫 `is_levitaire_window`，现
+    /// `is_own_window`）漏过 `sticky-notes-manager` 与 `scroll-navigator-overlay`；
+    /// `scroll_navigation.rs` 干脆自带了一份 19 项副本。
+    /// 漏判的后果都是用户可见的：文件对话框被自家置顶窗挡住、滚动导航把自己当目标
+    /// （点一下贴图/便利贴之后按钮全部静默失效）、截图目标是自家窗口。
+    #[test]
+    fn own_window_detection_is_single_sourced() {
+        // ① label 清单只能定义一次。
+        let files: [(&str, &str); 3] = [
+            ("commands/mod.rs", include_str!("mod.rs")),
+            (
+                "scroll_navigation.rs",
+                include_str!("../scroll_navigation.rs"),
+            ),
+            (
+                "recording/window_detect.rs",
+                include_str!("../recording/window_detect.rs"),
+            ),
+        ];
+        let declared: Vec<&str> = files
+            .iter()
+            .filter(|(_, src)| src.contains("const OWN_WINDOW_LABELS"))
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(
+            declared,
+            vec!["commands/mod.rs"],
+            "OWN_WINDOW_LABELS 必须只在 commands/mod.rs 单点定义"
+        );
+
+        // ② 别处不得再逐项列举自有窗口 label（改用 `commands::is_own_window`）。
+        let scroll = strip_line_comments(include_str!("../scroll_navigation.rs"));
+        for label in [
+            "\"scroll-navigator-overlay\"",
+            "\"screenshot-overlay\"",
+            "\"utility-hub-overlay\"",
+        ] {
+            assert!(
+                !scroll.contains(label),
+                "scroll_navigation.rs 里又出现了自有窗口 label {label} —— 不要再维护第二份清单"
+            );
+        }
+
+        // ③ 权威实现本身必须覆盖三类：webview 清单 / 原生贴图窗 / 标题前缀兜底。
+        //
+        // 只看**生产区**且剥掉整行注释后的代码。本用例自己就写在 mod.rs 里，下面这三个
+        // 字符串字面量也在本函数源码中 —— 直接拿 `include_str!("mod.rs")` 断言
+        // `contains(...)` 会**自己满足自己**、恒为真（等于没写，实测过）。
+        let whole = strip_line_comments(include_str!("mod.rs"));
+        let production = whole.split("\n#[cfg(test)]").next().unwrap_or("");
+        assert!(
+            !production.contains("fn own_window_detection_is_single_sourced")
+                && !production.is_empty(),
+            "没能把测试模块切出去（`#[cfg(test)]` 的写法变了？）—— 这会让下面的断言恒成立"
+        );
+        for needle in [
+            "OWN_WINDOW_LABELS",
+            "LevitairePinWindow",
+            "window_text_starts_with",
+        ] {
+            assert!(
+                production.contains(needle),
+                "is_own_window 缺少一类判定：{needle} —— 贴图窗是原生窗、便利贴是动态 label，\
+                 只查 webview 清单都会漏"
+            );
+        }
+
+        // ④ 文件对话框期间「取消置顶」的范围必须与 ③ 同样覆盖三类，否则用户钉在屏幕上的
+        // 截图 / 便签正好压在对话框上时，对话框照样被挡住（与「只设 owner」是同一个坑）。
+        let anchor = production
+            .find("pub fn suspend(app: &tauri::AppHandle")
+            .expect("DialogTopmostGuard::suspend 被改名/移走了 —— 请同步本守卫");
+        let rest = &production[anchor..];
+        let end = rest
+            .find("\n    }\n")
+            .expect("解析不到 suspend 的函数体结束位置");
+        let body = &rest[..end];
+        for needle in ["note_window_label(", "topmost_pin_hwnds(", "set_pins_topmost("] {
+            assert!(
+                body.contains(needle),
+                "DialogTopmostGuard::suspend 漏了一类自有置顶窗：{needle} —— 固定 label 清单、\
+                 便利贴（动态 label）、贴图窗（原生 WS_EX_TOPMOST）三类都要取消置顶"
+            );
+        }
+    }
+
 }

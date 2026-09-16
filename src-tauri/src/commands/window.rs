@@ -7,6 +7,15 @@ pub fn copy_text(text: String, clipboard: State<'_, ClipboardManager>) -> Result
 }
 
 
+/// 读取剪贴板文本，供应用自绘的文本右键菜单「粘贴」使用
+/// （见 src/utils/textContextMenu.ts）。
+/// 剪贴板为空或内容不是文本时返回空字符串——这是正常情况（用户可能复制的是图片）。
+#[tauri::command]
+pub fn clipboard_read_text(clipboard: State<'_, ClipboardManager>) -> Result<String, String> {
+    clipboard.get_text().map_err(|e| e.to_string())
+}
+
+
 #[tauri::command]
 pub fn show_orb(app: tauri::AppHandle) -> Result<(), String> {
     if !is_orb_ready() {
@@ -50,6 +59,12 @@ pub fn toggle_orb(app: tauri::AppHandle) -> Result<(), String> {
 
 
 #[tauri::command]
+pub fn harden_webview_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    crate::webview_hardening::harden(&window)
+}
+
+
+#[tauri::command]
 pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
     // 用 tokio Mutex 保护"检查+创建+注册关闭拦截"整个流程，防止快速双击竞态
     let _init_guard = SETTINGS_INIT_LOCK.lock().await;
@@ -74,6 +89,15 @@ pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
                     .background_color(tauri::webview::Color(0, 0, 0, 0))
                     .resizable(true)
                     .min_inner_size(520.0, 420.0)
+                    // Tauri 的拖放处理器默认启用：Windows 上它会把 WebView 的拖放事件接管走
+                    // （改走 OLE + tauri://drag-*），页面内 HTML5 拖拽的 dragstart/dragover
+                    // 一个都不会触发。tauri 2.11 该方法的文档写得很直白：
+                    // "Disabling the drag and drop handler. This is required to use
+                    //  HTML5 drag and drop APIs on the frontend on Windows."
+                    // 设置页的「文字工具栏按钮顺序」与「快速输入预设词」都靠 HTML5 拖拽排序，
+                    // 不关掉就会表现为「提示写了可拖拽，实际拖不动」。
+                    // 代价仅为失去系统文件拖入的真实路径，而本应用未使用任何原生拖放事件。
+                    .disable_drag_drop_handler()
                     .build()
                     .map_err(|e| format!("创建 settings 窗口失败: {}", e))?;
             win
@@ -129,6 +153,9 @@ pub async fn show_tool_config(app: tauri::AppHandle) -> Result<(), String> {
                 .background_color(tauri::webview::Color(0, 0, 0, 0))
                 .resizable(true)
                 .min_inner_size(520.0, 420.0)
+                // 与 settings 窗口同理：不关掉原生拖放，工具配置页的
+                // 「功能按钮」顺序就收不到 HTML5 拖拽事件，表现为写了可拖拽却拖不动。
+                .disable_drag_drop_handler()
                 .build()
                 .map_err(|e| format!("创建工具配置窗口失败: {}", e))?
         }
@@ -375,6 +402,34 @@ pub fn check_hotkey_conflicts(
 }
 
 
+/// palette 面板窗口四周的透明留白（逻辑像素）。
+///
+/// 窗口尺寸 = 视觉面板 + 留白。留白是给面板的 CSS 投影展开用的：窗口尺寸若等于
+/// 面板尺寸，投影没有展开空间，只在面板 18px 圆角的「缺口」里露出一小块，并被
+/// 窗口边界硬切成直角（四个角各一块直角残影）。详见 ToolPalette.css 的 .palette-stage。
+///
+/// 留白参与窗口坐标，因此下面的锚定与边界翻转都要扣掉它，否则面板相对悬浮球
+/// 会整体偏移一个留白（首次打开时表现为「间距比设定的 8px 大了 20px」）。
+///
+/// ⚠️ 必须与 `.palette-stage { padding }` 保持一致，改一处必须同时改另一处。
+const PALETTE_SHADOW_MARGIN: f64 = 20.0;
+
+
+/// palette 面板的视觉尺寸（逻辑像素），**不含**四周投影留白。
+///
+/// 只用于首次创建时的初始窗口尺寸，以及「首次打开」的锚定/边界翻转判断；
+/// 前端挂载后会按实测内容尺寸重新 setSize 覆盖。写在这里是为了首帧就给出接近
+/// 真实的值，避免窗口先小后大的跳变，也让右侧边界翻转判断（x + pw 是否越界）
+/// 不会因为用了过小的宽度而漏判。
+///
+/// ⚠️ 必须与 `.palette-container { width }` 及 4 列卡片布局的实际高度保持一致
+///    （改卡片列数/尺寸、或增删工具导致分组行数变化时一并更新，
+///      否则首次打开可能越出屏幕工作区）。
+///    当前值对应面板 436×486（4 列 × 96.5px 卡片；3 个分组各 1 行 = 3 行）。
+const PALETTE_PANEL_WIDTH: f64 = 436.0;
+const PALETTE_PANEL_HEIGHT: f64 = 486.0;
+
+
 /// 显示卡片工具选择器面板，定位到悬浮球附近
 #[tauri::command]
 pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
@@ -391,10 +446,13 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
             let win =
                 WebviewWindowBuilder::new(&app, "palette", WebviewUrl::App("index.html".into()))
                     .title("Levitaire Tools")
-                    // The nine-card grid is about 194px tall; using a close
-                    // initial size keeps the first placement anchored while
-                    // the frontend performs its final content measurement.
-                    .inner_size(330.0, 194.0)
+                    // 初始尺寸取面板实测前的估值（大约 4 列 × 4 行卡片），
+                    // 前端会按真实内容尺寸再修正一次。
+                    // 尺寸含四周投影留白（见 PALETTE_SHADOW_MARGIN）。
+                    .inner_size(
+                        PALETTE_PANEL_WIDTH + 2.0 * PALETTE_SHADOW_MARGIN,
+                        PALETTE_PANEL_HEIGHT + 2.0 * PALETTE_SHADOW_MARGIN,
+                    )
                     .resizable(false)
                     .transparent(true)
                     .decorations(false)
@@ -434,22 +492,28 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     // Only the first opening is anchored beside the orb. Subsequent openings retain the
     // position selected by dragging the palette window.
     if should_anchor_to_orb {
-    // palette 物理尺寸：宽度固定 330，高度由前端自适应调整（fit-content + setSize）。
+    // palette 物理尺寸：宽度固定为面板宽 + 四周投影留白，高度由前端自适应调整
+    // （fit-content + setSize）。
     // 首次创建时 inner_size() 可能返回 0，使用 WebviewWindowBuilder 中指定的逻辑尺寸乘 scale_factor 作为 fallback。
     // 高度取 inner_size()（非首次时已是前端上次调整的值），首次创建 fallback 用初始值。
     let scale = palette.scale_factor().unwrap_or(1.0);
+    // 留白的物理像素值：窗口坐标是物理像素，留白是逻辑像素，必须按 DPI 缩放
+    let margin = (PALETTE_SHADOW_MARGIN * scale).round() as i32;
     let inner = palette.inner_size().unwrap_or_else(|_| {
-        tauri::PhysicalSize::new((330.0 * scale) as u32, (194.0 * scale) as u32)
+        tauri::PhysicalSize::new(
+            ((PALETTE_PANEL_WIDTH + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as u32,
+            ((PALETTE_PANEL_HEIGHT + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as u32,
+        )
     });
     let pw = if inner.width > 0 {
         inner.width as i32
     } else {
-        (330.0 * scale) as i32
+        ((PALETTE_PANEL_WIDTH + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as i32
     };
     let ph = if inner.height > 0 {
         inner.height as i32
     } else {
-        (194.0 * scale) as i32
+        ((PALETTE_PANEL_HEIGHT + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as i32
     };
 
     // 锚点：优先用 orb 窗口位置；失败则用鼠标位置
@@ -460,23 +524,24 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
                 let ow = oi.width as i32;
                 let oh = oi.height as i32;
                 let hwnd = orb.hwnd().map(|h| h.0).unwrap_or(std::ptr::null_mut());
-                // 默认放在 orb 右上方，间隔 8px
                 let orb_scale = orb.scale_factor().unwrap_or(1.0);
                 let visual_size = (56.0 * orb_scale).round() as i32;
                 let visual_right = p.x + (ow + visual_size) / 2;
                 let visual_bottom = p.y + (oh + visual_size) / 2;
-                (visual_right + 8, visual_bottom - ph, hwnd)
+                // 默认放在 orb 右上方，面板边缘与 orb 间隔 8px。
+                // 窗口左上角还要再向左/向上让出留白，面板边缘才落在目标位置。
+                (visual_right + 8 - margin, visual_bottom + margin - ph, hwnd)
             }
             Err(_) => {
                 if let Ok(cur) = crate::automation::get_mouse_position() {
-                    (cur.x + 8, cur.y + 8, std::ptr::null_mut())
+                    (cur.x + 8 - margin, cur.y + 8 - margin, std::ptr::null_mut())
                 } else {
                     (100, 100, std::ptr::null_mut())
                 }
             }
         }
     } else if let Ok(cur) = crate::automation::get_mouse_position() {
-        (cur.x + 8, cur.y + 8, std::ptr::null_mut())
+        (cur.x + 8 - margin, cur.y + 8 - margin, std::ptr::null_mut())
     } else {
         (100, 100, std::ptr::null_mut())
     };
@@ -506,7 +571,9 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
                             let ow = orb.inner_size().map(|size| size.width as i32).unwrap_or(96);
                             let visual_size = (56.0 * orb.scale_factor().unwrap_or(1.0)).round() as i32;
                             let visual_left = p.x + (ow - visual_size) / 2;
-                            x = visual_left - pw - 8;
+                            // 同理：窗口右边缘要让出留白，面板右边缘才贴在
+                            // visual_left 左侧 8px（+ margin 抵消窗口自身的留白）
+                            x = visual_left - pw + margin - 8;
                         }
                     }
                     // 如果左边也放不下，贴左边工作区
@@ -552,11 +619,17 @@ pub fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 
+/// 执行滚动导航动作（top / bottom / page-up / page-down / line-up / line-down）。
+///
+/// `async` + `spawn_blocking`：动作链路里含跨进程 UIA 探测与 Win32 投递，
+/// 同步命令会在事件循环主线程上跑完，连带冻结所有窗口。
 #[tauri::command]
-pub fn navigate_scroll(
+pub async fn navigate_scroll(
     action: String,
 ) -> Result<crate::scroll_navigation::ScrollNavigationState, String> {
-    crate::scroll_navigation::navigate(&action)
+    tokio::task::spawn_blocking(move || crate::scroll_navigation::navigate(&action))
+        .await
+        .map_err(|error| format!("滚动操作被中断: {error}"))?
 }
 
 
@@ -564,13 +637,17 @@ pub fn navigate_scroll(
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
     crate::hooks::mouse::stop_color_pick();
+    crate::hooks::mouse::stop_window_pin();
+    // 置顶状态写在**目标窗口**身上，不主动撤销就会残留 —— 用户会看到几扇「莫名其妙
+    // 永远在最前」的窗口，而那时 Levitaire 已经退出了。托盘 quit 是同一条路径。
+    crate::window_pin::cleanup();
     app.exit(0);
     Ok(())
 }
 
 
 /// 记忆悬浮窗位置（由前端在窗口拖动结束后调用），应用重启后恢复到上次位置。
-/// window_id 如 "orb"、"monitor-overlay"、"pomodoro-overlay"
+/// window_id 如 "orb"、"monitor-overlay"、"time-overlay"
 #[tauri::command]
 pub fn set_window_position(
     id: String,
@@ -592,7 +669,7 @@ pub fn set_window_position(
 
 
 /// 恢复悬浮窗默认位置：清除记忆位置，并将窗口移动到默认定位。
-/// window_id 如 "orb"、"monitor-overlay"、"pomodoro-overlay"、"time-overlay"、"todo-overlay"
+/// window_id 如 "orb"、"monitor-overlay"、"time-overlay"、"todo-overlay"
 #[tauri::command]
 pub fn reset_window_position(
     id: String,
@@ -604,13 +681,12 @@ pub fn reset_window_position(
     let win = match id.as_str() {
         "orb" => app.get_webview_window("orb"),
         "monitor-overlay" => app.get_webview_window("monitor-overlay"),
-        "pomodoro-overlay" => app.get_webview_window("pomodoro-overlay"),
         "time-overlay" => app.get_webview_window("time-overlay"),
         "todo-overlay" => app.get_webview_window("todo-overlay"),
         _ => None,
     };
     // 对已存在窗口统一移动到默认定位（隐藏窗口 set_position 同样生效，下次显示即默认位置）。
-    // monitor 下次显示时按未记忆逻辑跟随鼠标重新定位；pomodoro 无记忆时保持此位置。
+    // monitor 下次显示时按未记忆逻辑跟随鼠标重新定位。
     if let Some(win) = win {
         let inner = win.inner_size().unwrap_or_default();
         let (x, y) = default_window_position(&id, inner.width as i32, inner.height as i32);
@@ -732,4 +808,47 @@ pub fn set_tools_autostart(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     config_manager.update_tools_autostart(ids)
+}
+
+
+/// 把**调用它的那扇窗**夹进所在显示器的工作区。
+///
+/// 为什么需要单独一条命令：本项目的浮窗落点由后端按光标/选区/记忆位置算出
+/// （`hooks/mouse.rs`、`hooks/keyboard.rs`、各 `show_*` 里的 `clamp_position_to_workarea`
+/// 都只在**首次定位**时夹），而窗口的**最终尺寸**是前端量完内容才下发的 —— 谁都不
+/// 掌握「最终尺寸 + 工作区」这一对信息。于是贴屏幕右/下沿的窗口在内容变高变宽后
+/// （日历切视图、监控切模式、便签加行、面板换页、工具栏弹出二维码预览）会有一部分
+/// 跑到工作区外：内容被裁、按钮点不到，而这些窗口都是无边框置顶窗、没有滚动条。
+/// 前端在每次 `setSize` 之后调本命令即可。
+///
+/// `window` 由 Tauri 自动注入为**调用方**窗口，所以前端不必（也无法）传 label ——
+/// 这对便利贴那种动态 label（`sticky-note-<id>`）尤其重要。
+///
+/// `width` / `height` 是**逻辑**像素（前端量的 CSS px），内部按窗口缩放换算成物理像素
+/// 后再夹 —— 150% 缩放下直接用逻辑值会夹不到位。
+#[tauri::command]
+pub fn clamp_window_to_workarea(
+    window: tauri::WebviewWindow,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let win_w = (width * scale).round() as i32;
+    let win_h = (height * scale).round() as i32;
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let (x, y) = clamp_position_to_workarea(pos.x, pos.y, win_w, win_h);
+    if x != pos.x || y != pos.y {
+        // 这次移动是**程序性**的（内容变高变宽后被挤回工作区），不是用户拖的。
+        // 前端 `persistWindowPositionOnMove` 监听 `onMoved` —— 程序性移动同样会触发 ——
+        // 并在 300ms 后写回位置记忆。不抑制就会把"被挤过的位置"当成用户的选择永久记住：
+        // 内容缩回后窗口不回落，反复几次就累积成位置漂移。
+        // `reset_window_position` 早就为此挂了 1500ms 抑制，这条路径同理。
+        if let Ok(mut suppress) = position_save_suppress().lock() {
+            suppress.insert(window.label().to_string(), now_ms() + 1500);
+        }
+        window
+            .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

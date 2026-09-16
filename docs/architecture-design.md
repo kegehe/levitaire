@@ -4,14 +4,14 @@
 
 ### 1.1 项目目标
 开发一个 Windows 悬浮效率工具箱：选中文字后在光标旁即时弹出工具栏，并可通过常驻悬浮球一键唤起
-截图、录屏、OCR、番茄钟、系统监控等桌面工具。架构设计需便于持续扩展新工具。
+截图、录屏、OCR、时间工具、系统监控等桌面工具。架构设计需便于持续扩展新工具。
 
 ### 1.2 核心功能
 - 监听全局文字选择事件（鼠标 / 键盘钩子）
 - 在选中文字旁显示悬浮工具栏
 - 文字工具：复制、搜索、翻译、AI 优化、文本转换、二维码、TTS 朗读等
 - 屏幕工具：区域截图、标注、钉图、长截图、离线 OCR、GIF / MP4 录制
-- 系统工具：系统监控、番茄钟、时钟 / 倒计时 / 秒表 / 日历、待办、便利贴
+- 系统工具：系统监控、时间工具（时钟 / 倒计时 / 番茄钟 / 秒表 / 日历）、待办、便利贴
 - 通过注册表驱动的工具架构支持持续扩展
 
 ---
@@ -68,7 +68,7 @@
 │  │  └────────────────┘  └─────────────────────────┘  │  │
 │  │  ┌────────────────┐  ┌─────────────────────────┐  │  │
 │  │  │ 剪贴板管理     │  │ 工具模块 / 注册表       │  │  │
-│  │  │ 截图·录屏      │  │ 番茄钟/待办/便利贴      │  │  │
+│  │  │ 截图·录屏      │  │ 时间工具/待办/便利贴    │  │  │
 │  │  └────────────────┘  └─────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────┘  │
 │                                                         │
@@ -116,7 +116,9 @@
 **方案 B：剪贴板监听（备选）**
 - 模拟 Ctrl+C 复制
 - 读取剪贴板内容
-- 恢复原始剪贴板
+- 恢复原始剪贴板（**仅当确认剪贴板里仍是自己写进去的那份内容**：用户中途自己按了
+  Ctrl+C / Ctrl+X 就不能回滚，否则会把他刚复制/剪切的内容覆盖掉。判定与实现见
+  `automation/clipboard_selection.rs` 的 `restore_clipboard_after_check`）
 
 ### 4.3 悬浮工具栏模块 (Floating Toolbar)
 
@@ -152,8 +154,9 @@
 - `activation`：区分「选中文字后触发」(`selection`) 与「点击即进入」(`immediate`)
 - 新增工具只需在注册表追加一项，工具面板会自动展示，无需改动面板代码
 
-**已内置工具：** 文字工具栏、屏幕截图、GIF/录屏、快速输入、系统监控、番茄钟、
-时钟/倒计时/秒表/日历、待办清单、便利贴、屏幕草稿、通用工具集（取色 / 滚动导航）。
+**已内置工具：** 文字工具栏、屏幕截图、GIF/录屏、快速输入、系统监控、时间工具
+（时钟 / 倒计时 / 番茄钟 / 秒表 / 日历，番茄钟是其中一个页签）、待办清单、便利贴、屏幕草稿、
+通用工具集（取色 / 滚动导航 / 窗口置顶）。
 
 ---
 
@@ -177,14 +180,14 @@ Levitaire/
 │   │   │   └── ocr_selection.rs        # OCR 回退
 │   │   ├── screenshot/                 # GDI 截屏、钉图、目标窗口识别
 │   │   ├── scroll_capture/             # 长截图（滚动捕获与拼接）
-│   │   ├── scroll_navigation.rs        # 滚动导航（UIA 滚动接口）
+│   │   ├── scroll_navigation.rs        # 滚动导航（UIA 滚动接口 + 投递键盘/滚轮）
 │   │   ├── recording/                  # GIF / ffmpeg MP4 录制、窗口检测
 │   │   ├── ocr/                        # OcrService：Windows OCR + PaddleOCR 双引擎
 │   │   ├── tts/                        # WinRT SpeechSynthesizer 语音合成
 │   │   ├── sound/                      # 合成提示音（到点提醒）
 │   │   ├── monitor/                    # 系统监控（CPU/内存/网络/磁盘/电池）
-│   │   ├── pomodoro/                   # 番茄钟
-│   │   ├── timer/                      # 时钟 / 倒计时 / 秒表 / 日历
+│   │   ├── pomodoro/                   # 番茄钟计时状态（时间工具的番茄钟页签）
+│   │   ├── timer/                      # 通用计时器（倒计时 / 秒表）
 │   │   ├── todo/                       # 待办清单（独立数据存储 + 调度器）
 │   │   ├── sticky_note/                # 便利贴
 │   │   ├── quick_input.rs              # 快速输入转盘 + 剪贴板历史
@@ -208,8 +211,8 @@ Levitaire/
 │   │   ├── screenshot/                 # 截图 + 标注
 │   │   ├── recording/                  # 录屏
 │   │   ├── quick-input/                # 快速输入转盘
-│   │   ├── pomodoro/ system-monitor/   # 番茄钟 / 系统监控
-│   │   ├── timer/ todo/ sticky-note/   # 时钟 / 待办 / 便利贴
+│   │   ├── timer/ system-monitor/      # 时间工具（时钟/倒计时/番茄钟/秒表/日历） / 系统监控
+│   │   ├── todo/ sticky-note/          # 待办 / 便利贴
 │   │   ├── sketch/ utility-hub/        # 屏幕草稿 / 通用工具集
 │   │   ├── scroll-navigator/           # 滚动导航
 │   │   └── color-picker/               # 取色器
@@ -291,8 +294,24 @@ Levitaire/
 1. 在 `commands/` 下的对应功能域模块中写 `#[tauri::command]` 函数
 2. 函数声明为 `pub fn`（`commands/mod.rs` 通过 `pub use <域>::*;` 重导出）
 3. 在 `main.rs` 的 `tauri::generate_handler!` 中按 `commands::<函数名>` 注册
-4. 若该工具有独立开关，在 `config` 里加 getter/setter 并在 `registry.ts` 的
-   `BACKEND_TOOLS` 登记（用于前后端状态同步）
+4. 在 `config` 里加 `xxx_enabled` 字段与 `get_`/`set_<tool>_enabled` 命令，并在 `registry.ts` 的
+   `BACKEND_TOOLS` 登记 `{ id, getter, setter }`（用于前后端状态同步，也是面板开关的下发入口）。
+   **所有悬浮工具都必须登记**：漏登记时开关只改前端状态，后端既不持久化、也不在禁用时收起窗口，
+   palette 的「全部关闭」会因此关不掉该工具（通用工具曾踩过）
+
+**下线或合并一个工具：**
+工具被移除、或被并入另一个工具时，必须一并处理存储里的旧 ID，否则会**静默丢掉**用户的
+启用状态与「启动时自动打开」配置：
+1. 并入场景：在 `src/tools/registry.ts` 的 `TOOL_ID_ALIASES` 登记 `旧ID → 宿主ID`，
+   `getEnabledTools()` 与 `FloatingOrb` 的自启动都会经 `resolveToolIdAlias()` 归一化
+2. 前端窗口链路：`utils/toolWindows.ts` 的 `ToolWindowLabel` / `ensure*` 一套 / `openToolWindow` 分支、
+   `App.tsx` 路由、`ToolPalette` 的激活分支 / `TOOL_COLORS`、
+   `Settings` 的设置页签与 `WINDOW_POSITION_TARGETS`、`BACKEND_TOOLS`
+   （开关的命令映射现已集中在 `BACKEND_TOOLS` 的 `setter`，不再有第二张 id→命令表）
+3. 后端：`commands/mod.rs` 的 `is_levitaire_window` 清单、`scroll_navigation.rs` 窗口清单、
+   `reset_window_position` 的窗口分支、对应的 `set_*_enabled` 命令与配置字段
+4. 宿主工具的 `set_*_enabled(false)` 要负责**停掉被并入工具的后台计时/线程**，
+   否则后端继续跑但用户已无入口看到
 
 **示例：新增一个「文本去空格」工具**
 - 前端加一个按钮触发 `invoke("trim_text", { text })`
@@ -341,9 +360,9 @@ Levitaire/
 
 **系统工具**
 - `get_todos` / `create_todo` / `set_todo_completed` — 待办清单
-- `get_timers` / `start_timer` — 时钟与计时
+- `get_timers` / `start_timer` / `set_timer_duration` — 时钟与倒计时 / 秒表
 - `get_sticky_notes` / `create_sticky_note` — 便利贴
-- `get_pomodoro_state` / `start_pomodoro` — 番茄钟
+- `get_pomodoro_state` / `start_pomodoro` / `skip_pomodoro` — 番茄钟页签（计时状态由后端独立持有）
 
 **配置与窗口**
 - `get_ai_config` / `update_ai_config` — AI 配置
@@ -361,7 +380,7 @@ Levitaire/
 | `palette` | 工具面板（点击悬浮球展开） |
 | `settings` / `tool-config` | 设置页 / 单工具配置 |
 | `screenshot-overlay` / `long-capture-*` | 截图选区与长截图覆盖层 |
-| `monitor-overlay` / `pomodoro-overlay` / `time-overlay` / `todo-overlay` | 常驻系统工具浮窗 |
+| `monitor-overlay` / `time-overlay` / `todo-overlay` | 常驻系统工具浮窗（时间工具内含时钟 / 倒计时 / 番茄钟 / 秒表 / 日历页签） |
 | `sticky-notes-manager` | 便利贴管理窗（各便签为独立窗口） |
 | `quick-input-overlay` | 快速输入转盘 |
 | `sketch-overlay` / `utility-hub-overlay` / `scroll-navigator-overlay` | 屏幕草稿 / 通用工具 / 滚动导航 |
@@ -393,8 +412,8 @@ Levitaire/
 
 **阶段 3：工具化扩展（原「插件系统」）**
 - [x] 以前端 `tools/registry.ts` 注册表替代动态插件机制
-- [x] 12 个内置工具（文字工具栏 / 截图 / 录屏 / OCR / 快速输入 /
-      系统监控 / 番茄钟 / 时钟 / 待办 / 便利贴 / 屏幕草稿 / 通用工具集）
+- [x] 11 个内置工具（文字工具栏 / 截图 / 录屏 / OCR / 快速输入 /
+      系统监控 / 时间工具（时钟 / 倒计时 / 番茄钟 / 秒表 / 日历） / 待办 / 便利贴 / 屏幕草稿 / 通用工具集）
 - [x] 每个工具可独立启停（设置页开关 ↔ 后端 config 双向同步）
 
 **阶段 4：优化和完善**

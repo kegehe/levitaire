@@ -56,6 +56,18 @@
   --purple-500: oklch(0.52 0.19 295);
   --purple-600: oklch(0.45 0.17 295);
 
+  /* Teal (disk I/O) */
+  --teal-300: oklch(0.8 0.11 195);
+  --teal-400: oklch(0.72 0.13 195);
+  --teal-500: oklch(0.62 0.13 195);
+  --teal-600: oklch(0.54 0.12 195);
+
+  /* Magenta (GPU) */
+  --magenta-300: oklch(0.8 0.12 340);
+  --magenta-400: oklch(0.72 0.15 340);
+  --magenta-500: oklch(0.62 0.17 340);
+  --magenta-600: oklch(0.54 0.16 340);
+
   /* Neutral */
   --neutral-0: oklch(1 0 0);
   --neutral-50: oklch(0.98 0 0);
@@ -155,12 +167,22 @@
   --color-success-subtle: var(--green-50);
   --color-success-fg: var(--green-600);
 
-  /* Chart palette — sparkline strokes/fills */
-  --color-chart-cpu: var(--color-brand);
-  --color-chart-mem: var(--color-brand-hover);
-  --color-chart-net: var(--color-brand);
-  --color-chart-disk: var(--color-brand-hover);
-  --color-chart-gpu: var(--green-600);
+  /* Warning（阈值色第三档：磁盘近满 / 电池偏低） */
+  --color-warning: var(--orange-600);
+  --color-warning-subtle: var(--orange-300);
+  --color-warning-fg: var(--orange-600);
+
+  /* Chart palette — sparkline strokes/fills。
+     五个指标五个固定色相（250 蓝 / 295 紫 / 340 品红 / 75 橙 / 195 青），
+     **有意不跟随用户强调色**：这是分类色板，必须互相可区分且稳定。
+     曾经 cpu/net 都取 --color-brand、mem/disk 都取 --color-brand-hover（5 条线只有 2
+     种颜色），且 themePreferences 运行时还会再按强调色重写一遍 —— 换成青/苔绿系强调色时
+     会与磁盘的青色再次重合。语义固定后，强调色只负责 UI 装饰面（选中 / 焦点 / 品牌）。 */
+  --color-chart-cpu: var(--blue-600);
+  --color-chart-mem: var(--purple-500);
+  --color-chart-net: var(--orange-600);
+  --color-chart-disk: var(--teal-600);
+  --color-chart-gpu: var(--magenta-600);
 
   /* Focus ring */
   --color-focus-ring: var(--color-brand);
@@ -177,7 +199,10 @@
   --palette-bg-fallback: oklch(0.98 0 0);
   --palette-border: 1px solid var(--neutral-200);
   --palette-backdrop: none;
-  --palette-shadow: 0 4px 12px oklch(0.2 0 0 / 0.1);
+  /* 投影上限受窗口留白约束（模糊半径/2 + 垂直偏移 ≤ .palette-stage 的 20px）：
+     超出部分会被窗口边界硬切，在圆角缺口处留下直角残影。运行时由
+     themePreferences 覆盖为带强调色的版本。 */
+  --palette-shadow: 0 6px 28px oklch(0.2 0 0 / 0.18);
   --palette-card-bg: oklch(0.96 0 0);
   --palette-card-bg-hover: oklch(0.94 0 0);
   --palette-card-bg-enabled: var(--color-brand-subtle);
@@ -329,12 +354,16 @@
   --color-success-subtle: var(--green-900);
   --color-success-fg: var(--green-400);
 
-  /* Chart palette */
-  --color-chart-cpu: var(--color-brand);
-  --color-chart-mem: var(--color-brand-hover);
-  --color-chart-net: var(--color-brand);
-  --color-chart-disk: var(--color-brand-hover);
-  --color-chart-gpu: var(--green-400);
+  --color-warning: var(--orange-400);
+  --color-warning-subtle: var(--orange-600);
+  --color-warning-fg: var(--orange-400);
+
+  /* Chart palette（深色：亮度提到 0.68~0.72 一档，保持五色等重） */
+  --color-chart-cpu: var(--blue-400);
+  --color-chart-mem: var(--purple-300);
+  --color-chart-net: var(--orange-400);
+  --color-chart-disk: var(--teal-400);
+  --color-chart-gpu: var(--magenta-400);
 
   --color-focus-ring: var(--color-brand);
   --color-scrollbar: var(--color-brand);

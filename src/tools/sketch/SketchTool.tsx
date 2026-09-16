@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { currentMonitor } from "@tauri-apps/api/window";
 import Icon from "../../components/Icon";
 import { readSketchHistoryLimit, SKETCH_HISTORY_LIMIT_KEY } from "../../constants/sketchConfig";
+import { buildCursorSkin, normalizeCursorColor } from "../../utils/cursorSkin";
+import {
+  applyThemePreferences,
+  getStoredThemePreferences,
+  subscribeThemePreferences,
+} from "../../styles/themePreferences";
 import "./SketchTool.css";
 
 type Point = { x: number; y: number };
@@ -15,7 +21,7 @@ type StoredSketchState = { strokes: Stroke[]; viewport: Viewport };
 type SketchPreview = { dataUrl: string; filename: string; strokes: Stroke[]; revision: number };
 type TextInputState = { point: Point; value: string };
 type SketchPicker = "color" | "width";
-const SKETCH_MODES: readonly SketchToolMode[] = ["pen", "line", "rect", "ellipse", "arrow", "text", "eraser"];
+export const SKETCH_MODES: readonly SketchToolMode[] = ["pen", "line", "rect", "ellipse", "arrow", "text", "eraser"];
 
 const SKETCH_STATE_KEY = "levitaire-sketch-state-v1";
 const SKETCH_HISTORY_KEY = "levitaire-sketch-history-v1";
@@ -96,6 +102,10 @@ const WIDTHS = [2, 4, 8, 14];
 const MIN_SKETCH_WIDTH = 1;
 const MAX_SKETCH_WIDTH = 64;
 const MIN_POINT_DISTANCE_SQUARED = 1;
+/** 浮层改向下弹的门槛：向上弹需要按钮上方留出「浮层高 + 间距」≈ 25px（11px×1.35 行高 +
+ *  上下各 4px 内距 + 2px 边框）+ 7px 间距。不足时向上弹会整体落到窗口上边界之外
+ *  （标注文字编辑器的确认/取消按钮会被钳到 top: 8px，上方只剩十几像素）。 */
+const TOOLTIP_ABOVE_SPACE = 32;
 
 function widthMarkerSize(value: number, maximum = 20): number {
   return Math.min(maximum, Math.max(4, value + 3));
@@ -107,20 +117,37 @@ function colorInputValue(value: string): string {
   return /^#[\da-f]{6}$/i.test(value) ? value : "#000000";
 }
 
-const CURSOR_SHAPES: Record<SketchToolMode, string> = {
-  pen: '<path d="M5 19 18 6l3 3L8 22H5z"/><path d="m16 8 3 3"/>',
-  line: '<path d="M4 20 20 4"/>',
-  rect: '<rect x="4" y="5" width="16" height="14" rx="1"/>',
-  ellipse: '<ellipse cx="12" cy="12" rx="8" ry="6"/>',
-  arrow: '<path d="M5 19 19 5M10 5h9v9"/>',
-  text: '<path d="M5 5h14M12 5v14M8 19h8"/>',
-  eraser: '<path d="m5 14 8-8a2 2 0 0 1 2.8 0l3.2 3.2a2 2 0 0 1 0 2.8l-6 6a2 2 0 0 1-1.4.6H7a2 2 0 0 1-2-2v-1.2a2 2 0 0 1 0-1.4Z"/><path d="m9 10 6 6M7 18h6"/>',
+/**
+ * 屏幕草稿光标（十字准星 + 颜色徽章）。几何、叠色、热点**全部来自 utils/cursorSkin** ——
+ * 截图标注（AnnotationCanvas）用的是同一套外壳，要改光标外观请改那边，别在这里再抄一份副本。
+ * 本模块只负责「每个工具画什么符号」和「橡皮擦用浅色」。三条硬约束见 cursorSkin.ts 顶部注释。
+ *
+ * 旧的 24×24 双层版本有三个问题：深色外圈 4 / 颜色内芯 2，画笔色只占一半，1× 下几乎看不出
+ * 颜色；没有白色键线层，压在深色内容上和深色外圈糊成一片；热点写死 (2,20)，对矩形/椭圆/
+ * 文字都不是真实落笔点（矩形是拿落笔点当「左上角」往下拉的）。
+ * 现在的热点统一为十字交点 (16,16) —— 七个工具的落笔点都正好是点击处。
+ */
+
+/** 橡皮擦的光标色：擦是"减"动作，用浅色与其余六个工具区分 */
+const CURSOR_ERASER_COLOR = "#f4f5f7";
+
+/**
+ * 徽章里的工具图形，坐标写在 10×10 单位框内。
+ * `fill="__INK__"` 由 buildCursorSkin() 按底色亮度替换成墨色，用于实心符号（画笔的笔尖、橡皮擦的斜块）。
+ */
+const CURSOR_GLYPHS: Record<SketchToolMode, string> = {
+  pen: '<path d="M1.5 8.5 4.3 2.3 8.5 6.5Z" fill="__INK__"/>',
+  line: '<path d="M1.6 8.4 8.4 1.6"/>',
+  rect: '<path d="M1.7 2.1h6.6v5.8h-6.6z"/>',
+  ellipse: '<ellipse cx="5" cy="5" rx="3.6" ry="3"/>',
+  arrow: '<path d="M1.6 8.4 8.4 1.6M4.4 1.6h4v4"/>',
+  text: '<path d="M1.9 2.4h6.2M5 2.4v6.2M3.4 8.6h3.2"/>',
+  eraser: '<path d="M6.2 8.89 8.89 6.2 3.8 1.11 1.11 3.8Z" fill="__INK__"/>',
 };
 
-function sketchCursor(tool: SketchToolMode, color: string): string {
-  const shape = CURSOR_SHAPES[tool];
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none" stroke="#101216" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">${shape}</g><g fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${shape}</g></svg>`;
-  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 2 20, auto`;
+/** 导出供 SketchTool.test.tsx 的「光标几何自检」按真实数字复算 */
+export function sketchCursor(tool: SketchToolMode, color: string): string {
+  return buildCursorSkin(normalizeCursorColor(color, COLORS[0]), CURSOR_GLYPHS[tool]);
 }
 
 function SketchTool() {
@@ -138,6 +165,12 @@ function SketchTool() {
   const [width, setWidth] = useState(4);
   const [openPicker, setOpenPicker] = useState<SketchPicker | null>(null);
   const [tool, setTool] = useState<SketchToolMode>("pen");
+  // 光标只跟「工具 + 画笔色」有关，但绘制时整个组件每帧都在重渲染 ——
+  // 不 memo 的话每帧都要重建一遍 ~1.8KB 的 SVG 串再做 encodeURIComponent。
+  const cursor = useMemo(
+    () => sketchCursor(tool, tool === "eraser" ? CURSOR_ERASER_COLOR : color),
+    [tool, color],
+  );
   const [textSize, setTextSize] = useState(20);
   const [bold, setBold] = useState(false);
   const [textInput, setTextInput] = useState<TextInputState | null>(null);
@@ -160,7 +193,7 @@ function SketchTool() {
   const [previewZoom, setPreviewZoom] = useState(1);
   const [previewWindowOffset, setPreviewWindowOffset] = useState({ x: 0, y: 0 });
   const [previewImageOffset, setPreviewImageOffset] = useState({ x: 0, y: 0 });
-  const [toolbarTooltip, setToolbarTooltip] = useState<{ text: string; left: number; top: number } | null>(null);
+  const [toolbarTooltip, setToolbarTooltip] = useState<{ text: string; left: number; top: number; below: boolean } | null>(null);
   const previewWindowDragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   const previewPanRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
@@ -170,6 +203,19 @@ function SketchTool() {
   previewRef.current = preview;
   saveStateRef.current = saveState;
   openPickerRef.current = openPicker;
+
+  // 主题接入：挂载前先用本地缓存即时着色，避免首帧闪烁；
+  // 随后订阅广播，使草稿悬浮层随设置窗口的浅色/深色切换实时更新。
+  useLayoutEffect(() => {
+    applyThemePreferences(getStoredThemePreferences());
+  }, []);
+
+  useEffect(() => {
+    const unlistenTheme = subscribeThemePreferences();
+    return () => {
+      unlistenTheme.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     const unlistenReadyRequest = listen("sketch-window-ready-request", () => {
@@ -388,7 +434,16 @@ function SketchTool() {
     const element = tooltipTarget(target);
     if (!element || !element.dataset.tooltip) return setToolbarTooltip(null);
     const rect = element.getBoundingClientRect();
-    setToolbarTooltip({ text: element.dataset.tooltip, left: rect.left + rect.width / 2, top: rect.top - 7 });
+    // 默认贴在按钮上方：top 指到按钮上沿再让出 7px 间距，靠 transform 的 translateY(-100%)
+    // 把浮层整体提到该点之上。按钮上方净空不足时（文字编辑器的确认/取消按钮会被钳到
+    // top: 8px）向上弹会整体落到窗口上边界之外，改为向下弹（.sketch-tooltip--below）。
+    const below = rect.top < TOOLTIP_ABOVE_SPACE;
+    setToolbarTooltip({
+      text: element.dataset.tooltip,
+      left: rect.left + rect.width / 2,
+      top: below ? rect.bottom + 7 : rect.top - 7,
+      below,
+    });
   };
   const handleToolbarPointerOut = (event: React.PointerEvent<HTMLElement>) => {
     const from = tooltipTarget(event.target);
@@ -702,7 +757,7 @@ function SketchTool() {
 
   return (
     <main className="sketch-root" onPointerOver={(event) => showToolbarTooltip(event.target)} onPointerOut={handleToolbarPointerOut} onFocusCapture={(event) => showToolbarTooltip(event.target)} onBlurCapture={handleToolbarBlur}>
-      <canvas ref={canvasRef} className="sketch-canvas" style={{ pointerEvents: preview ? "none" : "auto", cursor: preview ? "default" : sketchCursor(tool, tool === "eraser" ? "#f4f5f7" : color) }} onPointerDown={begin} onPointerMove={move} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end} />
+      <canvas ref={canvasRef} className="sketch-canvas" style={{ pointerEvents: preview ? "none" : "auto", cursor: preview ? "default" : cursor }} onPointerDown={begin} onPointerMove={move} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end} />
       {textInput && <div
         className="sketch-text-editor"
         style={{
@@ -800,7 +855,7 @@ function SketchTool() {
       </section>}
       {saveError && <div className="sketch-save-error" role="status" aria-live="polite">{saveError}</div>}
       {showHistory && <aside className="sketch-history"><div className="sketch-history-title">草稿历史</div>{history.length === 0 ? <div className="sketch-history-empty">暂无已保存草稿</div> : history.slice().reverse().map((snapshot) => <div key={snapshot.id} className="sketch-history-item"><button className="sketch-history-restore" onClick={() => restoreSnapshot(snapshot)}><span>{snapshot.createdAt}</span><span>{snapshot.strokes.length} 个标注</span></button><button className="sketch-history-remove" onClick={() => removeHistoryEntry(snapshot.id)} title="删除此历史" aria-label="删除此历史"><Icon name="X" size={13} /></button></div>)}</aside>}
-      {toolbarTooltip && <div className="sketch-tooltip" role="tooltip" style={{ left: toolbarTooltip.left, top: toolbarTooltip.top }}>{toolbarTooltip.text}</div>}
+      {toolbarTooltip && <div className={`sketch-tooltip${toolbarTooltip.below ? " sketch-tooltip--below" : ""}`} role="tooltip" style={{ left: toolbarTooltip.left, top: toolbarTooltip.top }}>{toolbarTooltip.text}</div>}
     </main>
   );
 }

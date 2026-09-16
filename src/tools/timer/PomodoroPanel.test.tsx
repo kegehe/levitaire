@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearMockListeners, emitMockEvent, emitMockFocus } from "../../test/tauri-mock";
-import PomodoroTool from "./PomodoroTool";
+import PomodoroPanel from "./PomodoroPanel";
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -33,7 +33,7 @@ function mockBaseState() {
   });
 }
 
-describe("PomodoroTool", () => {
+describe("PomodoroPanel（时间工具的番茄钟页签）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearMockListeners();
@@ -41,7 +41,7 @@ describe("PomodoroTool", () => {
 
   it("renders initial remaining time from backend state", async () => {
     mockBaseState();
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
     expect(screen.getByText("专注")).toBeTruthy();
     expect(screen.getByText("开始")).toBeTruthy();
@@ -58,13 +58,13 @@ describe("PomodoroTool", () => {
       return Promise.resolve();
     });
 
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("45:00")).toBeTruthy());
   });
 
   it("updates the time and running state on pomodoro-tick", async () => {
     mockBaseState();
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
 
     act(() =>
@@ -82,7 +82,7 @@ describe("PomodoroTool", () => {
 
   it("updates the stage and round indicator on pomodoro-complete", async () => {
     mockBaseState();
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
 
     act(() =>
@@ -101,7 +101,7 @@ describe("PomodoroTool", () => {
 
   it("shows a complete round indicator during a long break", async () => {
     mockBaseState();
-    const { container } = render(<PomodoroTool />);
+    const { container } = render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
 
     act(() =>
@@ -115,12 +115,12 @@ describe("PomodoroTool", () => {
     );
 
     await waitFor(() => expect(screen.getByText("4/4 轮")).toBeTruthy());
-    expect(container.querySelectorAll(".pomo-round-dot.is-done")).toHaveLength(4);
+    expect(container.querySelectorAll(".timer-round-dot.is-done")).toHaveLength(4);
   });
 
   it("resets the round indicator when focus resumes after a long break", async () => {
     mockBaseState();
-    const { container } = render(<PomodoroTool />);
+    const { container } = render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
 
     act(() =>
@@ -134,12 +134,56 @@ describe("PomodoroTool", () => {
     );
 
     await waitFor(() => expect(screen.getByText("0/4 轮")).toBeTruthy());
-    expect(container.querySelectorAll(".pomo-round-dot.is-done")).toHaveLength(0);
+    expect(container.querySelectorAll(".timer-round-dot.is-done")).toHaveLength(0);
+  });
+
+  it("环上按阶段着色，运行中才带呼吸动画", async () => {
+    mockBaseState();
+    const { container } = render(<PomodoroPanel />);
+    await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
+    const view = () => container.querySelector(".timer-pomodoro-view")!;
+    expect(view().className).not.toContain("is-running");
+
+    act(() =>
+      emitMockEvent("pomodoro-complete", {
+        stage: "long_break",
+        remaining_secs: 900,
+        total_secs: 900,
+        running: true,
+        rounds_done: 4,
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText("长休息")).toBeTruthy());
+    expect(view().className).toContain("is-running");
+    const ring = container.querySelector(".timer-ring-fg") as SVGCircleElement;
+    // 长休息用独立阶段色，不能退化成统一的 accent 色
+    expect(ring.style.stroke).toBe("var(--color-chart-cpu)");
+  });
+
+  it("进度为 0（在最后一秒暂停）时不画前景弧，避免留下圆点", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_pomodoro_state") {
+        return Promise.resolve({
+          stage: "focus",
+          remaining_secs: 0,
+          total_secs: 1500,
+          running: false,
+          rounds_done: 0,
+        });
+      }
+      if (command === "get_pomodoro_config") return Promise.resolve(DEFAULT_CONFIG);
+      return Promise.resolve();
+    });
+    const { container } = render(<PomodoroPanel />);
+    await waitFor(() => expect(screen.getByText("00:00")).toBeTruthy());
+    expect(container.querySelector(".timer-ring-fg")).toBeNull();
+    expect(container.querySelector(".timer-ring-bg")).not.toBeNull();
   });
 
   it("starts the timer via start_pomodoro", async () => {
     mockBaseState();
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("开始")).toBeTruthy());
 
     fireEvent.click(screen.getByText("开始"));
@@ -148,7 +192,7 @@ describe("PomodoroTool", () => {
 
   it("pauses a running timer via pause_pomodoro", async () => {
     mockBaseState();
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("开始")).toBeTruthy());
 
     act(() =>
@@ -164,6 +208,20 @@ describe("PomodoroTool", () => {
 
     fireEvent.click(screen.getByText("暂停"));
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("pause_pomodoro"));
+  });
+
+  it("resets and skips the current stage via backend commands", async () => {
+    mockBaseState();
+    render(<PomodoroPanel />);
+    await waitFor(() => expect(screen.getByText("开始")).toBeTruthy());
+
+    // 两次操作之间需要等前一次落定：重置/跳过共用一把 actionPending 锁，
+    // 同一 tick 内连点会把第二次视为重复触发而忽略。
+    fireEvent.click(screen.getByRole("button", { name: "重置当前阶段" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("reset_pomodoro"));
+
+    fireEvent.click(screen.getByRole("button", { name: "跳过当前阶段" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("skip_pomodoro"));
   });
 
   it("shows the focused todo title instead of a placeholder", async () => {
@@ -190,7 +248,7 @@ describe("PomodoroTool", () => {
       return Promise.resolve();
     });
 
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("撰写季度总结")).toBeTruthy());
   });
 
@@ -215,7 +273,7 @@ describe("PomodoroTool", () => {
       return Promise.resolve();
     });
 
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("撰写季度总结")).toBeTruthy());
 
     act(() =>
@@ -252,7 +310,7 @@ describe("PomodoroTool", () => {
       return Promise.resolve();
     });
 
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("旧标题")).toBeTruthy());
 
     store[0] = { id: "todo-1", title: "新标题", status: "active" };
@@ -283,7 +341,7 @@ describe("PomodoroTool", () => {
       return Promise.resolve();
     });
 
-    render(<PomodoroTool />);
+    render(<PomodoroPanel />);
     await waitFor(() => expect(screen.getByText("标题一")).toBeTruthy());
 
     // 隐藏期间标题被改名（未触发 todo-changed），重新获焦后应兜底刷新
@@ -291,5 +349,92 @@ describe("PomodoroTool", () => {
     act(() => emitMockFocus(true));
     await waitFor(() => expect(screen.getByText("标题二")).toBeTruthy());
     expect(screen.queryByText("标题一")).toBeNull();
+  });
+
+  // 换阶段的「画入」动画、数字跳动动画都靠 key 重挂元素来重放，这两条断言卡住那个前提：
+  // 少了 key 时动画会静默消失，而其余用例仍然全绿。
+  it("换阶段时整个进度环被替换，以重放画入动画", async () => {
+    mockBaseState();
+    const { container } = render(<PomodoroPanel />);
+    await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
+    const before = container.querySelector(".timer-ring-view");
+
+    act(() =>
+      emitMockEvent("pomodoro-complete", {
+        stage: "short_break",
+        remaining_secs: 300,
+        total_secs: 300,
+        running: true,
+        rounds_done: 1,
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText("短休息")).toBeTruthy());
+    expect(container.querySelector(".timer-ring-view")).not.toBe(before);
+  });
+
+  it("剩余秒数变化时替换数字节点", async () => {
+    mockBaseState();
+    const { container } = render(<PomodoroPanel />);
+    await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
+    const before = container.querySelector(".timer-ring-time");
+
+    act(() =>
+      emitMockEvent("pomodoro-tick", {
+        stage: "focus",
+        remaining_secs: 1499,
+        total_secs: 1500,
+        running: true,
+        rounds_done: 0,
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText("24:59")).toBeTruthy());
+    const after = container.querySelector(".timer-ring-time");
+    expect(after).not.toBe(before);
+    expect(container.querySelectorAll(".timer-ring-time")).toHaveLength(1);
+  });
+
+  it("最后 10s 进入强调态：环描边转警示色", async () => {
+    mockBaseState();
+    const { container } = render(<PomodoroPanel />);
+    await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
+    const view = () => container.querySelector(".timer-pomodoro-view")!;
+
+    act(() =>
+      emitMockEvent("pomodoro-tick", {
+        stage: "focus",
+        remaining_secs: 10,
+        total_secs: 1500,
+        running: true,
+        rounds_done: 0,
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText("00:10")).toBeTruthy());
+    expect(view().className).toContain("is-urgent");
+    const ring = container.querySelector(".timer-ring-fg") as SVGCircleElement;
+    expect(ring.style.stroke).toBe("var(--color-danger)");
+  });
+
+  it("暂停在最后 10s 内也不进入强调态", async () => {
+    mockBaseState();
+    const { container } = render(<PomodoroPanel />);
+    await waitFor(() => expect(screen.getByText("25:00")).toBeTruthy());
+
+    act(() =>
+      emitMockEvent("pomodoro-tick", {
+        stage: "focus",
+        remaining_secs: 8,
+        total_secs: 1500,
+        running: false,
+        rounds_done: 0,
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText("00:08")).toBeTruthy());
+    expect(container.querySelector(".timer-pomodoro-view")!.className).not.toContain("is-urgent");
+    const ring = container.querySelector(".timer-ring-fg") as SVGCircleElement;
+    expect(ring.style.stroke).toBe("var(--color-accent)");
   });
 });

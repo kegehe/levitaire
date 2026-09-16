@@ -1,10 +1,30 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { fileURLToPath, URL as NodeURL } from "node:url";
 import { invoke } from "@tauri-apps/api/core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearMockListeners, setMockWindow } from "../../test/tauri-mock";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearMockListeners, mockStartDragging, setMockWindow } from "../../test/tauri-mock";
 import StickyNoteManager from "./StickyNoteManager";
 
 const mockInvoke = vi.mocked(invoke);
+
+/**
+ * 声明级真值：测试环境（happy-dom）不做布局，量不到面板实际高度、也判断不出按钮是不是
+ * 整宽，只能对着 CSS 源码断言（同 UtilityHub.test.tsx / tooltipDirection.test.ts 的思路）。
+ * 用 node:url 的 URL 解析：测试环境里全局 URL 被换掉，fileURLToPath 会认不出来。
+ */
+function readManagerCss(): string {
+  const css = readFileSync(
+    fileURLToPath(new NodeURL("./StickyNoteManager.css", import.meta.url)),
+    "utf8",
+  );
+  return css.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ");
+}
+
+function ruleFor(css: string, selector: string): string {
+  const start = css.indexOf(`${selector} {`);
+  return start === -1 ? "" : css.slice(start, css.indexOf("}", start));
+}
 
 const NOTES = [
   {
@@ -40,6 +60,10 @@ describe("StickyNoteManager", () => {
     setMockWindow({ label: "sticky-notes-manager" });
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("挂载时恢复已钉便签并渲染列表（含已收起占位）", async () => {
     mockDefault();
     render(<StickyNoteManager />);
@@ -70,7 +94,7 @@ describe("StickyNoteManager", () => {
     });
   });
 
-  it("底部新建按钮创建新便签", async () => {
+  it("标题栏新建按钮创建新便签", async () => {
     mockDefault();
     render(<StickyNoteManager />);
     await screen.findByText("买牛奶");
@@ -79,6 +103,46 @@ describe("StickyNoteManager", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("create_sticky_note", { colorId: "yellow" });
     });
+  });
+
+  // 窗口不是固定尺寸：高度由面板实测高度 + 上下投影留白算出并下发给原生窗。
+  // 少了这一步，空状态（内容只有一百多像素）也会被撑成一大片空白 —— 用户看到的
+  // 就是「按钮孤零零悬在面板中央」。
+  it("按面板实测高度下发窗口尺寸（含上下投影留白）", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      width: 332,
+      height: 157,
+    } as DOMRect);
+    mockDefault();
+
+    render(<StickyNoteManager />);
+    await screen.findByText("买牛奶");
+
+    const window = (await import("@tauri-apps/api/webviewWindow")).getCurrentWebviewWindow();
+    await waitFor(() => {
+      // 面板 157 + 顶部留白 14 + 底部留白 28；宽度固定 360（面板 332 + 左右各 14）
+      expect(window.setSize).toHaveBeenCalledWith(
+        expect.objectContaining({ width: 360, height: 199 }),
+      );
+    });
+    // 只下发一次：面板没变就不再 setSize（ResizeObserver 首次回调、notes 变化重跑都必须
+    // 被尺寸去重吃掉），否则窗口会被反复重排。
+    expect(window.setSize).toHaveBeenCalledTimes(1);
+  });
+
+  it("面板高度由内容决定（窗口自适应成立的前提）", () => {
+    const css = readManagerCss();
+
+    // 面板/外框一旦撑满窗口，实测高度就等于窗口高度，窗口只会越调越大（反馈环）
+    expect(ruleFor(css, ".snm-window")).not.toMatch(/height: 100vh/);
+    expect(ruleFor(css, ".snm-panel")).not.toMatch(/height: 100%/);
+    // 空状态同理：撑满面板就把窗口拉回固定高度，又变成一大片空白
+    expect(ruleFor(css, ".snm-empty")).not.toMatch(/flex: 1/);
+    // 便签多时靠 max-height 收口，不能让列表无限撑高窗口
+    expect(ruleFor(css, ".snm-list")).toMatch(/max-height: \d+px/);
+    // 空状态的新建按钮是自撑宽的胶囊，不是整宽主按钮
+    expect(ruleFor(css, ".snm-add-btn")).toMatch(/display: inline-flex/);
+    expect(ruleFor(css, ".snm-add-btn")).not.toMatch(/width: 100%/);
   });
 
   it("点击行唤出已收起的便签", async () => {
@@ -101,6 +165,50 @@ describe("StickyNoteManager", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("collect_sticky_note", { id: "note-1" });
     });
+  });
+
+  // 「全部唤出」是「全部收起」的逆操作：批量把已收起的便签贴回桌面。
+  it("全部唤出按钮把所有已收起的便签贴回桌面", async () => {
+    mockDefault();
+    render(<StickyNoteManager />);
+    await screen.findByText("买牛奶");
+
+    const showAllBtn = screen.getByLabelText("唤出全部便利贴");
+    // 有 1 张已收起 → 可点
+    expect(showAllBtn).not.toBeDisabled();
+    fireEvent.click(showAllBtn);
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("show_all_notes");
+    });
+  });
+
+  // 两个批量按钮各自按「有没有对应目标的便签」置灰：没有已收起的便签时「全部唤出」
+  // 是空操作，没有已贴桌面的便签时「全部收起」是空操作。**两个方向都钉住**——只断言
+  // 一边的话，把判定条件写反（例如两边都拿 pinnedCount）在另一边仍然是绿的。
+  it("批量按钮按各自的目标数量置灰", async () => {
+    const renderWith = async (notes: unknown[]) => {
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === "get_sticky_notes") return Promise.resolve(notes);
+        return Promise.resolve();
+      });
+      const view = render(<StickyNoteManager />);
+      await waitFor(() => {
+        expect(view.container.querySelectorAll(".snm-item").length).toBe(notes.length);
+      });
+      return view;
+    };
+
+    // 全部已贴在桌面：能收起、不能唤出
+    const pinnedOnly = await renderWith([NOTES[0]]);
+    expect(screen.getByLabelText("唤出全部便利贴")).toBeDisabled();
+    expect(screen.getByLabelText("收起全部便利贴")).not.toBeDisabled();
+    pinnedOnly.unmount();
+
+    // 全部已收起：能唤出、不能收起
+    const hiddenOnly = await renderWith([{ ...NOTES[1] }]);
+    expect(screen.getByLabelText("唤出全部便利贴")).not.toBeDisabled();
+    expect(screen.getByLabelText("收起全部便利贴")).toBeDisabled();
+    hiddenOnly.unmount();
   });
 
   it("删除需二次确认：首击仅进入待确认态，二次点击才彻底删除", async () => {
@@ -206,5 +314,36 @@ describe("StickyNoteManager", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("collect_sticky_note", { id: "note-1" });
     });
+  });
+
+  // 管理窗同样是无边框窗（decorations:false），没有原生标题栏。
+  // 标题栏缺拖拽面时整窗完全无法移动（位置记忆也就永远只记得创建坐标），
+  // 这里钉住：标题栏任意非按钮处都能拖，按钮仍然是点击目标。
+  it("标题栏可拖动整窗，按钮不抢拖拽", async () => {
+    mockDefault();
+    render(<StickyNoteManager />);
+    await screen.findByText("买牛奶");
+
+    const header = document.querySelector(".snm-header") as HTMLElement;
+    expect(header).toBeTruthy();
+
+    // 标题文字是子元素，命中元素不是按钮 → 可拖
+    fireEvent.mouseDown(within(header).getByText("便利贴"));
+    expect(mockStartDragging).toHaveBeenCalledTimes(1);
+
+    // 标题栏自身（左右两端的留白）→ 可拖
+    fireEvent.mouseDown(header);
+    expect(mockStartDragging).toHaveBeenCalledTimes(2);
+
+    // 「新建 / 唤出全部 / 收起全部 / 隐藏」是点击目标，不能被拖拽吃掉
+    fireEvent.mouseDown(screen.getByLabelText("新建便利贴"));
+    fireEvent.mouseDown(screen.getByLabelText("唤出全部便利贴"));
+    fireEvent.mouseDown(screen.getByLabelText("收起全部便利贴"));
+    fireEvent.mouseDown(screen.getByLabelText("隐藏管理窗"));
+    expect(mockStartDragging).toHaveBeenCalledTimes(2);
+
+    // 右键不进入拖拽
+    fireEvent.mouseDown(header, { button: 2 });
+    expect(mockStartDragging).toHaveBeenCalledTimes(2);
   });
 });

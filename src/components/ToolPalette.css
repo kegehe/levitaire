@@ -1,5 +1,31 @@
+/* ── Stage ─────────────────────────────────────────────── */
+/* 原生窗口 = 视觉面板 + 四周留白（40 = 2×20）。
+ *
+ * 留白是给 .palette-container 的投影展开用的。窗口尺寸若等于面板尺寸，
+ * 投影没有任何展开空间，只在四个圆角「缺口」（半径 18px → 最深约 7.5px）
+ * 里露出一小块，并在窗口边界处被硬切出直角 —— 视觉上就是「圆角面板的四角
+ * 还贴着一块直角阴影」。腾出留白后投影正常渐隐，圆角外只剩干净的桌面。
+ *
+ * width: max-content 不能省：块级元素默认宽度取自包含块（= 初始窗口宽 436），
+ * 那样留白会把面板挤出去、测得的外框宽仍是 436，窗口永远长不到 476。
+ *
+ * ⚠️ padding 值必须与 Rust 侧 show_palette 的 PALETTE_SHADOW_MARGIN 一致
+ *    （逻辑像素）。留白参与窗口坐标，Rust 靠它把窗口左上角从「面板位置」
+ *    反推出去；两边不一致会让面板相对悬浮球整体偏移。
+ *    同页还须保证 --palette-shadow 的模糊半径/偏移不超出这个留白。 */
+.palette-stage {
+  width: max-content;
+  padding: 20px;
+}
+
 .palette-container {
-  width: 330px;
+  /* 面板宽度 = 4 列卡片所需的最小宽度，且必须让卡片维持 ≈97px：
+   * 卡片内右上角的启用开关有 16px 视觉 + ::after 外扩 4px = 24px 热区，图标徽标 38px 居中，
+   * 二者间隙 = 卡片宽/2 − 46.45（实测拟合）。卡片窄到 88.5px（面板 404px）时该间隙为
+   * −1.7px —— 那个看不见的热区会压到徽标右上角，点那块变成「切换开关」而不是打开工具。
+   * 97px（面板 436px）把间隙恢复到 +2px，与 3 列时代（96.5px / +2.05px）一致。
+   * 改动时同步 src-tauri/src/commands/window.rs 的 PALETTE_PANEL_WIDTH（+2×留白 = 窗口宽）。 */
+  width: 436px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -29,6 +55,10 @@
   pointer-events: auto;
 }
 .palette-header {
+  /* 作为 .palette-sr-only 的定位基准：它必须是「有定位的祖先」，否则那个 1px 的
+     无障碍文本会挂到初始包含块（视口）上，位置就不受控了。
+     注意本组件此前没有 position，别把它误删成 UtilityHub 那种带 z-index 的写法。 */
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -40,19 +70,40 @@
   align-items: center;
   gap: 7px;
 }
-.palette-status {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-fg-subtle);
+/* 仅屏幕阅读器可见：给面板补一个可读的中文名，不参与布局与绘制。
+   （用 .palette-header 的 position: relative 作定位基准，尺寸压到 1px 再裁掉；
+     若基准丢了它就落到视口原点，虽然照样看不见，但位置不再受控。） */
+.palette-sr-only {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  white-space: nowrap;
+  clip-path: inset(50%);
+  /* 1px 的盒子也可能落在头部左上角（圆角缺口的边缘）而抢掉一次点击，
+     既然它只是给读屏用的文本，就彻底不参与命中测试。 */
+  pointer-events: none;
 }
-.palette-status.is-live {
-  background: var(--color-accent);
-}
+/* 标题 = 悬浮球当前角色图标 + 产品名（Levitaire）。标记与 orb 同源（同一个 OrbIcon
+ * 组件与 ICON_MARKUP），取 --orb-icon-color 保持与悬浮球一致；不额外加圆底：
+ * 20px 的小圆底会把角色糊成一坨。
+ * 角色自带的待机动画（漂浮/摆动）在 OrbIcon.css 里，hover 加速版只挂在
+ * .orb-container / .settings-orb-option 上，所以面板里只播待机动画，符合预期。 */
 .palette-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13.5px;
   font-weight: 600;
   letter-spacing: 0.01em;
+}
+.palette-title .orb-character {
+  flex: none;
+  color: var(--orb-icon-color);
 }
 .palette-close {
   position: relative;
@@ -101,9 +152,12 @@
   letter-spacing: 0.1em;
   line-height: 1.3;
 }
+/* 每行最多 4 个：10 个工具按三类分组后为 2 / 4 / 4 —— 每组各占 1 行，共 3 行。
+ * 卡片外框 = 内容宽 (436 − 24 padding − 3×8 gap) / 4 ≈ 97px，
+ * 刻意不把卡片压小：卡片内的命中区几何（见 .palette-container 的注释）撑不住更窄的卡片。 */
 .palette-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 .palette-error {

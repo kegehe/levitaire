@@ -54,6 +54,12 @@ pub fn set_timer_enabled(enabled: bool, app: tauri::AppHandle, config_manager: S
             let payload = state.pause_all();
             let _ = app.emit("timers-changed", &payload);
         }
+        // 番茄钟是时间工具的一个页签，工具被禁用时一并停止它的计时并同步 UI，
+        // 否则后端会继续跑计时（到点还会提醒），但用户已经没有任何入口看到它。
+        if let Some(pomodoro) = app.try_state::<crate::pomodoro::PomodoroState>() {
+            pomodoro.stop();
+            let _ = app.emit("pomodoro-tick", pomodoro.payload());
+        }
         if let Some(window) = app.get_webview_window("time-overlay") { let _ = window.hide(); }
     }
     config_manager.update_timer_enabled(enabled)

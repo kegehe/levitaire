@@ -309,10 +309,10 @@ describe("RecordingTool 使用用户配置的帧率/时长", () => {
       await Promise.resolve();
     });
     fireEvent.click(screen.getByText("全屏"));
-    fireEvent.click(screen.getByText("开始选择"));
+    fireEvent.click(screen.getByText("开始录制"));
   };
 
-  it("GIF 录制使用配置的 gifFps 与 maxDurationSec，全屏录制完整区域且不创建控制栏", async () => {
+  it("GIF 录制使用配置的 gifFps 与 maxDurationSec，全屏录制完整区域且改用原生指示层", async () => {
     await startFullscreenRecording(".rec-mode-gif");
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith(
@@ -320,18 +320,25 @@ describe("RecordingTool 使用用户配置的帧率/时长", () => {
         expect.objectContaining({ mode: "gif", fps: 5, maxDurationSec: 60 }),
       ),
     );
-    // 全屏录制应使用完整虚拟桌面区域（不再收缩底部 144px），且不显示控制栏
+    // 全屏录制应使用完整虚拟桌面区域（不再收缩底部 144px）
     expect(mockInvoke).toHaveBeenCalledWith(
       "start_recording",
       expect.objectContaining({ left: 0, top: 0, width: 1920, height: 1080 }),
     );
+    // 不创建 WebView2 控制窗（它会被 BitBlt 录进成片），改由原生指示层接管
     expect(mockEnsureRecordingControls).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "show_recording_indicator",
+        expect.objectContaining({ left: 0, top: 0, width: 1920, height: 1080 }),
+      ),
+    );
     // 已进入录制阶段：遮罩出现；全屏录制不渲染选区框（inset 边框会截进视频）
     await waitFor(() => expect(document.querySelector(".rec-rec-mask")).toBeTruthy());
     expect(document.querySelector(".rec-rec-selection")).toBeNull();
   });
 
-  it("视频录制使用配置的 videoFps 与 maxDurationSec，全屏不创建控制栏", async () => {
+  it("视频录制使用配置的 videoFps 与 maxDurationSec，全屏改用原生指示层", async () => {
     await startFullscreenRecording(".rec-mode-video");
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith(
@@ -340,5 +347,51 @@ describe("RecordingTool 使用用户配置的帧率/时长", () => {
       ),
     );
     expect(mockEnsureRecordingControls).not.toHaveBeenCalled();
+  });
+
+  /** 拖框选出一块区域并确认，触发 start_recording（区域录制路径） */
+  const startRegionRecording = async (modeClass: string) => {
+    // jsdom 未实现 pointer capture，AreaSelector 的拖框会调用它
+    Element.prototype.setPointerCapture = vi.fn();
+    Element.prototype.releasePointerCapture = vi.fn();
+
+    render(createElement(RecordingTool));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(document.querySelector(modeClass)!);
+    // 区域模式默认选中；等 ready（提示文案从「正在准备…」变为「拖动鼠标选择录制区域」）
+    // 之后才允许拖框，否则 pointerDown 会被 `!ready` 直接挡掉。
+    await waitFor(() => expect(screen.getByText("拖动鼠标选择录制区域")).toBeTruthy());
+
+    const overlay = document.querySelector(".rec-area-overlay")!;
+    fireEvent.pointerDown(overlay, { clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(overlay, { clientX: 300, clientY: 250 });
+    fireEvent.pointerUp(overlay, { clientX: 300, clientY: 250 });
+  };
+
+  it("区域录制仍走 WebView2 控制栏，不创建全屏专用的原生指示层", async () => {
+    await startRegionRecording(".rec-mode-video");
+
+    // 桌面与视口同为 1920×1080 → scale=1，拖框的 CSS 坐标即物理坐标
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "start_recording",
+        expect.objectContaining({
+          left: 100,
+          top: 100,
+          width: 200,
+          height: 150,
+          mode: "video",
+          fps: 30,
+          maxDurationSec: 60,
+        }),
+      ),
+    );
+    // 区域外有空间可放控制栏 → 仍走原来的 WebView2 控制窗，位置在录制区域外
+    expect(mockEnsureRecordingControls).toHaveBeenCalled();
+    expect(mockInvoke).toHaveBeenCalledWith("show_recording_controls");
+    // 原生指示层是「控制栏只能压在录制区域内」时的替代品，区域录制绝不能多出这一层
+    expect(mockInvoke).not.toHaveBeenCalledWith("show_recording_indicator", expect.anything());
   });
 });

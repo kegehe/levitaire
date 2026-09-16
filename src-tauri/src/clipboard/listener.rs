@@ -222,11 +222,15 @@ unsafe fn read_clipboard_text() -> Option<String> {
             return None;
         }
         let mem_size = GlobalSize(hmem);
-        let max_u16 = if mem_size > 0 {
-            (mem_size / 2).min(MAX_CLIPBOARD_U16)
-        } else {
-            MAX_CLIPBOARD_U16
-        };
+        // GlobalSize == 0 说明句柄不可信（拿不到边界）。**不能**回退成「按
+        // MAX_CLIPBOARD_U16 一路扫到 NUL」—— 那是拿一个未知边界去读内存，越界即访问违例。
+        // 合法的剪贴板文本句柄必然取得到大小，取不到就按「剪贴板里没有文本」处理
+        //（与 quick_input.rs / clipboard::manager 的同一读法保持一致）。
+        if mem_size == 0 {
+            let _ = GlobalUnlock(hmem);
+            return None;
+        }
+        let max_u16 = (mem_size / 2).min(MAX_CLIPBOARD_U16);
         let mut len = 0usize;
         let mut p = ptr as *const u16;
         while len < max_u16 && *p != 0 {

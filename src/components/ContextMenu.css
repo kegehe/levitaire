@@ -1,3 +1,11 @@
+/* 独立右键菜单窗口：四周留出投影留白。
+   见 utils/panelWindow.ts 的 PANEL_SHADOW_MARGIN —— 窗口尺寸由 showContextMenu
+   算成「菜单 + 2×留白」，留白供 .context-menu 的投影展开，否则投影会被窗口边界
+   硬切，在菜单圆角处留下带直角的残影。 */
+body.context-menu-window {
+  padding: 20px;
+}
+
 .context-menu {
   box-sizing: border-box;
   width: 100%;
@@ -6,9 +14,12 @@
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-bg-elevated);
+  /* 投影自包含字面值，不引用 --shadow-*：themePreferences 运行时会把它覆盖成
+     scheme 的大浮层投影，既让菜单显得过重，其伸展范围也超出上面的 20px 留白，
+     超出的部分照样会被窗口边界硬切。当前范围 = 模糊半径/2 + 垂直偏移 ≤ 20。 */
   box-shadow:
-    0 12px 32px rgb(0 0 0 / 0.22),
-    var(--shadow-sm);
+    0 6px 22px rgb(0 0 0 / 0.24),
+    0 1px 3px rgb(0 0 0 / 0.1);
   color: var(--color-fg);
   font-family: var(--font-sans, "Segoe UI", sans-serif);
   font-size: 13px;

@@ -38,7 +38,7 @@ export const FLOATING_TOOLS: FloatingTool[] = [
     id: "utility-hub",
     name: "通用工具",
     icon: "Grid3x3",
-    description: "内置取色器与滚动导航：拾取屏幕颜色、精确翻页长文档",
+    description: "内置取色器、滚动导航与窗口置顶：拾取屏幕颜色、精确翻页长文档、把任意窗口钉在最前",
     category: "screen",
     defaultEnabled: true,
     loader: () => import("./utility-hub/UtilityHub"),
@@ -95,20 +95,10 @@ export const FLOATING_TOOLS: FloatingTool[] = [
     activation: "immediate",
   },
   {
-    id: "pomodoro",
-    name: "番茄钟",
-    icon: "Tomato",
-    description: "常驻悬浮倒计时，专注/休息自动循环，到点 TTS 提示音提醒",
-    category: "system",
-    defaultEnabled: false,
-    loader: () => import("./pomodoro/PomodoroTool"),
-    activation: "immediate",
-  },
-  {
     id: "timer",
-    name: "时钟、倒计时、秒表与日历",
+    name: "时间工具",
     icon: "Clock",
-    description: "桌面时钟、倒计时、秒表与月历，支持农历日期、快速切换和分段计时",
+    description: "时钟、倒计时、番茄钟、秒表与月历，支持农历日期、专注循环和分段计时",
     category: "system",
     defaultEnabled: false,
     loader: () => import("./timer/TimerTool"),
@@ -161,21 +151,80 @@ const LEGACY_STORAGE_KEYS = ["floatory-tools-enabled", "floast-tools-enabled"];
 // 与工具级开关语义不同，迁移时只能按 defaultEnabled 初始化。
 const LEGACY_FEATURE_KEYS = ["floatory-toolbar-features", "floast-toolbar-features"];
 
-/** 工具启用状态的后端 getter 命令映射。
- * 用于前端与后端 config.json 真值同步（ToolPalette 启用开关、FloatingOrb 自启动）。
- * 新增工具时在此登记一项即可，调用方自动生效。 */
-export const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string }> = [
-  { id: "sketch", getter: "get_sketch_enabled" },
-  { id: "text-toolbar", getter: "get_text_toolbar_enabled" },
-  { id: "screenshot", getter: "get_screenshot_enabled" },
-  { id: "system-monitor", getter: "get_system_monitor_enabled" },
-  { id: "pomodoro", getter: "get_pomodoro_enabled" },
-  { id: "timer", getter: "get_timer_enabled" },
-  { id: "todo", getter: "get_todo_enabled" },
-  { id: "recording", getter: "get_recording_enabled" },
-  { id: "quick-input", getter: "get_quick_input_enabled" },
-  { id: "sticky-notes", getter: "get_sticky_notes_enabled" },
+/** 工具启用状态的后端读写命令映射。
+ *
+ * `getter` 用于启动/获焦时把后端 config.json 的真值同步回面板；
+ * `setter` 用于把面板开关（含「全部开启 / 全部关闭」）下发到后端。
+ *
+ * **新增工具必须在此登记一项**——漏登记不会报任何错，但该工具的开关会退化成
+ * 「只改前端状态」：既不持久化，也不会在禁用时收起已打开的窗口，于是 palette 的
+ * 「全部关闭」关不掉它（通用工具就曾因此漏登记，`setter` 也一并集中在这里，
+ * 避免再出现「id→命令」第二张手写表与本表不同步）。 */
+export const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string; setter: string }> = [
+  { id: "sketch", getter: "get_sketch_enabled", setter: "set_sketch_enabled" },
+  { id: "text-toolbar", getter: "get_text_toolbar_enabled", setter: "set_text_toolbar_enabled" },
+  { id: "screenshot", getter: "get_screenshot_enabled", setter: "set_screenshot_enabled" },
+  {
+    id: "system-monitor",
+    getter: "get_system_monitor_enabled",
+    setter: "set_system_monitor_enabled",
+  },
+  { id: "timer", getter: "get_timer_enabled", setter: "set_timer_enabled" },
+  { id: "todo", getter: "get_todo_enabled", setter: "set_todo_enabled" },
+  { id: "recording", getter: "get_recording_enabled", setter: "set_recording_enabled" },
+  { id: "quick-input", getter: "get_quick_input_enabled", setter: "set_quick_input_enabled" },
+  {
+    id: "sticky-notes",
+    getter: "get_sticky_notes_enabled",
+    setter: "set_sticky_notes_enabled",
+  },
+  { id: "utility-hub", getter: "get_utility_hub_enabled", setter: "set_utility_hub_enabled" },
 ];
+
+/** 取某工具的后端启用开关命令；未登记（有守卫测试兜底）时返回 undefined。 */
+export function backendSetterFor(id: string): string | undefined {
+  return BACKEND_TOOLS.find((tool) => tool.id === id)?.setter;
+}
+
+/**
+ * 已下线工具的 ID 别名：工具被并入其他工具后，旧 ID 需要映射到宿主工具，
+ * 否则存储里的启用状态与「启动时自动打开」配置会随工具下线一起丢失。
+ * - pomodoro → timer：番茄钟不再是独立工具，已并入「时间工具」（time-overlay）
+ */
+export const TOOL_ID_ALIASES: Readonly<Record<string, string>> = {
+  pomodoro: "timer",
+};
+
+/** 把可能已下线的旧工具 ID 映射为当前有效的工具 ID。 */
+export function resolveToolIdAlias(id: string): string {
+  return TOOL_ID_ALIASES[id] ?? id;
+}
+
+/** 读取存储中的工具 ID 数组；非数组/非法 JSON 返回 null（调用方回退 defaults 或跳过该 key）。 */
+function readStoredIds(raw: string): string[] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((id): id is string => typeof id === "string");
+  } catch {
+    return null;
+  }
+}
+
+/** 归一化存储中的工具 ID：应用下线别名、去掉已移除工具的残留项、去重（保留首次出现顺序）。 */
+function normalizeToolIds(ids: string[], allIdSet: Set<string>): string[] {
+  const result: string[] = [];
+  for (const id of ids) {
+    const resolved = resolveToolIdAlias(id);
+    if (allIdSet.has(resolved) && !result.includes(resolved)) result.push(resolved);
+  }
+  return result;
+}
+
+/** 判断归一化结果是否与存储原值一致（顺序敏感），不一致时需要写回。 */
+function sameIds(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
 
 /** 获取启用的工具 ID 列表 */
 export function getEnabledTools(): string[] {
@@ -185,10 +234,12 @@ export function getEnabledTools(): string[] {
   // 1) 当前 key
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored) {
-    const parsed = parseEnabledTools(stored, allIdSet);
-    // 解析成功即时返回（损坏则回退 defaults 并写回）；若过滤掉了残留 ID 需写回过滤结果
-    const result = parsed ?? defaults;
-    if (parsed === null || parsed.length !== countParsed(stored)) {
+    const raw = readStoredIds(stored);
+    // 解析成功即时返回（损坏则回退 defaults 并写回）；归一化会映射下线别名、
+    // 过滤残留 ID 并去重，与存储原值不一致时写回，避免每次启动重复迁移。
+    const normalized = raw ? normalizeToolIds(raw, allIdSet) : null;
+    const result = normalized ?? defaults;
+    if (!raw || !sameIds(raw, result)) {
       setEnabledTools(result);
     }
     return result;
@@ -200,10 +251,11 @@ export function getEnabledTools(): string[] {
   for (const legacy of LEGACY_STORAGE_KEYS) {
     const legacyVal = localStorage.getItem(legacy);
     if (legacyVal) {
-      const ids = parseEnabledTools(legacyVal, allIdSet);
+      const ids = readStoredIds(legacyVal);
       if (ids) {
-        setEnabledTools(ids);
-        return ids;
+        const normalized = normalizeToolIds(ids, allIdSet);
+        setEnabledTools(normalized);
+        return normalized;
       }
       // 内容损坏则跳过，尝试更早一代
     }
@@ -221,29 +273,15 @@ export function getEnabledTools(): string[] {
   return defaults;
 }
 
-/** 解析存储的 JSON 工具 ID 列表，过滤掉已移除工具的残留 ID，保留有效项。
- * 返回 null 表示内容损坏/非数组（调用方可回退 defaults 或跳过该 key）。 */
-function parseEnabledTools(raw: string, allIdSet: Set<string>): string[] | null {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-    return parsed.filter((id): id is string => allIdSet.has(id as string));
-  } catch {
-    return null;
-  }
-}
-
-/** 计算原始 JSON 数组的元素个数，用于判断过滤后是否需要写回。 */
-function countParsed(raw: string): number {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.length : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/** 保存启用的工具 ID 列表 */
+/** 保存启用的工具 ID 列表。
+ *
+ * 写入失败（配额耗尽 / 隐私模式）时降级为「仅本次会话生效」而不抛：读取侧
+ * （`readStoredIds`）早已有同样的兜底，写入侧不设防会让 `getEnabledTools()` 的
+ * 写回步骤把整个注册表初始化带崩（面板挂载即白屏）。 */
 export function setEnabledTools(ids: string[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+  } catch (error) {
+    console.warn("[registry] 工具启用状态写入 localStorage 失败，本次仅内存生效:", error);
+  }
 }

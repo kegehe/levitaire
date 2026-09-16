@@ -3,6 +3,7 @@
 //! 视频录制通过 ffmpeg 子进程 pipe 编码 MP4。
 
 pub mod gif_encoder;
+pub mod indicator;
 pub mod video_encoder;
 pub mod window_detect;
 

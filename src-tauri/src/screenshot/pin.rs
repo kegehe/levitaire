@@ -28,13 +28,13 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 use windows::Win32::System::Ole::CF_DIB;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-    GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    GetWindowRect, IsWindow, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
     SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
-    CS_VREDRAW, HTCAPTION, IDC_ARROW, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE,
-    SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_COMMAND, WM_CONTEXTMENU, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONUP,
-    WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    CS_VREDRAW, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, SWP_NOACTIVATE,
+    SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_COMMAND,
+    WM_CONTEXTMENU, WM_ERASEBKGND, WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
+    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// VK_ESCAPE 虚拟键码（避免跨模块导入 KeyboardAndMouse）
@@ -1144,6 +1144,70 @@ unsafe fn copy_pin_to_clipboard(hwnd: HWND) -> Result<(), String> {
 /// 可能触发 DestroyWindow → WM_NCDESTROY → drop(PinState)，使此处持有的 state 引用悬垂（UB）。
 /// 故此处仅克隆像素与变换参数（owned），把渲染（缩放/透明度）、PNG 编码、对话框与文件 IO
 /// 全部移到独立线程，既避免重入 wndproc，也不让大图放大渲染冻结贴图消息循环。
+/// 对话框期间临时切换窗口置顶（贴图窗是 `WS_EX_TOPMOST`）。
+///
+/// 为什么需要：rfd 的保存对话框没有 owner（`Show(d, NULL)`），而实测置顶窗会把
+/// **无主**对话框完全盖住、`SetForegroundWindow` 也抬不上来 —— 用户会以为
+/// 「点了保存没有任何反应」。这里在打开对话框前取消置顶、关闭后恢复。
+unsafe fn apply_window_topmost(hwnd: HWND, topmost: bool) {
+    // 贴图窗不是保存对话框的 owner（对话框无 owner），所以对话框开着时用户仍能关掉贴图。
+    // 那之后本函数会被再次调用（恢复置顶那一次），此时 HWND 已失效：直接 SetWindowPos
+    // 轻则静默失败，重则该句柄值已被系统复用给其他窗口，就会把无关窗口设成置顶。
+    if !IsWindow(Some(hwnd)).as_bool() {
+        return;
+    }
+    let insert_after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    let _ = SetWindowPos(
+        hwnd,
+        Some(insert_after),
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    );
+}
+
+/// 当前**可见且置顶**的贴图窗 HWND（供文件对话框期间临时取消置顶）。
+///
+/// 为什么不复用 `commands::OWN_WINDOW_LABELS`：贴图窗是 `CreateWindowExW` 建的原生窗，
+/// 既不在那份 label 清单里，也不归 tao 管（没有 `WebviewWindow` 句柄可查）。
+/// 漏掉它的后果与「只设 owner」是同一个坑：用户钉在屏幕上的截图正好压在文件对话框上时，
+/// 对话框仍被 `WS_EX_TOPMOST` 的贴图窗挡住（rfd 的对话框没有 owner）。
+pub fn topmost_pin_hwnds() -> Vec<isize> {
+    use windows::Win32::UI::WindowsAndMessaging as wam;
+
+    let all: Vec<isize> = pins_locked(|map| {
+        map.values()
+            .map(|pin| pin.hwnd)
+            .filter(|raw| *raw != 0)
+            .collect()
+    });
+    all.into_iter()
+        .filter(|raw| {
+            let hwnd = HWND(*raw as *mut std::ffi::c_void);
+            unsafe {
+                IsWindow(Some(hwnd)).as_bool()
+                    && wam::IsWindowVisible(hwnd).as_bool()
+                    && (wam::GetWindowLongPtrW(hwnd, wam::GWL_EXSTYLE) as u32
+                        & WS_EX_TOPMOST.0 as u32)
+                        != 0
+            }
+        })
+        .collect()
+}
+
+/// 取消 / 恢复给定贴图窗的置顶（成对使用，`topmost=false` 后必须再以 `true` 调一次）。
+///
+/// 用原生 `SetWindowPos` 而不是 tao 的 `set_always_on_top`：贴图窗不归 tao 管，走 tao
+/// 只会改它自己内部的标志、窗口的实际 Z 序不变。HWND 失效判定在 `apply_window_topmost` 内。
+pub fn set_pins_topmost(hwnds: &[isize], topmost: bool) {
+    for raw in hwnds {
+        let hwnd = HWND(*raw as *mut std::ffi::c_void);
+        unsafe { apply_window_topmost(hwnd, topmost) };
+    }
+}
+
 unsafe fn save_pin_as(hwnd: HWND) -> Result<(), String> {
     let state_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
         hwnd,
@@ -1161,6 +1225,8 @@ unsafe fn save_pin_as(hwnd: HWND) -> Result<(), String> {
     let height = state.height;
     let scale = state.scale;
     let opacity = state.opacity;
+    // HWND 不含 Send，跨线程只带裸地址、进线程再还原
+    let hwnd_raw = hwnd.0 as isize;
 
     std::thread::spawn(move || {
         // 应用当前缩放与透明度（所见即所得）
@@ -1185,10 +1251,14 @@ unsafe fn save_pin_as(hwnd: HWND) -> Result<(), String> {
             return;
         }
 
+        let pin_hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+        // 打开对话框期间取消置顶，避免它被自己这扇置顶窗盖住（见 apply_window_topmost 注释）
+        unsafe { apply_window_topmost(pin_hwnd, false) };
         let path = rfd::FileDialog::new()
             .set_file_name("screenshot.png")
             .add_filter("PNG 图片", &["png"])
             .save_file();
+        unsafe { apply_window_topmost(pin_hwnd, true) };
         if let Some(p) = path {
             if let Err(e) = std::fs::write(&p, &png_buf) {
                 crate::utils::logger::log("screenshot", &format!("save_pin_as 写入失败: {}", e));
@@ -1229,6 +1299,18 @@ pub fn close_pin(_app: &tauri::AppHandle, id: u32) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 关闭当前全部贴图窗（截图工具被禁用时调用）。
+///
+/// 贴图窗是独立原生窗口，不随 screenshot-overlay 隐藏而消失：不显式关闭的话，
+/// 「全部关闭」之后桌面上仍然留着已钉的截图（便利贴禁用会销毁便签窗，这里与之保持一致）。
+/// 逐个复用 close_pin，占位期（hwnd 尚未回填）的窗口也能被正确标记关闭。
+pub fn close_all_pins(app: &tauri::AppHandle) {
+    let ids: Vec<u32> = pins_locked(|m| m.keys().copied().collect());
+    for id in ids {
+        let _ = close_pin(app, id);
+    }
 }
 
 /// Dispatch a styled WebView context-menu action back to the pin's owning

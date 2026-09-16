@@ -1,5 +1,16 @@
 .utility-hub {
-  width: 120px;
+  /* 宽度贴合标题栏内容：拖拽手柄 + N 个工具按钮 + 关闭按钮，有几个排几个、彼此挨着，
+     右侧不留空档。旧实现写死 120px 再靠 `.utility-hub-close { margin-left: auto }`
+     把关闭按钮推到最右，工具按钮与它之间就空出一截。
+     取色 / 滚动导航面板不受影响：下方两个模式选择器与本规则同级，按源码顺序覆盖。
+
+     用 max-content 而非 fit-content：面板宽度是「量出来后拿去 setSize 定窗口」的输入
+     （见 UtilityHub.tsx 的 resizeToContent），宽度一旦受可用空间钳制就会形成反馈环——
+     窗口偏窄时面板被压窄、量到的仍是窄值，窗口再也长不回去，关闭按钮会永久卡在面板
+     边框外。max-content 让面板宽度只由内容决定，无论当前窗口多宽都能量回真值并自愈。
+     新增工具按钮后窗口会自动跟上，本文件的宽度值与 toolWindows.ts 的初始宽只是
+     首帧占位，不需要精确同步。 */
+  width: max-content;
   box-sizing: border-box;
   color: var(--color-fg);
   background: var(--palette-bg);
@@ -16,6 +27,9 @@
 .utility-hub--scroll {
   width: 216px;
 }
+.utility-hub--pin {
+  width: 224px;
+}
 .utility-hub-header {
   position: relative;
   z-index: 1;
@@ -23,16 +37,43 @@
   padding: 3px 5px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 3px;
   border-bottom: 1px solid var(--palette-header-border);
   cursor: grab;
   user-select: none;
 }
-.utility-hub-drag-space {
-  flex: 1;
+/* 拖拽手柄：六个点（GripVertical）。宽度固定 16px —— 旧版是 flex: 1 的空白条，
+   取色/滚动导航面板（220 / 216px）比标题栏内容宽得多，那条空白会被撑成一大片空场。
+   手柄本身不是 drag region（标题栏用 "deep" 覆盖整条，见 UtilityHub.tsx 注释），
+   它只做「可拖拽」的视觉指示：六个点用 mask + 语义色画在元素自身上（data URI 里
+   没法写 var()），因此不留子节点。 */
+.utility-hub-grip {
+  flex: 0 0 auto;
   align-self: stretch;
-  min-width: 12px;
+  width: 16px;
+  border-radius: 3px;
   cursor: grab;
+  opacity: 0.75;
+  background-color: var(--color-fg-subtle);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%23000'%3E%3Ccircle cx='9' cy='5' r='2'/%3E%3Ccircle cx='15' cy='5' r='2'/%3E%3Ccircle cx='9' cy='12' r='2'/%3E%3Ccircle cx='15' cy='12' r='2'/%3E%3Ccircle cx='9' cy='19' r='2'/%3E%3Ccircle cx='15' cy='19' r='2'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%23000'%3E%3Ccircle cx='9' cy='5' r='2'/%3E%3Ccircle cx='15' cy='5' r='2'/%3E%3Ccircle cx='9' cy='12' r='2'/%3E%3Ccircle cx='15' cy='12' r='2'/%3E%3Ccircle cx='9' cy='19' r='2'/%3E%3Ccircle cx='15' cy='19' r='2'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 12px;
+  mask-size: 12px;
+  transition:
+    opacity var(--transition-fast),
+    background-color var(--transition-fast);
+}
+.utility-hub-grip:hover {
+  opacity: 1;
+  background-color: var(--color-fg);
+}
+.utility-hub-grip:active {
+  cursor: grabbing;
+  opacity: 1;
 }
 .utility-hub-actions,
 .utility-hub-tools {
@@ -40,11 +81,21 @@
   align-items: center;
 }
 .utility-hub-actions {
-  gap: 3px;
+  /* flex-basis 取 auto（而不是 `flex: 1` 隐含的 0%）：标题栏宽度按内容收缩时，
+     这一项的外框宽就等于按钮组的 max-content，面板宽因此恰好等于「有几个按钮排几个」。
+     `justify-content: flex-end`：取色 / 滚动导航这类宽面板（220 / 216px）里整组按钮
+     贴右边界，关闭按钮留在右上角、工具按钮紧挨其左，中间不再有空白档。 */
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  gap: 2px;
 }
 .utility-hub-tools {
   gap: 2px;
 }
+/* 工具按钮与关闭按钮同属 .utility-hub-actions 并整体靠右（见该规则），两两相邻。
+   按钮组左侧到拖拽手柄之间的留白由标题栏的 `data-tauri-drag-region="deep"` 覆盖
+   （这一层的命中元素是 .utility-hub-actions，裸属性不会从 header 传下来），
+   拖拽时照样能抓住，不是吞点击的死区。 */
 .utility-hub-tools button,
 .utility-hub-close {
   position: relative;
@@ -199,6 +250,14 @@
   color: var(--color-fg-subtle);
   font-size: 11px;
 }
+/* 失败提示要一眼能和「已置顶：xxx」区分开 —— 两者文案位置相同，
+   靠颜色分辨才不会把一次失败读成操作成功。 */
+.utility-hub-message.is-error {
+  color: var(--color-danger);
+}
+.utility-pin .utility-hub-message {
+  margin: 0;
+}
 .utility-hub .scroll-nav {
   width: 100%;
   min-height: 0;
@@ -235,4 +294,130 @@
 .utility-hub .scroll-nav-presets button {
   min-height: 20px;
   font-size: 9px;
+}
+/* 相对滚动区（目标窗口没有精确滚动条时出现）。
+   新增的滚动导航控件必须在这里补一份紧凑尺度 —— 不补就按独立窗口（248px 宽）那套
+   尺寸渲染，在 216px 的通用工具面板里会明显偏大。 */
+.utility-hub .scroll-nav-hint {
+  font-size: 10px;
+}
+.utility-hub .scroll-nav-steps button {
+  min-height: 23px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+.utility-hub .scroll-nav-recover button {
+  min-height: 20px;
+  padding: 0 6px;
+  font-size: 10px;
+}
+.utility-hub .scroll-nav-error {
+  font-size: 10px;
+}
+
+/* ── 窗口置顶 ─────────────────────────────────────────────── */
+.utility-pin {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+}
+.utility-pin-pick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: var(--color-fg);
+  background: transparent;
+  border: 1px solid var(--palette-card-border);
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.utility-pin-pick:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+/* 点选中：按钮常亮，提示用户此刻左键正被接管 —— 这个模式下点击不会传给
+   下面的窗口，看不出状态的话很容易以为鼠标坏了。 */
+.utility-pin-pick.is-active {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+.utility-pin-hint {
+  margin: 0;
+  color: var(--color-fg-subtle);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.utility-pin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  /* 置顶的窗口一多，面板会一路长长到超出屏幕（窗口尺寸是量出来的，没有别的约束）。
+     上限之后改成滚动，面板本身始终放得下。滚动条走 global.css 里那套 6px 细样式。 */
+  max-height: 168px;
+  overflow-y: auto;
+}
+.utility-pin-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  padding: 0 2px 0 6px;
+  border: 1px solid var(--palette-card-border);
+  border-radius: 4px;
+}
+/* 长标题（网页标题动不动几十字）在面板里单行截断，完整内容交给 title 提示。 */
+.utility-pin-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-fg);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.utility-pin-list li button {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-fg-subtle);
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.utility-pin-list li button:hover {
+  color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+.utility-pin-clear {
+  min-height: 20px;
+  color: var(--color-fg-subtle);
+  background: transparent;
+  border: 1px solid var(--palette-card-border);
+  border-radius: 4px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.utility-pin-clear:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.utility-pin-empty {
+  margin: 0;
+  color: var(--color-fg-subtle);
+  font-size: 10px;
 }

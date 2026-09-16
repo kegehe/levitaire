@@ -3,8 +3,10 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
+
+use crate::utils::process::hidden_command;
 
 fn ffmpeg_path(extra_candidates: &[PathBuf]) -> PathBuf {
     if let Ok(path) = std::env::var("LEVITAIRE_FFMPEG_PATH") {
@@ -78,7 +80,10 @@ impl FfmpegEncoder {
             &format!("using ffmpeg binary: {}", encoder_path.to_string_lossy()),
         );
 
-        let mut child = Command::new(&encoder_path)
+        // ffmpeg.exe 是控制台程序，正式版（GUI 子系统）里必须用 hidden_command 启动，
+        // 否则系统会为它新建一个控制台窗口 —— 就是录制时弹出的那个黑窗。
+        // 详见 `crate::utils::process` 模块头注释。
+        let mut child = hidden_command(&encoder_path)
             .arg("-y") // 覆盖已有文件
             .arg("-loglevel")
             .arg("error")
@@ -256,7 +261,7 @@ mod tests {
     #[test]
     fn write_frame_rejects_wrong_sized_data() {
         // 创建一个真实的子进程，用 echo 替代 ffmpeg
-        let child = std::process::Command::new("cmd")
+        let child = hidden_command("cmd")
             .arg("/c")
             .arg("echo")
             .stdin(std::process::Stdio::piped())
@@ -279,7 +284,7 @@ mod tests {
 
     #[test]
     fn write_frame_fails_when_stdin_is_none() {
-        let mut child = std::process::Command::new("cmd")
+        let mut child = hidden_command("cmd")
             .arg("/c")
             .arg("echo")
             .stdin(std::process::Stdio::piped())
@@ -304,7 +309,7 @@ mod tests {
     #[test]
     fn finish_waits_for_child_exit() {
         // cmd /c echo 会立即退出
-        let child = std::process::Command::new("cmd")
+        let child = hidden_command("cmd")
             .arg("/c")
             .arg("echo")
             .arg("hello")
@@ -327,7 +332,7 @@ mod tests {
     #[test]
     fn finish_with_cancel_stops_waiting_when_canceled() {
         // 使用一个不会立即退出的进程: cmd /c timeout /t 60
-        let child = std::process::Command::new("cmd")
+        let child = hidden_command("cmd")
             .arg("/c")
             .arg("timeout")
             .arg("/t")
@@ -356,7 +361,7 @@ mod tests {
     #[test]
     fn finish_timouts_when_child_hangs() {
         // 使用 PowerShell Start-Sleep 模拟长时间挂起（stdin 为 piped 时不会提前退出）
-        let child = std::process::Command::new("powershell")
+        let child = hidden_command("powershell")
             .arg("-NoProfile")
             .arg("-Command")
             .arg("Start-Sleep -Seconds 300")
@@ -381,7 +386,7 @@ mod tests {
     #[test]
     fn drop_handles_already_exited_process() {
         // cmd /c echo 会立即退出
-        let child = std::process::Command::new("cmd")
+        let child = hidden_command("cmd")
             .arg("/c")
             .arg("echo")
             .stdin(std::process::Stdio::piped())
@@ -405,7 +410,7 @@ mod tests {
     #[test]
     fn drop_kills_running_process() {
         // 使用 PowerShell Start-Sleep 确保进程在 drop 时仍在运行
-        let child = std::process::Command::new("powershell")
+        let child = hidden_command("powershell")
             .arg("-NoProfile")
             .arg("-Command")
             .arg("Start-Sleep -Seconds 300")
@@ -423,5 +428,52 @@ mod tests {
         // 直接 drop，不应 panic，且子进程应被 kill
         drop(encoder);
         // 通过不 panic 来验证正确性
+    }
+
+    // ── 真实 ffmpeg 端到端 ─────────────────────────────────────────
+
+    /// 用仓库自带的 ffmpeg 真编一段 mp4。
+    ///
+    /// 覆盖本次改动最容易出错的地方：给 ffmpeg 加了 `CREATE_NO_WINDOW`（见
+    /// `utils::process::hidden_command`）之后，**stdin 管道数据通路必须照旧可用**——
+    /// 帧写不进去、ffmpeg 不退出、产物为空都会在这里报红。机器上没有 ffmpeg 时跳过。
+    #[test]
+    fn encodes_real_video_through_process_pipe() {
+        let encoder_path = ffmpeg_path(&[]);
+        let available = hidden_command(&encoder_path)
+            .arg("-version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !available {
+            // 没有 ffmpeg 的环境（例如没跑过 fetch 脚本的机器）不算失败。
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("levitaire-video-encoder-test");
+        std::fs::create_dir_all(&dir).expect("临时目录应可创建");
+        let output = dir.join("pipe_encode_test.mp4");
+        let _ = std::fs::remove_file(&output);
+
+        let (width, height, fps) = (64u32, 48u32, 10u32);
+        let mut encoder =
+            FfmpegEncoder::new(width, height, fps, &output, &[]).expect("ffmpeg 应能被拉起");
+
+        let frame = vec![0u8; (width as usize) * (height as usize) * 4];
+        for _ in 0..3 {
+            encoder.write_frame(&frame).expect("帧应能写入 stdin 管道");
+        }
+        encoder
+            .finish(std::time::Duration::from_secs(30))
+            .expect("ffmpeg 应正常退出");
+
+        let size = std::fs::metadata(&output)
+            .expect("应当产出 mp4 文件")
+            .len();
+        assert!(size > 0, "编码产物不应为空");
+        let _ = std::fs::remove_file(&output);
     }
 }

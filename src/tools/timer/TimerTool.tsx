@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -6,11 +7,17 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
 import { applyThemePreferences, getStoredThemePreferences, subscribeThemePreferences } from "../../styles/themePreferences";
 import { persistWindowPositionOnMove } from "../../utils/windowPosition";
+import { clampWindowToWorkArea } from "../../utils/panelWindow";
 import { buildDayNotes, getDayNote } from "./festivals";
+import Hourglass from "./Hourglass";
+import { REST_MARK_TEXT, getRestMark } from "./holidays";
+import PomodoroPanel from "./PomodoroPanel";
+import { formatTime } from "./formatTime";
+import { RING_CIRCUMFERENCE, RING_RADIUS, URGENT_SECONDS, ringHeadRotation } from "./ringGeometry";
 import "./TimerTool.css";
 
-type View = "clock" | "countdown" | "stopwatch" | "calendar";
-type Display = "compact" | "ring";
+type View = "clock" | "countdown" | "pomodoro" | "stopwatch" | "calendar";
+type Display = "compact" | "ring" | "hourglass";
 type ClockFace = "digital" | "analog";
 interface TimerItem {
   id: string;
@@ -39,12 +46,21 @@ const LUNAR_DAY_NAMES = [
   "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十",
 ];
 
-const RING_RADIUS = 50;
-const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 const CLOCK_FACE_KEY = "levitaire-timer-clock-style";
-/** 记住上次停留的页签（时钟/倒计时/秒表/日历），重开工具时直接恢复 */
+/** 倒计时的三种显示样式：数字 / 环形 / 沙漏，切换按钮按这个顺序循环 */
+const DISPLAY_ORDER: Display[] = ["compact", "ring", "hourglass"];
+/** 切换按钮的提示文案：告诉用户「点一下会变成哪个」，比只说「切换样式」有用 */
+const DISPLAY_LABELS: Record<Display, string> = { compact: "数字", ring: "环形", hourglass: "沙漏" };
+const DISPLAY_KEY = "levitaire-timer-display";
+
+/** 读取上次使用的显示样式；旧值/脏值一律回退到数字样式 */
+function loadStoredDisplay(): Display {
+  const stored = localStorage.getItem(DISPLAY_KEY);
+  return DISPLAY_ORDER.find((item) => item === stored) ?? "compact";
+}
+/** 记住上次停留的页签（时钟/倒计时/番茄钟/秒表/日历），重开工具时直接恢复 */
 const TIMER_VIEW_KEY = "levitaire-timer-view";
-const TIMER_VIEWS: View[] = ["clock", "countdown", "stopwatch", "calendar"];
+const TIMER_VIEWS: View[] = ["clock", "countdown", "pomodoro", "stopwatch", "calendar"];
 const CLOCK_FACE_CENTER = 60;
 /** 鼠标移出工具区域后，延迟收起顶部工具条的时间（避免划过边缘时闪烁） */
 const CHROME_COLLAPSE_DELAY_MS = 200;
@@ -52,6 +68,12 @@ const CHROME_COLLAPSE_DELAY_MS = 200;
 const COUNTDOWN_PRESETS_KEY = "levitaire-timer-presets";
 /** 倒计时允许的最大分钟数（与设定按钮的 24 小时上限保持一致） */
 const COUNTDOWN_MAX_MINUTES = 1440;
+/** 不参与拖窗的交互控件：按钮/输入等自己处理点击与输入，mousedown 不能拿来拖窗口 */
+const DRAG_EXEMPT_SELECTOR =
+  "button, input, textarea, select, a, [contenteditable='true'], [contenteditable='plaintext-only'], [contenteditable='']";
+/** 正在输入文本的控件：Esc 属于它们自己的交互（如取消预设编辑），不能被窗口级 Esc 吞掉 */
+const TEXT_ENTRY_SELECTOR =
+  "input, textarea, [contenteditable='true'], [contenteditable='plaintext-only'], [contenteditable='']";
 
 function formatLunarDate(date: Date): string {
   try {
@@ -108,14 +130,6 @@ function buildCalendarCells(month: Date): CalendarCell[] {
     }
   }
   return cells;
-}
-
-function formatTime(seconds: number): string {
-  const value = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(value / 3600);
-  const minutes = Math.floor((value % 3600) / 60);
-  const secs = value % 60;
-  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}` : `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
 function genId(): string {
@@ -219,7 +233,7 @@ function TimerTool() {
     return stored && TIMER_VIEWS.includes(stored) ? stored : "clock";
   });
   const [chromeOpen, setChromeOpen] = useState(false);
-  const [display, setDisplay] = useState<Display>(() => localStorage.getItem("levitaire-timer-display") === "ring" ? "ring" : "compact");
+  const [display, setDisplay] = useState<Display>(loadStoredDisplay);
   const [clockFace, setClockFace] = useState<ClockFace>(() => localStorage.getItem(CLOCK_FACE_KEY) === "analog" ? "analog" : "digital");
   const [now, setNow] = useState(() => new Date());
   const [timer, setTimer] = useState<TimerItem | null>(null);
@@ -265,6 +279,27 @@ function TimerTool() {
     return () => unlisten?.();
   }, []);
   useEffect(() => persistWindowPositionOnMove("time-overlay"), []);
+  // 其他工具请求切到番茄钟页签（待办「开始专注」显示本窗口后触发）：
+  // 否则窗口会停在记忆的页签上，看不到刚启动的专注倒计时。
+  useEffect(() => {
+    const un = listen("timer-focus-pomodoro", () => setView("pomodoro"));
+    return () => {
+      void un.then((fn) => fn());
+    };
+  }, []);
+  // Esc 隐藏窗口（仅隐藏，计时继续）。文本输入控件自己消费 Esc（取消预设编辑），
+  // 所以命中输入框时直接放行，避免「想取消编辑却把窗口关了」。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target;
+      if (target instanceof Element && target.closest(TEXT_ENTRY_SELECTOR)) return;
+      setChromeOpen(false);
+      void invoke("hide_timer_window");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   useEffect(() => () => {
     if (chromeCloseTimer.current) window.clearTimeout(chromeCloseTimer.current);
   }, []);
@@ -353,12 +388,27 @@ function TimerTool() {
     const shell = shellRef.current;
     if (!shell) return;
 
-    let lastHeight = 0;
+    // 已下发的窗口尺寸（"宽:高"）。ResizeObserver 的首次回调与同尺寸的重复回调都要被去重吃掉，
+    // 否则同一尺寸会被反复 setSize，窗口持续重排。
+    let lastSize = "";
     const resizeToContent = () => {
-      const height = Math.ceil(shell.getBoundingClientRect().height);
-      if (!height || height === lastHeight) return;
-      lastHeight = height;
-      win.setSize(new LogicalSize(view === "calendar" ? 380 : 300, height)).catch(() => {});
+      // 宽高都按面板**实测**下发：面板宽度由 CSS（.timer-shell 的 width: max-content）按内容算，
+      // 收起工具条时只剩内容宽度、展开工具条时被页签行撑宽，前端不再写死窗口宽度。
+      // 日历页签的 380px 固定在 CSS 的 .timer-shell[data-view="calendar"] 里。
+      const rect = shell.getBoundingClientRect();
+      const width = Math.ceil(rect.width);
+      const height = Math.ceil(rect.height);
+      // 0 = 还没布局（测试环境不做布局），此时下发会把窗口压成一条
+      if (!width || !height) return;
+      const size = `${width}:${height}`;
+      if (size === lastSize) return;
+      lastSize = size;
+      win.setSize(new LogicalSize(width, height)).catch(() => {});
+      // 面板变宽变高（展开工具条、切页签、切换倒计时样式）后，贴着屏幕右/下沿的窗口会有一部分
+      // 跑到工作区外，而本窗口是无边框置顶窗、没有滚动条，出屏部分直接看不到。
+      // 被挤回工作区后窗口不会自己回落，但那一侧的余量正好等于这次撑开的差额，再悬停一次即到位，
+      // 不会持续漂走（位置记忆由 Rust 侧的 clamp 抑制写回，见 clamp_window_to_workarea）。
+      clampWindowToWorkArea(width, height);
     };
 
     resizeToContent();
@@ -367,7 +417,7 @@ function TimerTool() {
     observer.observe(shell);
     return () => observer.disconnect();
   }, [view, win]);
-  useEffect(() => { localStorage.setItem("levitaire-timer-display", display); }, [display]);
+  useEffect(() => { localStorage.setItem(DISPLAY_KEY, display); }, [display]);
   useEffect(() => { localStorage.setItem(CLOCK_FACE_KEY, clockFace); }, [clockFace]);
   useEffect(() => { localStorage.setItem(COUNTDOWN_PRESETS_KEY, JSON.stringify(savedPresets)); }, [savedPresets]);
   useEffect(() => {
@@ -375,7 +425,11 @@ function TimerTool() {
     localStorage.setItem(TIMER_VIEW_KEY, view);
   }, [view]);
 
-  const value = timer?.remainingSecs ?? 0;
+  const remaining = timer?.remainingSecs ?? 0;
+  /** 强调态：剩余进入最后 URGENT_SECONDS 秒且计时正在运行，此时环与数字转警示色并逐秒跳动 */
+  const urgent = Boolean(timer?.running) && remaining > 0 && remaining <= URGENT_SECONDS;
+  /** 点一下样式按钮会切到的下一个样式（提示文案用） */
+  const nextDisplay = DISPLAY_ORDER[(DISPLAY_ORDER.indexOf(display) + 1) % DISPLAY_ORDER.length];
   const lunarDate = useMemo(() => formatLunarDate(now), [now]);
   const weekday = useMemo(() => new Intl.DateTimeFormat("zh-CN", { weekday: "long" }).format(now), [now]);
   const calendarCells = useMemo(() => buildCalendarCells(visibleMonth), [visibleMonth]);
@@ -482,33 +536,76 @@ function TimerTool() {
     }, CHROME_COLLAPSE_DELAY_MS);
   };
 
+  // 整窗拖拽：挂在卡片根节点上，除交互控件外的任意位置按下都能移动窗口。
+  // 之前只挂在顶部工具条上，而工具条从左到右被页签按钮占满，真正的空白只剩
+  // 页签与操作区之间那一条窄缝——表现就是「只有右边一小条能拖，左边拖不动」；
+  // 工具条收起时（默认态）更是完全没有可拖区域。
+  const startWindowDrag = (event: ReactMouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    // 判定用 Element 而不是 HTMLElement：图标渲染的是 <svg>，按下位置落在 SVG
+    // 子节点上时 instanceof HTMLElement 为 false，会把「按钮内部」误判成可拖区域
+    // （Element 才同时覆盖 HTMLElement 与 SVGElement，closest 也定义在 Element 上）。
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest(DRAG_EXEMPT_SELECTOR)) return;
+    // 拦掉默认行为，避免拖拽过程中触发文字选区
+    event.preventDefault();
+    void win.startDragging().catch(() => {});
+  };
+
   return <div
     ref={shellRef}
-    className={`timer-shell timer-${display}${chromeOpen ? " is-chrome-open" : ""}`}
+    // 修饰类必须带 `display-` 前缀：`.timer-${display}` 曾生成 `timer-hourglass`，
+    // 与沙漏图形的 `.timer-hourglass` 撞名，把整块面板压成 112×112（详见 TimerTool.css 的说明）。
+    // data-view 给 CSS 用（日历页签固定 380px 宽），不加类名——面板的类名集合被测试钉死为
+    // 「timer-shell + 显示样式修饰类」。
+    className={`timer-shell timer-display-${display}${chromeOpen ? " is-chrome-open" : ""}`}
+    data-view={view}
+    onMouseDown={startWindowDrag}
     onMouseEnter={openChrome}
     onMouseMove={openChrome}
     onMouseLeave={scheduleCloseChrome}
     onFocusCapture={() => setChromeOpen(true)}
   >
-    <header className="timer-header" onMouseDown={(event) => { if (event.button === 0 && !(event.target as HTMLElement).closest("button,input")) void win.startDragging(); }}>
-      <div className="timer-tabs" role="tablist" aria-label="时钟工具模式">
+    <header className="timer-header">
+      <div className="timer-tabs" role="tablist" aria-label="时间工具模式">
         <button type="button" role="tab" aria-selected={view === "clock"} className={view === "clock" ? "is-active" : ""} onClick={() => setView("clock")}>时钟</button>
         <button type="button" role="tab" aria-selected={view === "countdown"} className={view === "countdown" ? "is-active" : ""} onClick={() => setView("countdown")}>倒计时</button>
+        <button type="button" role="tab" aria-selected={view === "pomodoro"} className={view === "pomodoro" ? "is-active" : ""} onClick={() => setView("pomodoro")}>番茄钟</button>
         <button type="button" role="tab" aria-selected={view === "stopwatch"} className={view === "stopwatch" ? "is-active" : ""} onClick={openStopwatch}>秒表</button>
         <button type="button" role="tab" aria-selected={view === "calendar"} className={view === "calendar" ? "is-active" : ""} onClick={() => setView("calendar")}>日历</button>
       </div>
       <div className="timer-actions">
         {view === "clock" && <button aria-label="切换时钟样式" data-tooltip="切换样式" onClick={() => setClockFace(clockFace === "digital" ? "analog" : "digital")}><Icon name="Palette" size={14} /></button>}
-        {view === "countdown" && <button aria-label="切换倒计时样式" data-tooltip="切换样式" onClick={() => setDisplay(display === "compact" ? "ring" : "compact")}><Icon name="Palette" size={14} /></button>}
-        <button aria-label="关闭时钟工具" data-tooltip="关闭" onClick={() => { setChromeOpen(false); void invoke("hide_timer_window"); }}><Icon name="X" size={14} /></button>
+        {view === "countdown" && <button aria-label="切换倒计时样式" data-tooltip={`切换为${DISPLAY_LABELS[nextDisplay]}`} onClick={() => setDisplay(nextDisplay)}><Icon name="Palette" size={14} /></button>}
+        <button aria-label="关闭时间工具" data-tooltip="关闭" onClick={() => { setChromeOpen(false); void invoke("hide_timer_window"); }}><Icon name="X" size={14} /></button>
       </div>
     </header>
     {view === "clock" ? <main className="timer-clock-view">
       {clockFace === "analog" ? <AnalogFace now={now} /> : <strong className="timer-local-clock-value">{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</strong>}
       <span className="timer-date">{now.toLocaleDateString()} · {weekday}{lunarEnabled && lunarDate ? ` · ${lunarDate}` : ""}</span>
-    </main> : view === "countdown" ? <main className={`timer-countdown-view${timer?.completed ? " is-complete" : ""}`}>
+    </main> : view === "countdown" ? <main className={`timer-countdown-view${timer?.completed ? " is-complete" : ""}${timer?.running ? " is-running" : ""}${urgent ? " is-urgent" : ""}`}>
       <span className="timer-eyebrow">倒计时</span>
-      {display === "ring" ? <div className="timer-ring-view"><svg viewBox="0 0 120 120" aria-hidden><circle className="timer-ring-bg" cx="60" cy="60" r={RING_RADIUS} />{progress > 0 && <circle className="timer-ring-fg" cx="60" cy="60" r={RING_RADIUS} style={{ strokeDasharray: RING_CIRCUMFERENCE, strokeDashoffset: RING_CIRCUMFERENCE * (1 - progress) }} />}</svg><strong>{formatTime(value)}</strong></div> : <strong className="timer-primary-value">{formatTime(value)}</strong>}
+      {display === "ring" ? <div className="timer-ring-view" style={{ "--ring-from": String(RING_CIRCUMFERENCE) } as CSSProperties}>
+        <svg viewBox="0 0 120 120" aria-hidden>
+          <circle className="timer-ring-bg" cx="60" cy="60" r={RING_RADIUS} />
+          {/* 进度为 0 时不画前景弧：stroke-linecap: round 会把零长度弧渲染成 12 点方向的圆点 */}
+          {progress > 0 && <circle className="timer-ring-fg" cx="60" cy="60" r={RING_RADIUS} style={{ strokeDasharray: RING_CIRCUMFERENCE, strokeDashoffset: RING_CIRCUMFERENCE * (1 - progress) }} />}
+          {/* 环头珠子贴在弧尖上随剩余进度绕圈（旋转量见 ringHeadRotation：要补回外层
+              svg 自己的 -90°，否则珠子会落后弧尖 90°）。只在运行时渲染——暂停时珠子
+              消失，与运行状态一眼可分。 */}
+          {timer?.running && progress > 0 && <g className="timer-ring-head" style={{ transform: `rotate(${ringHeadRotation(progress)}deg)` }}><circle cx="60" cy="10" r="4.2" /></g>}
+        </svg>
+        {/* key=剩余秒数：每秒重挂一次，重放数字跳动动画，让「减少」被看见 */}
+        <strong key={remaining}>{formatTime(remaining)}</strong>
+      </div> : display === "hourglass" ? <>
+        {/* 沙漏样式：沙量即剩余时间（面积等比，见 hourglassGeometry），数字排在瓶下方 */}
+        <Hourglass progress={progress} running={Boolean(timer?.running)} />
+        <strong key={remaining} className="timer-primary-value timer-hg-value">{formatTime(remaining)}</strong>
+      </> : <>
+        <strong key={remaining} className="timer-primary-value">{formatTime(remaining)}</strong>
+        {/* 紧凑样式没有环，用一条进度条承载同样的「剩余比例」信息 */}
+        <span className="timer-progress" aria-hidden><span className="timer-progress-fill" style={{ transform: `scaleX(${progress})` }} /></span>
+      </>}
       {timer && !timer.running && <div className="timer-presets">{[1, 5, 10, 25].map((minutes) => <button key={minutes} onClick={() => applyDurationMinutes(minutes)}>{minutes}分</button>)}<input aria-label="自定义分钟数" inputMode="numeric" value={customMinutes} onChange={(event) => setCustomMinutes(event.target.value.replace(/[^0-9]/g, "").slice(0, 4))} /><button disabled={!customMinutes} onClick={() => void mutateTimer(timer, "set_timer_duration", { seconds: clampCountdownMinutes(Number(customMinutes)) * 60 })}>设定</button><button type="button" className="timer-preset-save" aria-label="保存为预设" data-tooltip="存为预设" onClick={startAddPreset}><Icon name="Bookmark" size={12} /></button></div>}
       {timer && !timer.running && (savedPresets.length > 0 || addingPreset) && <div className="timer-my-presets">
         {addingPreset && <div className="timer-preset-editor">
@@ -523,8 +620,8 @@ function TimerTool() {
         </span>)}
       </div>}
       <div className="timer-controls"><button className="timer-play" onClick={() => void mutateTimer(timer, timer?.running ? "pause_timer" : "start_timer")}><Icon name={timer?.running ? "Pause" : "Play"} size={16} />{timer?.running ? "暂停" : "开始"}</button><button aria-label="增加一分钟" data-tooltip="增加一分钟" onClick={() => void mutateTimer(timer, "add_timer_seconds", { seconds: 60 })}><Icon name="Plus" size={16} /></button><button aria-label="重置倒计时" data-tooltip="重置" onClick={() => void mutateTimer(timer, "reset_timer")}><Icon name="RotateCcw" size={15} /></button></div>
-    </main> : view === "stopwatch" ? <main className="timer-stopwatch-view">
-      {editingLabel ? <input className="timer-label-input" autoFocus value={labelDraft} maxLength={60} onChange={(event) => setLabelDraft(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") commitRename(); if (event.key === "Escape") { setLabelDraft(stopwatch?.label ?? ""); setEditingLabel(false); } }} /> : <button type="button" className="timer-eyebrow timer-label" title="双击重命名" onDoubleClick={startRename}><Icon name="Pencil" size={11} />{stopwatch?.label ?? "秒表"}</button>}
+    </main> : view === "pomodoro" ? <PomodoroPanel /> : view === "stopwatch" ? <main className="timer-stopwatch-view">
+      {editingLabel ? <input className="timer-label-input" autoFocus value={labelDraft} maxLength={60} onChange={(event) => setLabelDraft(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") commitRename(); if (event.key === "Escape") { setLabelDraft(stopwatch?.label ?? ""); setEditingLabel(false); } }} /> : <button type="button" className="timer-eyebrow timer-label" title="双击重命名" onDoubleClick={startRename}><Icon name="Pencil" size={11} /><span className="timer-label-text">{stopwatch?.label ?? "秒表"}</span></button>}
       <strong className="timer-primary-value">{formatTime(stopwatch?.elapsedSecs ?? 0)}</strong>
       <div className="timer-controls">
         <button className="timer-play" onClick={() => void mutateTimer(stopwatch, stopwatch?.running ? "pause_timer" : "start_timer")}><Icon name={stopwatch?.running ? "Pause" : "Play"} size={16} />{stopwatch?.running ? "暂停" : "开始"}</button>
@@ -546,8 +643,11 @@ function TimerTool() {
           const isToday = key === dateKey(now);
           const isSelected = key === selectedDate;
           const note = calendarNotes.get(key);
-          return <button type="button" key={key} className={`calendar-cell${cell.isCurrentMonth ? "" : " is-outside"}${isToday ? " is-today" : ""}${isSelected ? " is-selected" : ""}`} role="gridcell" aria-selected={isSelected} aria-label={`${cell.date.toLocaleDateString()}${isToday ? "，今天" : ""}${note ? `，${note.text}` : ""}`} onClick={() => { followsTodayRef.current = false; setSelectedDate(key); if (!cell.isCurrentMonth) setVisibleMonth(new Date(cell.date.getFullYear(), cell.date.getMonth(), 1)); }}>
+          // 休 / 班角标：仅法定放假日与调休上班日有值，普通周末与工作日为 null
+          const restMark = getRestMark(cell.date);
+          return <button type="button" key={key} className={`calendar-cell${cell.isCurrentMonth ? "" : " is-outside"}${isToday ? " is-today" : ""}${isSelected ? " is-selected" : ""}`} role="gridcell" aria-selected={isSelected} aria-label={`${cell.date.toLocaleDateString()}${isToday ? "，今天" : ""}${note ? `，${note.text}` : ""}${restMark ? `，${REST_MARK_TEXT[restMark]}` : ""}`} onClick={() => { followsTodayRef.current = false; setSelectedDate(key); if (!cell.isCurrentMonth) setVisibleMonth(new Date(cell.date.getFullYear(), cell.date.getMonth(), 1)); }}>
             <span>{cell.date.getDate()}</span>
+            {restMark && <small className={`calendar-rest rest-${restMark}`} aria-hidden="true">{REST_MARK_TEXT[restMark]}</small>}
             {note ? <small className={note.kind === "festival" ? "note-festival" : "note-term"}>{note.text}</small> : lunarEnabled ? <small>{formatLunarDay(cell.date)}</small> : null}
           </button>;
         })}
