@@ -1,0 +1,30 @@
+# 文本文件的行尾统一为 LF。
+#
+# 为什么需要它：CI 的后端作业跑在 windows-latest，那边默认 core.autocrlf=true。
+# 没有本文件时，检出到工作区的是 CRLF，而开发机的本地工作区长期是 LF —— 两边
+# 不一致。源码级守卫（`include_str!` + 字符串匹配）因此会「本地绿、CI 红」：
+# updater / mouse 两处守卫写死了带尾随换行的字面量，CRLF 下匹配不到
+# （见 4f58e22）。`.gitattributes` 的优先级高于 core.autocrlf，这里显式钉死
+# 检出行为，不再依赖各机器的 git 配置。
+#
+# `text=auto` 保留 git 的二进制嗅探：只对判定为文本的文件强制 LF，二进制原样。
+* text=auto eol=lf
+
+# 显式声明二进制，避免将来被嗅探误判成文本而改写（图标 / 模型 / 安装包等）。
+*.png   binary
+*.ico   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.onnx  binary
+*.exe   binary
+*.dll   binary
+*.pdf   binary
+*.zip   binary
+
+# Windows 批处理 / PowerShell 对行尾敏感，显式保留 CRLF。
+# 当前仓库没有这类文件，留作护栏：将来新增时不会被上面的规则转成 LF。
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
