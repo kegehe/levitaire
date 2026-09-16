@@ -260,6 +260,9 @@ levitaire-debug.log
 /0
 .tmp-ft/
 
+# 设计 / 验收阶段的本地产物（光标、系统监控、沙漏等对比图与 HTML，体积大且非源码）
+/outputs/
+
 # Workspace-local assistant data (memory / backups / scratch) — not project source
 .workbuddy/
 
