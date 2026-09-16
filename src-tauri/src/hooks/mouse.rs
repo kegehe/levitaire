@@ -1713,7 +1713,10 @@ mod tests {
             .split("fn is_point_in_orb_circle")
             .nth(1)
             .expect("is_point_in_orb_circle 被改名/删除了 —— 请同步本守卫");
-        let body_end = rest.find("\n}\n").map(|i| i + 1).unwrap_or(rest.len());
+        // 只认行首的收尾 `}`，不写死尾随换行：CI 检出的是 CRLF（仓库无 `.gitattributes`
+        // 且 `core.autocrlf=true`），`"\n}\n"` 匹配不到会让 body 顺着 `unwrap_or` 退化成
+        // 整段剩余源码 —— 断言随之变宽、恒真，守卫静默失效。
+        let body_end = rest.find("\n}").map(|i| i + 1).unwrap_or(rest.len());
         let body = &rest[..body_end];
         assert!(
             body.contains("let cx = (rect.left as f64 + rect.right as f64) / 2.0;"),

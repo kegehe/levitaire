@@ -1465,9 +1465,16 @@ mod tests {
             .nth(1)
             .expect("install_update 必须通过 try_begin_install() 抢安装权 —— 本守卫依赖它划界");
         // 跳过「抢不到就直接返回」那个 if 块：它发生在**拿到权之前**，不属于收口范围。
-        let post = tail.split_once("\n    }\n").map(|(_, rest)| rest).expect(
-            "try_begin_install() 之后应紧跟「抢不到就返回」的 if 块 —— 结构变了请同步本守卫",
-        );
+        //
+        // 切分只认「行首 4 空格缩进的收尾 `}`」，**不写死尾随换行**：CI 跑在
+        // windows-latest，仓库又没有 `.gitattributes`，`core.autocrlf=true` 会把检出
+        // 的文件变成 CRLF，写死 `\n    }\n` 会在这里直接 panic（本地工作区是 LF，测不出来）。
+        let post = tail
+            .split_once("\n    }")
+            .map(|(_, rest)| rest.trim_start_matches(['\r', '\n']))
+            .expect(
+                "try_begin_install() 之后应紧跟「抢不到就返回」的 if 块 —— 结构变了请同步本守卫",
+            );
         assert_eq!(
             post.matches("release_install()").count(),
             1,
