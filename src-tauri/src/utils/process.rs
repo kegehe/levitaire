@@ -697,7 +697,21 @@ mod tests {
     /// - 已知的必须真的被识别出来（否则说明解析失效，本用例在空跑）。
     #[test]
     fn scan_skips_only_known_test_only_module_files() {
-        const KNOWN: &[&str] = &["ocr/accuracy_test.rs", "ocr/windows_ocr.rs"];
+        const KNOWN: &[&str] = &[
+            "ocr/accuracy_test.rs",
+            "ocr/windows_ocr.rs",
+            // 系统清理工具的用例与源码守卫：三个文件都只由 `#[cfg(test)] mod` 引入
+            "disk_cleanup/safety/safety_test.rs",
+            "disk_cleanup/delete/delete_test.rs",
+            "disk_cleanup/source_guards.rs",
+            "disk_cleanup/state_test.rs",
+            "disk_cleanup/rules/rules_test.rs",
+            "disk_cleanup/scan/scan_test.rs",
+            "disk_cleanup/quarantine/quarantine_test.rs",
+            "disk_cleanup/discover/discover_test.rs",
+            "disk_cleanup/watchdog/watchdog_test.rs",
+            "disk_cleanup/recycle_bin/recycle_bin_test.rs",
+        ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 
         let test_only = test_only_module_files(&stripped_sources());

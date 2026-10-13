@@ -216,6 +216,7 @@ mod pomodoro;
 mod monitor;
 mod tools;
 mod window;
+mod disk_cleanup;
 
 pub use session::*;
 pub use text::*;
@@ -232,6 +233,7 @@ pub use pomodoro::*;
 pub use monitor::*;
 pub use tools::*;
 pub use window::*;
+pub use disk_cleanup::*;
 
 
 fn decode_base64_media(data: &str, kind: &str) -> Result<Vec<u8>, String> {
@@ -307,6 +309,33 @@ pub fn is_orb_ready() -> bool {
 
 fn position_save_suppress() -> &'static Mutex<HashMap<String, u64>> {
     POSITION_SAVE_SUPPRESS_UNTIL_MS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+
+/// 位置记忆抑制：本次「窗口位置落盘」是否应当被忽略。
+///
+/// # 这是「写—读」两端契约的**消费端**，所有把窗口位置写进配置的命令都必须过这里
+///
+/// 写入端（`clamp_window_to_workarea` 的夹取、`reset_window_position` 的复位）做的是
+/// **程序性**移动，而 `WebviewWindow::onMoved` 对程序性移动同样触发 ⇒ 前端在几百毫秒后
+/// 会把这个「被挤过 / 被复位过」的位置回写。不忽略，它就会被永久记住：内容缩回后窗口
+/// 不回落，反复几次累积成肉眼可见的位置漂移。
+///
+/// ⚠️ 只在一处挂抑制、消费端却不读，抑制就是**死代码** —— 便利贴曾因此漂移许久：
+/// 它的位置不走 `set_window_position`，而走自己的 `set_sticky_note_position`。
+/// 新增任何位置落盘入口时，先来这里接上，并同步
+/// `tests::every_position_persisting_command_consults_the_suppression` 里的 EXPECTED 清单。
+///
+/// 读取时顺手淘汰过期项：键含动态 label（`sticky-note-<id>`），只写不删会让这张表
+/// 随「便签创建/删除次数」无界增长。
+pub(crate) fn position_save_is_suppressed(id: &str) -> bool {
+    let Ok(mut suppress) = position_save_suppress().lock() else {
+        // 锁中毒按「不抑制」处理：宁可多记一次位置，也不能让位置记忆永久失灵
+        return false;
+    };
+    let now = now_ms();
+    suppress.retain(|_, until| *until > now);
+    suppress.contains_key(id)
 }
 
 
@@ -547,6 +576,7 @@ pub const OWN_WINDOW_LABELS: &[&str] = &[
     "utility-hub-overlay",
     "scroll-navigator-overlay",
     "sticky-notes-manager",
+    "system-cleaner-overlay",
 ];
 
 
@@ -1138,9 +1168,13 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     TODO_VISIBLE_BEFORE_SESSION.store(todo_was_visible, Ordering::SeqCst);
     // 置活跃标记并通知 overlay 启动周期心跳：wait_for_screenshot_overlay_ready
     // 与原生 watchdog 都依赖渲染器持续上报存活，此通知必须在 show 之前完成。
-    set_capture_session_active(&app, true);
+    //
+    // 顺序要紧：先把心跳标记清零、再发激活通知。前端收到通知后会**立即**补报一次
+    // 心跳（见 App.tsx 的 start()），若清零排在通知之后，那次补报可能被清零覆盖，
+    // 又要白等一个 500ms 周期。
     SCREENSHOT_OVERLAY_HEARTBEAT_SEEN.store(false, Ordering::SeqCst);
     SCREENSHOT_OVERLAY_HEARTBEAT_MS.store(now_ms(), Ordering::SeqCst);
+    set_capture_session_active(&app, true);
     start_screenshot_overlay_watchdog(app.clone(), session);
     crate::hooks::mouse::set_screenshot_mode(true);
     // Cleanup may proceed once the session state is fully published.
@@ -1537,7 +1571,13 @@ fn default_orb_position(win_w: i32, win_h: i32) -> Option<(i32, i32)> {
 /// - orb：主屏工作区右下角
 /// - monitor-overlay：跟随鼠标（偏移 8px，多显示器边界钳制）
 /// - time-overlay / todo-overlay：创建时默认的左上角 (100, 100)
+/// - system-cleaner-overlay：创建时默认的 (120, 120)
 ///
+/// 这里的取值必须与前端各 `ensure*Window` 里 `createToolWindow` 的 `x`/`y` 一致 ——
+/// 否则「恢复默认位置」和「重建窗口」会落到两个不同的点（守卫
+/// `tests::default_window_position_matches_frontend_creation`）。
+/// ⚠️ 前端 `x`/`y` 是**逻辑**像素、这里回的是 `PhysicalPosition`，缩放 ≠1 时两者本就差
+/// `(scale−1)×坐标`（既定取舍，另外几扇固定坐标窗同样如此）；本约定只锁「数值一致」。
 /// 其余未知窗口一律回退 (100, 100)。
 fn default_window_position(window_id: &str, win_w: i32, win_h: i32) -> (i32, i32) {
     match window_id {
@@ -1549,6 +1589,7 @@ fn default_window_position(window_id: &str, win_w: i32, win_h: i32) -> (i32, i32
                 (100, 100)
             }
         }
+        "system-cleaner-overlay" => (120, 120),
         _ => (100, 100),
     }
 }
@@ -2009,6 +2050,21 @@ fn sync_quick_input_trigger(config: &ConfigManager) -> Result<(), String> {
 }
 
 
+/// 把快速输入的音效配置同步到运行时状态。
+///
+/// 三个入口（开关 / 风格 / 音量）任意一个变更都要走这里，否则运行时会用旧值播放：
+/// 三者在后端被压成一个「开关 + 刻度音开关 + 音量」三元组，只更新其中一项会让
+/// 另外两项停留在上次同步的值（例如刚打开音效又被上一次的静音风格覆盖）。
+fn sync_quick_input_sound(config: &ConfigManager) {
+    let enabled = config.get_quick_input_sound_enabled().unwrap_or(false);
+    let style = config
+        .get_quick_input_sound_style()
+        .unwrap_or_else(|_| crate::config::SOUND_STYLE_STANDARD.to_string());
+    let volume = config.get_quick_input_sound_volume().unwrap_or(45);
+    crate::quick_input::set_sound_config(enabled, &style, volume);
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2030,6 +2086,7 @@ mod tests {
             include_str!("recording.rs"),
             include_str!("quick_input.rs"),
             include_str!("sticky.rs"),
+            include_str!("disk_cleanup.rs"),
         ];
         // 收窗动作：隐藏窗口 / 销毁窗口 / 取消会话 / 收起转盘 / 关闭全部贴图 /
         // 走统一入口隐藏文字工具栏（内含 hide + 状态复位）。
@@ -2054,6 +2111,7 @@ mod tests {
             "set_quick_input_enabled",
             "set_sticky_notes_enabled",
             "set_utility_hub_enabled",
+            "set_system_cleaner_enabled",
         ];
         for name in TOGGLE_FNS {
             let body = SOURCES
@@ -2097,6 +2155,99 @@ mod tests {
         );
     }
 
+    /// 契约：位置记忆抑制的**消费端**必须覆盖所有位置落盘入口。
+    ///
+    /// 上一条守卫只证明了「夹取里**写了**抑制」。机制存在 + 消费端缺失 = 全绿 ——
+    /// 便利贴就是这么漏掉的：它的位置不走 `set_window_position`，而走
+    /// `set_sticky_note_position`，于是抑制对它完全是**死代码**：贴边便签内容变高被夹回后，
+    /// 「被挤过的 y」仍被前端在 250ms 后写进 notes.json，内容缩回也不回落（便签自己往上爬）。
+    ///
+    /// 所以这里从反向锁住：`window.rs` / `sticky.rs` 里**每一个**名字含 `position` 的公开
+    /// 命令，要么是抑制的消费端（`position_save_is_suppressed`），要么是抑制的写入端
+    /// （`.insert(`）。数量也对齐 —— 新增位置落盘入口会立刻红，逼人来接上。
+    ///
+    /// 不含 `mod.rs`：它既是抑制机制的定义地，`clamp_position_to_workarea` 也只是纯计算、
+    /// 不落盘，混进来只会让规则变糊。
+    #[test]
+    fn every_position_persisting_command_consults_the_suppression() {
+        const SOURCES: &[(&str, &str)] = &[
+            ("window.rs", include_str!("window.rs")),
+            ("sticky.rs", include_str!("sticky.rs")),
+        ];
+        // (文件, 函数名, 角色)：consumer = 读抑制；writer = 写抑制（程序性移动的来源）
+        const EXPECTED: &[(&str, &str, &str)] = &[
+            ("window.rs", "set_window_position", "consumer"),
+            ("window.rs", "reset_window_position", "writer"),
+            ("sticky.rs", "set_sticky_note_position", "consumer"),
+        ];
+
+        let found: Vec<(&str, String)> = SOURCES
+            .iter()
+            .flat_map(|(file, source)| {
+                position_command_names(source)
+                    .into_iter()
+                    .map(move |name| (*file, name))
+            })
+            .collect();
+
+        let mut found_sorted: Vec<(&str, &str)> = found
+            .iter()
+            .map(|(file, name)| (*file, name.as_str()))
+            .collect();
+        found_sorted.sort_unstable();
+        let mut expected_sorted: Vec<(&str, &str)> =
+            EXPECTED.iter().map(|(file, name, _)| (*file, *name)).collect();
+        expected_sorted.sort_unstable();
+        assert_eq!(
+            found_sorted, expected_sorted,
+            "位置相关命令的清单变了。新增入口必须显式接上 `position_save_is_suppressed`\
+             （键是**窗口 label**，便利贴要经 note_window_label 换算），并登记进本用例的 EXPECTED ——\
+             否则它就是一个绕过位置记忆抑制的落盘口子，被夹取过的位置会被永久记住。"
+        );
+
+        for (file, name, role) in EXPECTED {
+            let source = SOURCES
+                .iter()
+                .find(|(candidate, _)| candidate == file)
+                .map(|(_, source)| *source)
+                .expect("SOURCES 与 EXPECTED 的文件名不一致");
+            let body = extract_fn_body(source, name)
+                .unwrap_or_else(|| panic!("{file} 里找不到 {name}：函数被改名/移走时请同步本守卫"));
+            let code = strip_line_comments(body);
+            let token = if *role == "consumer" {
+                "position_save_is_suppressed("
+            } else {
+                ".insert("
+            };
+            assert!(
+                code.contains(token),
+                "{file}::{name} 没有接入位置记忆抑制（期望角色 {role}，函数体里应出现 `{token}`）"
+            );
+        }
+    }
+
+    /// 扫描源码里所有名字含 `position` 的公开函数名（`pub fn` / `pub async fn` / `pub(crate) fn`）。
+    fn position_command_names(source: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for (index, _) in source.match_indices("fn ") {
+            let before = &source[..index];
+            if !(before.ends_with("pub ")
+                || before.ends_with("pub async ")
+                || before.ends_with("pub(crate) "))
+            {
+                continue;
+            }
+            let name: String = source[index + "fn ".len()..]
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            if name.contains("position") {
+                names.push(name);
+            }
+        }
+        names
+    }
+
     /// 取出 `fn <name>` 的函数体（按大括号配平），供上一条契约测试做源码扫描。
     fn extract_fn_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
         let start = source.find(&format!("fn {name}"))?;
@@ -2132,16 +2283,119 @@ mod tests {
 
     /// 「恢复默认位置」时，时钟/待办窗口与番茄钟一致回退到创建默认 (100, 100)，
     /// 与前端 ensureTimerWindow/ensureTodoWindow 的 x/y 初始值保持一致。
+    /// 系统清理面板回退到它自己的创建默认 (120, 120)。
     #[test]
     fn test_default_window_position_time_and_todo() {
         assert_eq!(default_window_position("time-overlay", 380, 220), (100, 100));
         assert_eq!(default_window_position("todo-overlay", 360, 560), (100, 100));
+        assert_eq!(
+            default_window_position("system-cleaner-overlay", 520, 640),
+            (120, 120)
+        );
     }
 
     /// 未知窗口 id 一律回退 (100, 100)。
     #[test]
     fn test_default_window_position_unknown_fallback() {
         assert_eq!(default_window_position("unknown-window", 100, 100), (100, 100));
+    }
+
+    /// 契约：「恢复默认位置」的窗口清单必须与前端 `WINDOW_POSITION_TARGETS` 逐项一致。
+    ///
+    /// 这是**静默失效**类缺陷：前端按自己的清单渲染按钮、逐个下发 `reset_window_position`，
+    /// 后端只认真认识的那几个 id。两边一旦漂移，用户看到的是「按钮亮『已恢复』、
+    /// 窗口纹丝不动」—— 系统清理就这么失效了很久，而且同排另外四个按钮都正常，极难察觉。
+    /// 反方向的漂移同样糟：能记住位置的窗口（便利贴管理窗）没有入口，用户只能自己再拖回去。
+    #[test]
+    fn resettable_windows_match_frontend_targets() {
+        let ts = strip_line_comments(include_str!("../../../src/components/Settings.tsx"));
+        let start = ts
+            .find("const WINDOW_POSITION_TARGETS = [")
+            .expect("未找到 WINDOW_POSITION_TARGETS（改名/移动时请同步本守卫）");
+        let rest = &ts[start..];
+        let end = rest
+            .find("] as const;")
+            .expect("WINDOW_POSITION_TARGETS 未以 `] as const;` 结束");
+        let block = &rest[..end];
+
+        let mut frontend: Vec<&str> = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(rel) = block[cursor..].find("{ id: \"") {
+            let open = cursor + rel + "{ id: \"".len();
+            let Some(close) = block[open..].find('"') else {
+                break;
+            };
+            frontend.push(&block[open..open + close]);
+            cursor = open + close + 1;
+        }
+        // 反向断言：解析面失效（改成单行写法、换成别的字段名）时不能静默通过。
+        assert!(
+            frontend.len() >= 6,
+            "只从 WINDOW_POSITION_TARGETS 提取到 {} 项，守卫的解析面已失效",
+            frontend.len()
+        );
+
+        let mut frontend_sorted = frontend.clone();
+        frontend_sorted.sort_unstable();
+        frontend_sorted.dedup();
+        // 同一 id 写两遍时上面那次 dedup 会让两边仍然相等，这里显式挡掉。
+        assert_eq!(
+            frontend_sorted.len(),
+            frontend.len(),
+            "WINDOW_POSITION_TARGETS 里有重复的窗口 id：{frontend:?}"
+        );
+
+        let mut backend = crate::commands::window::RESETTABLE_WINDOW_IDS.to_vec();
+        backend.sort_unstable();
+        assert_eq!(
+            frontend_sorted, backend,
+            "前端「恢复默认位置」清单与后端 RESETTABLE_WINDOW_IDS 不一致：\
+             前端多出来的 id 会「已恢复」却纹丝不动，后端多出来的窗口则没有入口。\
+             两边同时补，并在 default_window_position 里给出它的默认定位。"
+        );
+    }
+
+    /// 契约：「恢复默认位置」的落点必须与前端创建窗口时的默认坐标一致。
+    ///
+    /// 同一件事（窗口的默认位置）存在两份独立常量：`default_window_position` 与
+    /// `toolWindows.ts` 里 `createToolWindow` 的 `x`/`y`。漂移的后果是同一个按钮两种结果 ——
+    /// 点「恢复默认位置」落到 A 点，窗口被销毁重建后落到 B 点，只能靠肉眼发现。
+    #[test]
+    fn default_window_position_matches_frontend_creation() {
+        let ts = strip_line_comments(include_str!("../../../src/utils/toolWindows.ts"));
+        // (窗口 label, 后端 default_window_position 的 x/y)。orb 与 monitor-overlay 不算在内：
+        // 它们分别按工作区右下角 / 鼠标位置计算，本就是动态的。
+        const CASES: &[(&str, i32, i32)] = &[
+            ("time-overlay", 100, 100),
+            ("todo-overlay", 100, 100),
+            ("system-cleaner-overlay", 120, 120),
+            ("sticky-notes-manager", 100, 100),
+        ];
+        for (label, x, y) in CASES {
+            let start = ts.find(&format!("createToolWindow(\"{label}\"")).unwrap_or_else(|| {
+                panic!("toolWindows.ts 里找不到 createToolWindow(\"{label}\")：窗口创建方式变了，请同步本守卫")
+            });
+            // 选项块以下一个 createToolWindow 调用为界，避免把相邻窗口的坐标算进来
+            let rest = &ts[start..];
+            let end = rest[1..]
+                .find("createToolWindow(")
+                .map_or(rest.len(), |index| index + 1);
+            let block = &rest[..end];
+            for (key, value) in [("x", *x), ("y", *y)] {
+                assert!(
+                    block
+                        .lines()
+                        .any(|line| line.trim() == format!("{key}: {value},")),
+                    "前端创建 {label} 时的 {key} 不再是 {value}：`default_window_position` 里的\
+                     默认定位要跟着改，否则「恢复默认位置」与窗口重建会落到两个不同的点"
+                );
+            }
+            assert_eq!(
+                default_window_position(label, 360, 560),
+                (*x, *y),
+                "{label} 的默认定位与前端创建坐标不一致"
+            );
+        }
     }
 
     /// 日志脱敏：仅保留 scheme 与 host，路径、查询串、fragment 全部丢弃。
@@ -2189,11 +2443,11 @@ mod tests {
     #[test]
     fn every_file_dialog_suspends_topmost_first() {
         // (文件名, 源码, 该文件里预期的 rfd 调用点数)
-        let files: [(&str, &str, usize); 5] = [
-            ("commands/mod.rs", include_str!("mod.rs"), 2),
+        let files: [(&str, &str, usize); 6] = [            ("commands/mod.rs", include_str!("mod.rs"), 2),
             ("commands/screenshot.rs", include_str!("screenshot.rs"), 1),
             ("commands/todo.rs", include_str!("todo.rs"), 2),
             ("commands/long_capture.rs", include_str!("long_capture.rs"), 1),
+            ("commands/disk_cleanup.rs", include_str!("disk_cleanup.rs"), 3),
             ("screenshot/pin.rs", include_str!("../screenshot/pin.rs"), 1),
         ];
         for (name, raw, expected) in files {

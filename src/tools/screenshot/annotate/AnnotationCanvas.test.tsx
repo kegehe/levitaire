@@ -24,6 +24,9 @@ function makeStubCtx() {
     stroke: vi.fn(() => calls.push("stroke")),
     fill: vi.fn(() => calls.push("fill")),
     strokeRect: vi.fn(() => calls.push("strokeRect")),
+    // drawEditHandles 用的：框类手柄方块
+    rect: vi.fn(() => calls.push("rect")),
+    setLineDash: vi.fn(),
     fillRect: vi.fn(),
     fillText: vi.fn(() => calls.push("fillText")),
     arc: vi.fn(),
@@ -267,7 +270,7 @@ describe("AnnotationCanvas", () => {
           scale={scale}
           tool={tool}
           color={color}
-          widthIndex={1}
+          strokeWidth={5}
           annotations={annotations}
         />
       );
@@ -296,7 +299,7 @@ describe("AnnotationCanvas", () => {
           scale={scale}
           tool="rect"
           color="#000000"
-          widthIndex={1}
+          strokeWidth={5}
           annotations={annotations}
         />
       );
@@ -321,7 +324,7 @@ describe("AnnotationCanvas", () => {
           scale={scale}
           tool="rect"
           color="#E53935"
-          widthIndex={1}
+          strokeWidth={5}
           annotations={annotations}
         />
       );
@@ -371,7 +374,7 @@ describe("AnnotationCanvas", () => {
           scale={scale}
           tool="rect"
           color="#000000"
-          widthIndex={1}
+          strokeWidth={5}
           annotations={annotations}
         />
       );
@@ -401,7 +404,7 @@ describe("AnnotationCanvas", () => {
           scale={scale}
           tool="text"
           color="#000000"
-          widthIndex={1}
+          strokeWidth={5}
           annotations={annotations}
         />
       );
@@ -443,5 +446,61 @@ describe("AnnotationCanvas", () => {
     expect(committed).toHaveLength(1);
     expect(committed[0].kind).toBe("text");
     expect((committed[0] as { text: string }).text).toBe("标注文字");
+  });
+
+  // 回归：选中标注时手柄会画在显示用 canvas 上，但 flushBase64 是导出路径，
+  // 必须在导出前重绘掉手柄，否则复制/保存/钉图会把蓝色手柄烤进结果图。
+  it("flushBase64 导出不含选中手柄（手柄只用于显示）", async () => {
+    const { ctx } = setup();
+    const ref = createRef<AnnotationCanvasHandle>();
+    let annotations!: ReturnType<typeof useAnnotations>;
+    function Host() {
+      annotations = useAnnotations();
+      return (
+        <AnnotationCanvas
+          ref={ref}
+          image={image}
+          selection={selection}
+          scale={scale}
+          tool="move"
+          color="#000000"
+          strokeWidth={5}
+          annotations={annotations}
+          selectedId="r1"
+        />
+      );
+    }
+    const { container } = render(<Host />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 提交一条 id 与 selectedId 一致的 rect → 显示态画出 8 个手柄方块
+    act(() => {
+      annotations.commit({
+        id: "r1",
+        kind: "rect",
+        color: "#E53935",
+        strokeWidth: 3,
+        x: 10,
+        y: 10,
+        w: 20,
+        h: 20,
+      });
+    });
+    const rectCalls = () =>
+      (ctx as unknown as { calls: string[] }).calls.filter((c) => c === "rect");
+    expect(rectCalls().length).toBeGreaterThan(0);
+
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.toDataURL = vi.fn(() => "data:image/png;base64,EXPORTED") as never;
+    const before = rectCalls().length;
+    let out: string | null = null;
+    act(() => {
+      out = ref.current!.flushBase64();
+    });
+    expect(out).toBe("EXPORTED");
+    // 导出重绘不得再画手柄
+    expect(rectCalls().length).toBe(before);
   });
 });

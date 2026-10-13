@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   clampWheelCenter,
   fitText,
+  getCapsuleGeometry,
   getHighlightedSector,
   getWheelItemLayout,
+  snippetToWheelItem,
   textWidth,
 } from "./QuickInputTool";
 
@@ -166,5 +168,90 @@ describe("getWheelItemLayout", () => {
     expect(labelRadius + labelHalfWidth + iconHalfWidth).toBeLessThanOrEqual(
       labelRadius + (iconRadius - labelRadius) - 2,
     );
+  });
+});
+
+describe("getCapsuleGeometry", () => {
+  it("空标签返回 null（不渲染胶囊，由死区圆替代）", () => {
+    expect(getCapsuleGeometry("")).toBeNull();
+  });
+
+  it("短标签宽度钳制到最小宽度 56", () => {
+    const geo = getCapsuleGeometry("ab");
+    expect(geo).not.toBeNull();
+    expect(geo!.width).toBe(56);
+    expect(geo!.text).toBe("ab");
+  });
+
+  it("中等标签宽度 = 文本宽度 + 两侧内边距，不截断", () => {
+    const label = "公司邮箱正式签名";
+    const geo = getCapsuleGeometry(label)!;
+    expect(geo.text).toBe(label);
+    expect(geo.width).toBe(Math.min(180, textWidth(label, 12) + 26));
+    expect(geo.width).toBeGreaterThan(56);
+    expect(geo.width).toBeLessThanOrEqual(180);
+  });
+
+  it("超长标签按最大内宽截断并追加省略号，宽度钳制到上限 180", () => {
+    const label = "这是一个特别特别特别特别特别特别特别特别长的便签内容";
+    const geo = getCapsuleGeometry(label)!;
+    expect(geo.text.endsWith("…")).toBe(true);
+    expect(geo.text).not.toBe(label);
+    expect(geo.width).toBeLessThanOrEqual(180);
+    // 截断文本的估宽不得超出胶囊内宽，否则文字会溢出胶囊
+    expect(textWidth(geo.text, 12)).toBeLessThanOrEqual(180 - 26 + 0.01);
+  });
+
+  it("宽度始终落在 [56, 180] 区间（各长度抽样）", () => {
+    for (let n = 1; n <= 30; n += 1) {
+      const geo = getCapsuleGeometry("标".repeat(n))!;
+      expect(geo.width).toBeGreaterThanOrEqual(56);
+      expect(geo.width).toBeLessThanOrEqual(180);
+    }
+  });
+
+  it("maxWidth 参数收窄面包屑等场景的宽度上限", () => {
+    const geo = getCapsuleGeometry("‹ 一个相当长的父级分组标签名称", 140)!;
+    expect(geo.width).toBeLessThanOrEqual(140);
+  });
+});
+
+describe("snippetToWheelItem", () => {
+  it("纯文本片段映射为叶子条目，无 children 字段", () => {
+    const item = snippetToWheelItem({ label: "邮箱", text: "a@b.c" })!;
+    expect(item.label).toBe("邮箱");
+    expect(item.text).toBe("a@b.c");
+    expect(item.isHistory).toBe(false);
+    expect(item.children).toBeUndefined();
+  });
+
+  it("带 children 的分组条目：子项映射、标签回退到文本前 20 字", () => {
+    const item = snippetToWheelItem({
+      label: "工作片段",
+      children: [
+        { label: "签名", text: "sig" },
+        { text: "无标签子项文本" },
+      ],
+    })!;
+    expect(item.text).toBe("");
+    expect(item.children).toHaveLength(2);
+    expect(item.children![0]).toMatchObject({ label: "签名", text: "sig" });
+    expect(item.children![1].label).toBe("无标签子项文本");
+  });
+
+  it("无 text 且无有效 children 的条目无效", () => {
+    expect(snippetToWheelItem({ label: "空" })).toBeNull();
+    expect(snippetToWheelItem({ label: "空", children: [{ label: "没文本" }] })).toBeNull();
+  });
+
+  it("children 全部无效时视同普通条目（children 为 undefined）", () => {
+    const item = snippetToWheelItem({ label: "有文本", text: "hi", children: [{ label: "没文本" }] })!;
+    expect(item.text).toBe("hi");
+    expect(item.children).toBeUndefined();
+  });
+
+  it("分组缺 label 时回退「未命名分组」", () => {
+    const item = snippetToWheelItem({ children: [{ text: "x" }] })!;
+    expect(item.label).toBe("未命名分组");
   });
 });

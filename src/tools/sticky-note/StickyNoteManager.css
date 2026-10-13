@@ -282,9 +282,42 @@
   opacity: 0.72;
 }
 
-/* 空状态的「新建第一张」：自撑宽的胶囊按钮，不占满整行 —— 一行文字下面压一条整宽
-   主按钮，在这么小的面板里过重，视觉重心也全歪到按钮上。
-   淡蓝底 + 一圈 brand 细边（只靠底色会读成 `.snm-count` 那种「徽标」而不是按钮）。 */
+/* 读取失败态：与空状态同一套布局，但整块换成危险色 —— 「读不到」必须和
+   「还没有便利贴」在视觉上分得开，否则用户扫一眼就把两者读成同一件事。 */
+.snm-empty.is-error,
+.snm-empty.is-error > svg {
+  color: var(--color-danger, #d64540);
+}
+
+/* 失败原因原文（含路径时可能很长）：最多两行，全文挂在 title 上 */
+.snm-error-detail {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0;
+  max-width: 100%;
+  color: var(--color-fg-subtle, #8793a8);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* 刷新失败但仍有上一轮列表：挂在摘要行与列表**上方**的一行提示（要过时的正是它们） */
+.snm-error-note {
+  margin: 6px 14px 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--color-danger-subtle, #fbe6e4);
+  color: var(--color-danger, #d64540);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* 空状态的「新建第一张」（读取失败态的「重试」复用同一套外观）：自撑宽的胶囊按钮，
+   不占满整行 —— 一行文字下面压一条整宽主按钮，在这么小的面板里过重，视觉重心也全歪
+   到按钮上。淡蓝底 + 一圈 brand 细边（只靠底色会读成 `.snm-count` 那种「徽标」而不是按钮）。 */
 .snm-add-btn {
   display: inline-flex;
   align-items: center;

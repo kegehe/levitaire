@@ -1,0 +1,646 @@
+/**
+ * 系统清理面板的样式。
+ *
+ * 外壳约定（同 system-monitor）：`-container` 只负责撑满，`-body` 负责圆角与裁切。
+ * `.cleaner-body` 用 `overflow: hidden` 收圆角，**祖先不得再设 overflow**；
+ * 滚动由内部的 `.cleaner-scroll` 段落承担 —— 这里没有内层滚动容器，
+ * 直接把 `body` 做成纵向 flex + 中段滚动。
+ *
+ * 版式（布局 3「三格统计头」）：顶部一行三格数字结论 → 清理项纯列表 →
+ * 高级分区（空间分析 / 隔离区 / 审计日志）收进手风琴折叠行，一次只摊开一个。
+ * 分隔线约定：`.cleaner-section` 不再自带 border-bottom，改为
+ * 「折叠行自带 border-top + 相邻 section 兄弟选择器」，避免双线。
+ */
+
+.cleaner-container {
+  width: 100%;
+  height: 100%;
+}
+
+.cleaner-body {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-elevated);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-sizing: border-box;
+  font-size: 12px;
+  overflow: hidden;
+  animation: cleaner-window-enter 180ms ease-out both;
+}
+
+@keyframes cleaner-window-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 标题栏：常驻高度，按住可拖动窗口 */
+.cleaner-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 8px;
+  border-bottom: 1px solid var(--color-border);
+  cursor: grab;
+  user-select: none;
+}
+
+.cleaner-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-fg-muted);
+  letter-spacing: 0.2px;
+}
+
+.cleaner-phase {
+  color: var(--color-fg-subtle);
+  font-size: 11px;
+  flex: 1 1 auto;
+  text-align: right;
+  padding-right: 8px;
+}
+
+/* 无边框窗口，关闭入口只能自己做。悬停才显形会让用户找不到，
+   所以常驻可见（与 monitor 的按钮同处理）。 */
+.cleaner-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.cleaner-icon-btn:hover {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger-fg);
+}
+
+/* 中段：唯一可滚动区域。
+   窗口是固定尺寸且 `resizable: false` —— 这一条 `overflow-y: auto` 是**承重**的，
+   去掉它就等于把超出部分永久藏起来（够不着，也看不到）。守卫：SystemCleanerTool.layout.test.ts */
+.cleaner-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.cleaner-section {
+  padding: 8px 12px;
+}
+
+/* 相邻 section 之间的分隔线（第一个 section 的上边由前一个块自己给） */
+.cleaner-section + .cleaner-section {
+  border-top: 1px solid var(--color-border);
+}
+
+.cleaner-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 2px;
+  color: var(--color-fg-muted);
+  letter-spacing: 0.2px;
+}
+
+.cleaner-estimate {
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--color-fg-subtle);
+  margin-left: auto;
+}
+
+/* 「全选 / 全不选」：标题行右端的纯文字按钮。
+   面板宽 420px，它不能比旁边的 `n/N 项` 更重 —— 用品牌色区分可点即可，不加边框。
+   `font: inherit` 会把标题行的 600 字重也带过来，所以显式压回 500（与 `n/N 项` 同档）。 */
+.cleaner-select-all {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 500;
+  color: var(--color-brand);
+  cursor: pointer;
+}
+
+.cleaner-select-all:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.cleaner-select-all:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── 三格统计头 ─────────────────────────────────────────────────────── */
+
+.cleaner-stats {
+  display: flex;
+  align-items: stretch;
+  padding: 12px 0 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.cleaner-stat {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 14px;
+}
+
+.cleaner-stat + .cleaner-stat {
+  border-left: 1px solid var(--color-border);
+}
+
+.cleaner-stat-v {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cleaner-stat.is-brand .cleaner-stat-v {
+  color: var(--color-brand);
+}
+
+.cleaner-stat-k {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--color-fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cleaner-stat-bar {
+  margin-top: 5px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--color-bg-sunken);
+  overflow: hidden;
+}
+
+.cleaner-stat-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--color-brand);
+}
+
+/* 账目细分行（只出现在隔离区折叠区内，不占主视图） */
+.cleaner-ledger-line {
+  padding: 1px 0;
+  font-size: 11px;
+}
+
+/* ── 折叠行（高级分区手风琴）───────────────────────────────────────── */
+
+.cleaner-fold {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-top: 1px solid var(--color-border);
+  background: none;
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cleaner-fold:hover {
+  background: var(--color-bg-sunken);
+}
+
+.cleaner-fold:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+.cleaner-fold-nm {
+  font-weight: 600;
+}
+
+.cleaner-fold-sub {
+  margin-left: auto;
+  color: var(--color-fg-subtle);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cleaner-fold-badge {
+  background: var(--color-brand-subtle);
+  color: var(--color-brand);
+  border-radius: 8px;
+  padding: 0 7px;
+  font-size: 10px;
+  line-height: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cleaner-fold-chev {
+  color: var(--color-fg-subtle);
+  flex: 0 0 auto;
+}
+
+.cleaner-fold-content {
+  border-top: 1px solid var(--color-border);
+}
+
+/* ── 清理项列表 ─────────────────────────────────────────────────────── */
+
+.cleaner-rule {
+  padding: 3px 0;
+}
+
+.cleaner-rule + .cleaner-rule {
+  border-top: 1px solid var(--color-border);
+}
+
+.cleaner-rule-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.cleaner-rule-head.is-disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.cleaner-rule-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cleaner-rule-size {
+  color: var(--color-fg-muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 11.5px;
+  /* 这格放的是「未扫描」「0 B」这类短词，**必须整块不换行**：汉字和空格都能在
+     任意位置断行，不加这句时 flex 收缩会先把它折成两三行、行高突然跳一下
+     （它的 min-content 只有一个字宽）。加了之后 min-content 就是整串宽度，
+     空间不够时由旁边的规则名去省略号（`.cleaner-rule-name`）。 */
+  white-space: nowrap;
+}
+
+.cleaner-info {
+  border: none;
+  background: none;
+  color: var(--color-fg-subtle);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.cleaner-info:hover {
+  color: var(--color-fg);
+}
+
+.cleaner-rule-status {
+  margin: 2px 0 2px 21px;
+  font-size: 11px;
+}
+
+.cleaner-ok {
+  color: var(--color-success-fg);
+}
+
+.cleaner-warn {
+  color: var(--color-warning-fg);
+}
+
+.cleaner-danger {
+  color: var(--color-danger-fg);
+}
+
+.cleaner-rule-detail {
+  margin: 2px 0 2px 21px;
+  border-left: 2px solid var(--color-border);
+  padding-left: 8px;
+}
+
+.cleaner-consequence {
+  margin: 2px 0 4px;
+  line-height: 1.5;
+}
+
+.cleaner-rule-detail p {
+  margin: 2px 0;
+  word-break: break-all;
+}
+
+.cleaner-samples {
+  margin-top: 4px;
+}
+
+.cleaner-sample {
+  color: var(--color-fg-subtle);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+/* 列表尾部的汇总行（管理员项提示 / 本次执行摘要） */
+.cleaner-adm {
+  margin-top: 2px;
+  padding: 8px 0 2px;
+  font-size: 11px;
+  color: var(--color-fg-subtle);
+  border-top: 1px solid var(--color-border);
+  line-height: 1.5;
+}
+
+.cleaner-adm + .cleaner-adm {
+  border-top: none;
+}
+
+/* ── 分组（占用发现榜单内部在用）──────────────────────────────────── */
+
+.cleaner-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0 3px;
+}
+
+.cleaner-tier {
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 16px;
+  border: 1px solid transparent;
+}
+
+.cleaner-tier-l1 {
+  background: var(--color-success-subtle);
+  color: var(--color-success-fg);
+}
+
+.cleaner-tier-l2 {
+  background: var(--color-warning-subtle);
+  color: var(--color-warning-fg);
+}
+
+.cleaner-tier-l3 {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger-fg);
+}
+
+/* 不建议清理 */
+.cleaner-advice-intro {
+  margin: 0 0 6px;
+  line-height: 1.5;
+}
+
+.cleaner-advice + .cleaner-advice {
+  margin-top: 6px;
+}
+
+.cleaner-advice-label {
+  font-weight: 600;
+}
+
+.cleaner-advice .cleaner-muted {
+  line-height: 1.5;
+}
+
+.cleaner-muted {
+  color: var(--color-fg-muted);
+}
+
+.cleaner-empty {
+  padding: 16px 12px;
+  color: var(--color-fg-muted);
+}
+
+.cleaner-blocked {
+  margin: 12px;
+  padding: 10px;
+  border: 1px solid var(--color-danger);
+  border-radius: 8px;
+  background: var(--color-danger-subtle);
+}
+
+.cleaner-blocked-title {
+  font-weight: 600;
+  color: var(--color-danger-fg);
+  margin-bottom: 4px;
+}
+
+.cleaner-blocked-reason {
+  margin: 0 0 6px;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.cleaner-blocked-note {
+  margin: 0;
+  line-height: 1.5;
+  color: var(--color-fg-muted);
+}
+
+.cleaner-alert {
+  margin: 8px 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--color-danger-subtle);
+  color: var(--color-danger-fg);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.cleaner-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.cleaner-footer .cleaner-muted {
+  flex: 1 1 auto;
+  font-size: 11px;
+}
+
+.cleaner-btn {
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-bg);
+  color: var(--color-fg);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cleaner-btn:hover:not(:disabled) {
+  border-color: var(--color-border-hover);
+}
+
+.cleaner-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cleaner-btn-primary {
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+  color: var(--color-brand-fg);
+}
+
+.cleaner-btn-primary:hover:not(:disabled) {
+  background: var(--color-brand-hover);
+}
+
+/* ── 隔离区 / 占用发现（折叠区内部）────────────────────────────────── */
+
+.cleaner-quarantine-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  flex-wrap: wrap;
+}
+
+.cleaner-inline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cleaner-select {
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-bg);
+  color: var(--color-fg);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 11px;
+  max-width: 200px;
+}
+
+.cleaner-quarantine-row {
+  border-top: 1px solid var(--color-border);
+  padding: 5px 0;
+}
+
+.cleaner-quarantine-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  word-break: break-all;
+}
+
+.cleaner-quarantine-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.cleaner-tag-warn {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--color-warning-subtle);
+  color: var(--color-warning-fg);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.cleaner-btn-danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger-fg);
+}
+
+/* ── 确认条 ─────────────────────────────────────────────────────────── */
+
+.cleaner-confirm {
+  margin: 8px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-warning);
+  border-radius: 8px;
+  background: var(--color-warning-subtle);
+}
+
+.cleaner-confirm-danger {
+  border-color: var(--color-danger);
+  background: var(--color-danger-subtle);
+}
+
+.cleaner-confirm-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.cleaner-confirm p {
+  margin: 3px 0;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.cleaner-confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+/* ── 审计日志 ───────────────────────────────────────────────────────── */
+
+.cleaner-input {
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-bg);
+  color: var(--color-fg);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 11px;
+  min-width: 110px;
+}
+
+.cleaner-audit-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.cleaner-audit-action {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.cleaner-audit-path {
+  flex: 1 1 auto;
+  word-break: break-all;
+  font-size: 11px;
+}

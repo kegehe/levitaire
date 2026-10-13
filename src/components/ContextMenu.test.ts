@@ -146,7 +146,7 @@ describe("菜单窗口高度必须与菜单结构一致", () => {
   it("高度按几何推导（常量漏算边框就会在这里报红）", () => {
     // 34N + 11G + 2×6 padding + 2×1 border
     expect(contextMenuHeight("orb")).toBe(161);
-    expect(contextMenuHeight("tray")).toBe(206);
+    expect(contextMenuHeight("tray")).toBe(240);
     expect(contextMenuHeight("pin")).toBe(466);
   });
 });

@@ -22,6 +22,7 @@ const ToolPalette = lazy(() => import("./components/ToolPalette"));
 const ScreenshotTool = lazy(() => import("./tools/screenshot/ScreenshotTool"));
 const RecordingTool = lazy(() => import("./tools/recording/RecordingTool"));
 const SystemMonitor = lazy(() => import("./tools/system-monitor/SystemMonitor"));
+const SystemCleanerTool = lazy(() => import("./tools/system-cleaner/SystemCleanerTool"));
 const TimerTool = lazy(() => import("./tools/timer/TimerTool"));
 const TodoTool = lazy(() => import("./tools/todo/TodoTool"));
 const QuickInputTool = lazy(() => import("./tools/quick-input/QuickInputTool"));
@@ -115,6 +116,12 @@ function OverlaySwitcher() {
           }
           pendingStart = false;
           timer = window.setInterval(heartbeat, 500);
+          // 建立定时器后立刻上报一次：后端 wait_for_screenshot_overlay_ready 在会话
+          // 激活后会清零心跳标记，只认「激活之后」的心跳。若只依赖 interval 的首个 tick，
+          // 每次截图都要白等一整个周期（实测固定 503~505ms，日志已量化）。
+          // 此处已通过 is_capture_session_active 确认会话确实活跃，立即上报与定时心跳
+          // 语义一致：都是「渲染器能响应事件并执行 JS」的证据，不削弱崩溃检测。
+          heartbeat();
           return;
         }
       } finally {
@@ -380,6 +387,8 @@ function App() {
     content = <LongCaptureFrame />;
   } else if (windowLabel === "monitor-overlay") {
     content = <SystemMonitor />;
+  } else if (windowLabel === "system-cleaner-overlay") {
+    content = <SystemCleanerTool />;
   } else if (windowLabel === "time-overlay") {
     content = <TimerTool />;
   } else if (windowLabel === "todo-overlay") {

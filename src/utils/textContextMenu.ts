@@ -30,7 +30,7 @@ interface EditableState {
   hasSelection: boolean;
 }
 
-interface MenuItemSpec {
+export interface AppMenuItem {
   id: string;
   label: string;
   disabled?: boolean;
@@ -207,14 +207,25 @@ export function hideTextContextMenu(): void {
   menuRoot = null;
 }
 
-function openMenu(position: { x: number; y: number }, items: MenuItemSpec[]): void {
+/**
+ * 用应用自绘样式弹一个菜单（位置 + 菜单项由调用方给）。
+ *
+ * 供 `showTextContextMenu` / `showTextSelectionMenu` 使用，也供需要**非文本**菜单项
+ * 的地方复用（例如便利贴里右键一张图片 →「复制图片 / 删除图片」）：样式、边缘夹取、
+ * 外部点击收起这些细节都只有这一份实现，各窗口不必再各写一套浮层。
+ */
+export function showAppMenu(
+  position: { x: number; y: number },
+  items: AppMenuItem[],
+  label = "编辑",
+): void {
   hideTextContextMenu();
   bindGlobalListeners();
 
   const root = document.createElement("div");
   root.className = MENU_CLASS;
   root.setAttribute("role", "menu");
-  root.setAttribute("aria-label", "编辑");
+  root.setAttribute("aria-label", label);
   // 防止菜单自身抢走输入框焦点（焦点一走，选区就没了）
   root.addEventListener("mousedown", (event) => event.preventDefault());
   // 菜单内的右键：吞掉默认菜单，不重开
@@ -253,7 +264,7 @@ function openMenu(position: { x: number; y: number }, items: MenuItemSpec[]): vo
  */
 export function showTextContextMenu(options: { x: number; y: number; target: HTMLElement }): void {
   const state = snapshotSelection(options.target);
-  openMenu(options, [
+  showAppMenu(options, [
     {
       id: "cut",
       label: "剪切",
@@ -276,5 +287,5 @@ export function showTextContextMenu(options: { x: number; y: number; target: HTM
  * 这是原默认菜单里真正有用的一项，其余（刷新 / 另存为）不应出现。
  */
 export function showTextSelectionMenu(position: { x: number; y: number }): void {
-  openMenu(position, [{ id: "copy", label: "复制", run: () => runExecCommand("copy") }]);
+  showAppMenu(position, [{ id: "copy", label: "复制", run: () => runExecCommand("copy") }]);
 }

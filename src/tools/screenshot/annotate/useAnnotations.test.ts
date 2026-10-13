@@ -176,3 +176,58 @@ describe("useAnnotations", () => {
     expect(result.current.state.items).toBe(before);
   });
 });
+
+// 「编辑已有标注」以同一个 id 再 commit 一版实现：committed 按 id 去重。
+describe("useAnnotations 标注编辑（同 id 版本日志）", () => {
+  it("同 id 再提交后只保留一条，且绘制层序取首次出现的位置", () => {
+    const { result } = renderHook(() => useAnnotations());
+    act(() => result.current.commit(makeRect("r", 1)));
+    act(() => result.current.commit(makeRect("x", 1)));
+    // 编辑 r：同 id 提交一版新的（更宽）
+    act(() => result.current.commit(makeRect("r", 3)));
+
+    // items 变成版本日志，但 committed 收敛为两条，且 r 仍在首个槽位（不会被提到最上层）
+    expect(result.current.state.items).toHaveLength(3);
+    expect(result.current.committed).toHaveLength(2);
+    expect(result.current.committed.map((a) => a.id)).toEqual(["r", "x"]);
+    expect((result.current.committed[0] as Extract<Annotation, { kind: "rect" }>).w).toBe(30);
+
+    // getCommitted（ref 同步读）与 committed 保持一致，避免导出时重复绘制
+    expect(result.current.getCommitted()).toEqual(result.current.committed);
+  });
+
+  it("undo 回退到该 id 的上一版，redo 再前进", () => {
+    const { result } = renderHook(() => useAnnotations());
+    act(() => result.current.commit(makeRect("r", 1)));
+    act(() => result.current.commit(makeRect("x", 1)));
+    act(() => result.current.commit(makeRect("r", 3)));
+
+    act(() => result.current.undo());
+    expect(result.current.committed).toHaveLength(2);
+    expect((result.current.committed[0] as Extract<Annotation, { kind: "rect" }>).w).toBe(10);
+
+    act(() => result.current.redo());
+    expect((result.current.committed[0] as Extract<Annotation, { kind: "rect" }>).w).toBe(30);
+  });
+
+  it("编辑后丢弃 redo 尾巴", () => {
+    const { result } = renderHook(() => useAnnotations());
+    act(() => result.current.commit(makeRect("r", 1)));
+    act(() => result.current.commit(makeRect("x", 1)));
+    act(() => result.current.undo());
+    act(() => result.current.commit(makeRect("r", 5)));
+    expect(result.current.canRedo).toBe(false);
+    expect(result.current.committed.map((a) => a.id)).toEqual(["r"]);
+    expect((result.current.committed[0] as Extract<Annotation, { kind: "rect" }>).w).toBe(50);
+  });
+
+  it("编辑序号不改变 nextNumber 语义", () => {
+    const { result } = renderHook(() => useAnnotations());
+    act(() => result.current.commit(makeNumber("n1", 1)));
+    act(() => result.current.commit(makeNumber("n2", 2)));
+    // 编辑 n1（同 id 再提交）：仍是 2 条序号，nextNumber 继续为 3
+    act(() => result.current.commit(makeNumber("n1", 1)));
+    expect(result.current.committed).toHaveLength(2);
+    expect(result.current.nextNumber).toBe(3);
+  });
+});

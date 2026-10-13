@@ -121,10 +121,16 @@ npm run build:app   # = tauri build --config src-tauri/tauri.bundle.conf.json
 
 | 文件 | 放置路径 | 用途 | 体积 |
 |------|----------|------|------|
-| `ffmpeg.exe` | `src-tauri/binaries/ffmpeg.exe` | MP4 视频编码 | 约 230 MB |
+| `ffmpeg.exe` | `src-tauri/binaries/ffmpeg.exe` | MP4 视频编码 | 约 4 MB（精简构建） |
 | `onnxruntime.dll` | `src-tauri/libs/onnxruntime.dll` | PaddleOCR 本地推理 | 约 20 MB |
 
-两者体积过大、**未纳入 Git 仓库**，缺失时发版脚本会直接提示路径；开发模式不受影响，OCR 会自动回退到 Windows 内置引擎。PaddleOCR 模型（`det.onnx` / `rec.onnx` 等）已随仓库提供，位于 `src-tauri/resources/ocr/`，打包时映射到安装目录的 `ocr/`。
+两者均**未纳入 Git 仓库**，缺失时发版脚本会直接提示路径；开发模式不受影响，OCR 会自动回退到 Windows 内置引擎。PaddleOCR 模型（`det.onnx` / `rec.onnx` 等）已随仓库提供，位于 `src-tauri/resources/ocr/`，打包时映射到安装目录的 `ocr/`。
+
+`ffmpeg.exe` 采用**精简构建**：录制只用到 `rawvideo` 解码 → `libx264` 编码 → `mp4` 封装 → `crop` 滤镜这一条链路，官方 full build（约 230 MB）的其余编解码器全部闲置。精简版只含该链路，约 4 MB，安装包（NSIS）由 92 MB 降至 37 MB、安装后占用由约 305 MB 降至约 77 MB。两者产出的 MP4 经逐像素比对完全一致（PSNR 无穷大），编码速度相当。重建方式见 `scripts/build-ffmpeg-lite.sh`（含完整组件清单与验证步骤）。
+
+重建时必须用 `-static` 链接。若产物依赖 `libwinpthread-1.dll` 这类**非系统 DLL**，开发机上一切正常（Git/WinLibs 的 `mingw64\bin` 在 PATH 上），端用户机器却必然启动失败——`spawn()` 会成功而进程加载即崩，只留下 `0xc0000135`。脚本的产物自检会拦住这一项；相关教训：本地 PSNR 比对与 `cargo test` **都发现不了**它，只有把 PATH 清空到只剩 `System32` 的实测才能暴露。
+
+`ffmpeg_path()` 只按文件名查找、不校验构建选项，因此放回官方 full build 同样可用，代价是安装包大 200 MB 以上。
 
 PaddleOCR 以 `load-dynamic` 模式运行时加载 ONNX Runtime（不静态链接），按 `ORT_DYLIB_PATH` → 当前目录 → exe 同目录 → exe 同目录 `resources/` 的顺序查找 DLL。不使用 PaddleOCR 时，可移除 `ort` / `ndarray` 依赖与 `src-tauri/src/ocr/paddle_ocr.rs` 以减小构建体积。
 

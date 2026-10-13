@@ -11,11 +11,19 @@ pub fn show_timer_window(
         .ok_or_else(|| "time-overlay 窗口未找到".to_string())?;
     if !TIMER_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
         let win_on_close = win.clone();
-        win.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        win.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = win_on_close.hide();
             }
+            // 窗口真被销毁（异常路径，或将来某条显式 destroy）时复位注册标记。
+            // 不复位的话，重建后的同名窗口会以为「已经注册过」而跳过注册 ——
+            // 那时 Alt+F4 会直接关窗而不是隐藏，窗口上的状态复位也跟着丢。
+            // 写法与 monitor / utility-hub / screenshot-overlay 一致。
+            tauri::WindowEvent::Destroyed => {
+                TIMER_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
         });
     }
     if !win.is_visible().unwrap_or(true) {

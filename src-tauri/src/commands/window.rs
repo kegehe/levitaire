@@ -108,13 +108,19 @@ pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
     static SETTINGS_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
     if !SETTINGS_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
         let settings_app_handle = app.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        window.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if let Some(win) = settings_app_handle.get_webview_window("settings") {
                     let _ = win.hide();
                 }
             }
+            // 窗口真被销毁时复位注册标记（同 monitor / utility-hub / screenshot-overlay）：
+            // 不复位，重建后的同名窗口会以为「已注册过」而跳过注册，Alt+F4 直接关窗。
+            tauri::WindowEvent::Destroyed => {
+                SETTINGS_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
         });
     }
 
@@ -164,13 +170,18 @@ pub async fn show_tool_config(app: tauri::AppHandle) -> Result<(), String> {
     static TOOL_CONFIG_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
     if !TOOL_CONFIG_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
         let tool_config_app_handle = app.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        window.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if let Some(win) = tool_config_app_handle.get_webview_window("tool-config") {
                     let _ = win.hide();
                 }
             }
+            // 同 settings：销毁时复位，重建后才能重新注册关闭拦截。
+            tauri::WindowEvent::Destroyed => {
+                TOOL_CONFIG_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
         });
     }
 
@@ -477,13 +488,18 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     static PALETTE_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
     if !PALETTE_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
         let palette_app_handle = app.clone();
-        palette.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        palette.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if let Some(win) = palette_app_handle.get_webview_window("palette") {
                     let _ = win.hide();
                 }
             }
+            // 同 settings：销毁时复位，重建后才能重新注册关闭拦截。
+            tauri::WindowEvent::Destroyed => {
+                PALETTE_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
         });
     }
 
@@ -646,6 +662,25 @@ pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 
+/// 重启应用（托盘右键菜单「重启应用」入口）：卡顿时用它拉起一个干净进程。
+///
+/// `request_restart` 会触发一次完整退出流程（`RunEvent::Exit`）再拉起新进程，
+/// 所以这里与 `exit_app` 一样先做显式收尾：光标/置顶这两类状态是本进程持有的
+/// 系统级资源，进程一没就还不了，必须在退出前还原。
+///
+/// 相比直接 `process::exit` 后由外部拉起，走 `request_restart` 能让单实例插件
+/// （`tauri-plugin-single-instance`）的 `on_event(Exit)` 先释放互斥体/消息窗口，
+/// 新进程启动时才不会误判「已有实例在跑」而当场自退。
+#[tauri::command]
+pub fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
+    crate::hooks::mouse::stop_color_pick();
+    crate::hooks::mouse::stop_window_pin();
+    crate::window_pin::cleanup();
+    app.request_restart();
+    Ok(())
+}
+
+
 /// 记忆悬浮窗位置（由前端在窗口拖动结束后调用），应用重启后恢复到上次位置。
 /// window_id 如 "orb"、"monitor-overlay"、"time-overlay"
 #[tauri::command]
@@ -655,51 +690,69 @@ pub fn set_window_position(
     y: i32,
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
-    // 恢复默认位置期间：程序化 set_position 会触发 onMoved → 前端在 300ms 后再次
-    // set_window_position，若不忽略会把刚恢复的默认位置重新记忆。仅忽略对应窗口。
-    if let Ok(suppress) = position_save_suppress().lock() {
-        if let Some(until) = suppress.get(&id) {
-            if now_ms() < *until {
-                return Ok(());
-            }
-        }
+    // 恢复默认位置 / 夹取回工作区期间：程序化 set_position 会触发 onMoved → 前端在
+    // 300ms 后再次 set_window_position，若不忽略会把刚恢复的默认位置（或刚被挤过的位置）
+    // 重新记忆。仅忽略对应窗口。判据与写入端共用 `position_save_is_suppressed`。
+    if position_save_is_suppressed(&id) {
+        return Ok(());
     }
     config_manager.set_window_position(&id, crate::config::WindowPosition { x, y })
 }
 
 
+/// 可以「恢复默认位置」的悬浮窗 id（**id 即窗口 label**）。
+///
+/// 判据是「前端有没有对窗口调 `persistWindowPositionOnMove`」：记了位置就必须能被复位，
+/// 反之列了却没人复位就是**静默失效**。两种漂移都出现过 ——
+/// `system-cleaner-overlay` 在前端清单里、后端却整段漏掉（按钮亮「已恢复」，窗口不动）；
+/// `sticky-notes-manager` 记了位置却没有入口（没有任何一键复位，只能自己再拖回去）。
+///
+/// ⚠️ 本清单与 `src/components/Settings.tsx` 的 `WINDOW_POSITION_TARGETS` 必须逐项一致：
+/// 前端按它渲染按钮并逐个下发 `reset_window_position`。守卫见
+/// `commands::tests::resettable_windows_match_frontend_targets`。
+pub(crate) const RESETTABLE_WINDOW_IDS: &[&str] = &[
+    "orb",
+    "monitor-overlay",
+    "time-overlay",
+    "todo-overlay",
+    "system-cleaner-overlay",
+    "sticky-notes-manager",
+];
+
+
 /// 恢复悬浮窗默认位置：清除记忆位置，并将窗口移动到默认定位。
-/// window_id 如 "orb"、"monitor-overlay"、"time-overlay"、"todo-overlay"
+/// 支持的 id 见 `RESETTABLE_WINDOW_IDS`。
 #[tauri::command]
 pub fn reset_window_position(
     id: String,
     app: tauri::AppHandle,
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
+    // 清单外的 id 一律报错，不要「只清记忆、不动窗口」地返回 Ok：前端据此把按钮点亮成
+    // 「已恢复」，用户却看到窗口纹丝不动，失效就此被藏起来（系统清理正是如此）。
+    if !RESETTABLE_WINDOW_IDS.contains(&id.as_str()) {
+        return Err(format!("窗口 {id} 不支持恢复默认位置"));
+    }
+
     config_manager.reset_window_position(&id)?;
 
-    let win = match id.as_str() {
-        "orb" => app.get_webview_window("orb"),
-        "monitor-overlay" => app.get_webview_window("monitor-overlay"),
-        "time-overlay" => app.get_webview_window("time-overlay"),
-        "todo-overlay" => app.get_webview_window("todo-overlay"),
-        _ => None,
+    // 窗口可能压根还没创建（如系统清理面板从未打开过）：此时清掉记忆坐标就够了，
+    // 下次创建走前端 ensure* 的默认定位。
+    let Some(win) = app.get_webview_window(&id) else {
+        return Ok(());
     };
-    // 对已存在窗口统一移动到默认定位（隐藏窗口 set_position 同样生效，下次显示即默认位置）。
+    // 窗口已存在就移动到默认定位（隐藏窗口 set_position 同样生效，下次显示即默认位置）。
     // monitor 下次显示时按未记忆逻辑跟随鼠标重新定位。
-    if let Some(win) = win {
-        let inner = win.inner_size().unwrap_or_default();
-        let (x, y) = default_window_position(&id, inner.width as i32, inner.height as i32);
-        // 抑制程序化移动触发的 onMoved 保存（前端 300ms 后调用 set_window_position）
-        if let Ok(mut suppress) = position_save_suppress().lock() {
-            suppress.insert(id.clone(), now_ms() + 1500);
-        }
-        win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-            x, y,
-        )))
-        .map_err(|e| e.to_string())?;
+    let inner = win.inner_size().unwrap_or_default();
+    let (x, y) = default_window_position(&id, inner.width as i32, inner.height as i32);
+    // 抑制程序化移动触发的 onMoved 保存（前端 300ms 后调用 set_window_position）
+    if let Ok(mut suppress) = position_save_suppress().lock() {
+        suppress.insert(id.clone(), now_ms() + 1500);
     }
-    Ok(())
+    win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        x, y,
+    )))
+    .map_err(|e| e.to_string())
 }
 
 

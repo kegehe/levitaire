@@ -125,7 +125,41 @@ pub fn update_sticky_note_color(
 }
 
 
+/// 记住用户手动拖出来的窗口尺寸（逻辑像素，含透明留白）。
+/// 写入后便签进入「手动尺寸」模式：前端不再按内容下发高度。
+///
+/// 不下发列表刷新事件（与 `set_sticky_note_position` 同理）：拖拽过程中会被防抖地多次调用，
+/// 而管理窗并不展示尺寸，多广播一次就是一次无谓的整列表重渲染。
+#[tauri::command]
+pub fn set_sticky_note_size(
+    id: String,
+    width: f64,
+    height: f64,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<crate::sticky_note::StickyNote, String> {
+    store.set_size(&id, width, height)
+}
+
+
+/// 恢复「宽度固定 + 高度随内容」的自动尺寸（双击右下角手柄时调用）。
+#[tauri::command]
+pub fn reset_sticky_note_size(
+    id: String,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<crate::sticky_note::StickyNote, String> {
+    store.reset_size(&id)
+}
+
+
 /// 拖拽过程中回写窗口位置（物理像素）。调用频繁，不触发列表刷新事件。
+///
+/// ⚠️ 本命令是便利贴位置的落盘入口，必须与窗口位置记忆**共用同一份抑制判据**
+/// （`position_save_is_suppressed`）：
+/// 便签贴屏幕下沿时，内容变高（或用户往下拖大）会让 `clamp_window_to_workarea` 把窗口
+/// 挤回工作区；那次程序性移动同样触发前端的 `onMoved`，而前端会在 250ms 后回写位置。
+/// 抑制的键是**窗口 label**（`sticky-note-<id>`），本命令拿的是 note id —— 所以这里必须
+/// 自己换算；漏了这一步，抑制对便签就是死代码，"被挤过的 y" 会被永久记进 notes.json，
+/// 内容缩回后也不回落（表现为便签反复编辑后自己往上爬）。
 #[tauri::command]
 pub fn set_sticky_note_position(
     id: String,
@@ -133,6 +167,9 @@ pub fn set_sticky_note_position(
     y: i32,
     store: State<'_, crate::sticky_note::NoteStore>,
 ) -> Result<(), String> {
+    if position_save_is_suppressed(&crate::sticky_note::note_window_label(&id)) {
+        return Ok(());
+    }
     store.update_position(&id, x, y)?;
     Ok(())
 }
@@ -268,6 +305,7 @@ pub fn save_sticky_note_image(
 ) -> Result<String, String> {
     store.get(&note_id)?;
     let bytes = decode_base64_media(&base64_data, "图片")?;
+    // 格式由后端按字节判定并统一转码成 PNG（剪贴板给的 MIME 不可全信，见 save_image 注释）
     let rel = crate::sticky_note::save_image(&app, &note_id, &bytes)?;
     // 写入后复核便签仍存在：若并发删除（delete_sticky_note 会清理图片目录）落在
     // 写盘之前，本函数会重建已删除便签的图片目录留下孤儿文件，这里兜底清理并报错。
@@ -276,6 +314,65 @@ pub fn save_sticky_note_image(
         return Err("便签已删除".to_string());
     }
     Ok(rel)
+}
+
+
+/// 从本地文件导入一张图片（把图片文件拖进便签）。返回正文令牌中的相对路径。
+///
+/// 与剪贴板粘贴分开两件事：这里带来源**路径**，由后端校验扩展名与体积、再转码落盘，
+/// 前端拿到令牌后照常插入 `<img data-note-img>`。
+#[tauri::command]
+pub fn import_sticky_note_image(
+    app: tauri::AppHandle,
+    note_id: String,
+    path: String,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<String, String> {
+    store.get(&note_id)?;
+    let rel = crate::sticky_note::import_image_file(&app, &note_id, std::path::Path::new(&path))?;
+    if store.get(&note_id).is_err() {
+        crate::sticky_note::delete_images(&app, &note_id);
+        return Err("便签已删除".to_string());
+    }
+    Ok(rel)
+}
+
+
+/// 把便签里的一张图片复制到系统剪贴板（右键「复制图片」）。
+///
+/// 便签图片落盘时已统一为 PNG，所以这里通常零转码就能直接粘到聊天工具 / 文档里；
+/// 仍走一次 `ensure_png`：早期版本按剪贴板 MIME 落盘，目录里可能留有「.png 后缀装
+/// 其它格式字节」的老文件，那种文件直接喂给 `copy_image` 会解码失败。
+#[tauri::command]
+pub fn copy_sticky_note_image(
+    app: tauri::AppHandle,
+    id: String,
+    rel: String,
+    clipboard: State<'_, ClipboardManager>,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<(), String> {
+    // 便签已被删除时不要动用户的剪贴板（宁可报错，也别覆盖刚复制的内容）
+    store.get(&id)?;
+    let path = crate::sticky_note::resolve_image_path(&app, &id, &rel)?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取图片失败: {e}"))?;
+    let png = crate::sticky_note::ensure_png(&bytes)?;
+    clipboard
+        .copy_image(&png)
+        .map_err(|e| format!("复制图片失败: {e}"))
+}
+
+
+/// 删除便签正文里的一张图片（右键「删除图片」）：磁盘文件与正文节点都要去掉，
+/// 正文节点由前端删除后照常走保存流程。
+#[tauri::command]
+pub fn delete_sticky_note_image(
+    app: tauri::AppHandle,
+    id: String,
+    rel: String,
+    store: State<'_, crate::sticky_note::NoteStore>,
+) -> Result<(), String> {
+    store.get(&id)?;
+    crate::sticky_note::delete_image(&app, &id, &rel)
 }
 
 
@@ -349,11 +446,18 @@ pub fn show_sticky_notes_manager(
         .ok_or_else(|| "sticky-notes-manager 窗口未找到".to_string())?;
     if !STICKY_MANAGER_CLOSE_HANDLER_REGISTERED.swap(true, Ordering::SeqCst) {
         let on_close = win.clone();
-        win.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        win.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = on_close.hide();
             }
+            // 窗口真被销毁时复位注册标记（同 monitor / utility-hub / screenshot-overlay）。
+            // 便签窗本身就走 `destroy_note_window` 销毁重建，管理窗将来也可能被显式销毁，
+            // 留着不复位就会让重建后的窗口跳过注册拦截。
+            tauri::WindowEvent::Destroyed => {
+                STICKY_MANAGER_CLOSE_HANDLER_REGISTERED.store(false, Ordering::SeqCst);
+            }
+            _ => {}
         });
     }
     if !win.is_visible().unwrap_or(true) {

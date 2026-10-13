@@ -16,6 +16,7 @@ import {
   DEFAULT_SYSTEM_MONITOR_LAYOUT,
   monitorLayoutOption,
 } from "../constants/systemMonitorConfig";
+import { DEFAULT_CLEANER_HEIGHT, DEFAULT_CLEANER_WIDTH } from "../constants/diskCleanupConfig";
 import { PANEL_SHADOW_MARGIN, panelWindowSize } from "./panelWindow";
 
 type ToolWindowLabel =
@@ -31,7 +32,8 @@ type ToolWindowLabel =
   | "sketch-overlay"
   | "scroll-navigator-overlay"
   | "utility-hub-overlay"
-  | "sticky-notes-manager";
+  | "sticky-notes-manager"
+  | "system-cleaner-overlay";
 
 const pendingWindows = new Map<ToolWindowLabel, Promise<WebviewWindowInstance>>();
 let screenshotOverlayReady = false;
@@ -40,6 +42,9 @@ const screenshotOverlayReadyWaiters = new Set<() => void>();
 let monitorReady = false;
 let monitorReadyListener: Promise<UnlistenFn> | undefined;
 const monitorReadyWaiters = new Set<() => void>();
+let cleanerReady = false;
+let cleanerReadyListener: Promise<UnlistenFn> | undefined;
+const cleanerReadyWaiters = new Set<() => void>();
 let recordingControlsReady = false;
 let recordingControlsReadyListener: Promise<UnlistenFn> | undefined;
 const recordingControlsReadyWaiters = new Set<() => void>();
@@ -418,6 +423,39 @@ async function prepareTimerWindowReadyListener(): Promise<void> {
     });
   }
   await timerReadyListener;
+}
+
+async function prepareSystemCleanerWindowReadyListener(): Promise<void> {
+  if (!cleanerReadyListener) {
+    cleanerReadyListener = listen("system-cleaner-window-ready", () => {
+      cleanerReady = true;
+      cleanerReadyWaiters.forEach((resolve) => resolve());
+      cleanerReadyWaiters.clear();
+    });
+  }
+  await cleanerReadyListener;
+}
+
+async function waitForSystemCleanerWindowReady(): Promise<void> {
+  await prepareSystemCleanerWindowReadyListener();
+  if (cleanerReady) return;
+  await new Promise<void>((resolve, reject) => {
+    const retryTimer = startReadyRequestRetry(
+      "system-cleaner-overlay",
+      "system-cleaner-window-ready-request",
+    );
+    const timeout = window.setTimeout(() => {
+      window.clearInterval(retryTimer);
+      cleanerReadyWaiters.delete(onReady);
+      reject(new Error("系统清理窗口初始化超时"));
+    }, 5000);
+    const onReady = () => {
+      window.clearInterval(retryTimer);
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    cleanerReadyWaiters.add(onReady);
+  });
 }
 
 async function waitForTimerWindowReady(): Promise<void> {
@@ -812,6 +850,34 @@ export async function ensureTimerWindow(): Promise<WebviewWindowInstance> {
   return window;
 }
 
+/** 创建或复用系统清理面板（创建后等 ready 再返回，避免拿到一个还没挂载监听器的窗口）。 */
+export async function ensureSystemCleanerWindow(): Promise<WebviewWindowInstance> {
+  const existing = await WebviewWindow.getByLabel("system-cleaner-overlay");
+  if (existing) {
+    await waitForSystemCleanerWindowReady();
+    return existing;
+  }
+  await prepareSystemCleanerWindowReadyListener();
+  cleanerReady = false;
+  const window = await createToolWindow("system-cleaner-overlay", {
+    title: "Levitaire 系统清理",
+    width: DEFAULT_CLEANER_WIDTH,
+    height: DEFAULT_CLEANER_HEIGHT,
+    resizable: false,
+    transparent: true,
+    decorations: false,
+    shadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    x: 120,
+    y: 120,
+    backgroundColor: [0, 0, 0, 0],
+  });
+  await waitForSystemCleanerWindowReady();
+  return window;
+}
+
 export async function ensureTodoWindow(): Promise<WebviewWindowInstance> {
   if (todoCreatePromise) return todoCreatePromise;
   todoCreatePromise = (async () => {
@@ -987,6 +1053,12 @@ export async function openToolWindow(toolId: string): Promise<boolean> {
       await invoke("start_utility_hub");
       return true;
     }
+    if (toolId === "system-cleaner") {
+      await ensureSystemCleanerWindow();
+      await invoke("show_system_cleaner_window");
+      return true;
+    }
+
     if (toolId === "system-monitor") {
       const monitorWindow = await ensureMonitorWindow();
       if (monitorWindow.created) {

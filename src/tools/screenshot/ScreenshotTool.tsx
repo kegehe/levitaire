@@ -6,7 +6,15 @@ import Icon from "../../components/Icon";
 import AnnotationCanvas, { type AnnotationCanvasHandle } from "./annotate/AnnotationCanvas";
 import AnnotationToolbar from "./annotate/AnnotationToolbar";
 import { useAnnotations } from "./annotate/useAnnotations";
-import { DEFAULT_COLOR, DEFAULT_TOOL, DEFAULT_WIDTH_INDEX, type ActiveTool } from "./annotate/types";
+import {
+  clampStrokeWidth,
+  DEFAULT_TOOL,
+  DEFAULT_TOOL_STYLES,
+  type ActiveTool,
+  type Annotation,
+  type ToolStyles,
+} from "./annotate/types";
+import { applyEditZone, withStrokeWidth, zoneCursor, type EditZone } from "./annotate/edit";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
@@ -65,6 +73,15 @@ const ADJUST_HANDLE_MODES: AdjustMode[] = ADJUST_MODES.filter((m) => m !== "move
 
 /** 选区的最小尺寸（CSS px）：拖动到比这更小就停住，避免选区塌成一条线后再也拉不回来 */
 const MIN_SELECTION_SIZE = 8;
+
+/** 标注缩放的最小边长（物理像素）：拖到比这更小就停住，避免框塌成一条线 */
+const MIN_ANNOTATION_SIZE = 4;
+
+/**
+ * 滚轮调线宽的「空闲收口」时间：一次滚轮爆发在这段时间内没有新事件，就落成**一步撤销**。
+ * 若每一格都 commit，index 式撤销栈会被几十条同样的编辑塞满。
+ */
+const WHEEL_EDIT_IDLE_MS = 450;
 
 /**
  * 计算调整后的选区。纯函数，便于单测。
@@ -277,6 +294,15 @@ function ScreenshotTool() {
   // 与「依赖 win 的 effect」叠加即自激；只在数值真的变化时才写状态（第二道保险：
   // 即使将来有人又把 win 写回非 memo 的取值，这里也不会再触发循环）。
   const monitorWorkAreaRef = useRef<MonitorWorkArea | null>(null);
+  // 上次已下发的智能截图控件区（物理坐标）。`set_smart_screenshot_controls_bounds`
+  // 是幂等的原子写，但每次都要走一次 IPC；拖框时控件栏位置逐帧变化，只在数值真的
+  // 变了才下发，避免按帧刷 IPC。window 模式退出/卸载时置 null（见其专用 effect）。
+  const smartControlsBoundsRef = useRef<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
   const ocrPanelDrag = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
 
   /**
@@ -392,28 +418,69 @@ function ScreenshotTool() {
         current?.left === left && current.top === top ? current : { left, top },
       );
       if (captureKind === "normal" && selectMode === "window") {
-        enqueueSmartModeCommand(() => invoke("set_smart_screenshot_controls_bounds", {
+        const bounds = {
           left: Math.round(left * scale + origin.x),
           top: Math.round(top * scale + origin.y),
           width: Math.round(tabs.offsetWidth * scale),
           height: Math.round(tabs.offsetHeight * scale),
-        }), false);
+        };
+        const sent = smartControlsBoundsRef.current;
+        if (
+          !sent ||
+          sent.left !== bounds.left ||
+          sent.top !== bounds.top ||
+          sent.width !== bounds.width ||
+          sent.height !== bounds.height
+        ) {
+          smartControlsBoundsRef.current = bounds;
+          enqueueSmartModeCommand(async () => {
+            try {
+              await invoke("set_smart_screenshot_controls_bounds", bounds);
+            } catch (error) {
+              // 下发失败就把记录清掉，让下一次位置计算重发。否则这个值会被永远当作
+              // 「已下发」，控件区排除范围就一直停在旧值上 —— 原实现每次无条件重发，
+              // 本身是天然容错的，去重不能把这个性质丢掉。
+              if (smartControlsBoundsRef.current === bounds) {
+                smartControlsBoundsRef.current = null;
+              }
+              throw error;
+            }
+          }, false);
+        }
       }
-
     };
 
     updateCapturePanelPosition();
     window.addEventListener("resize", updateCapturePanelPosition);
     return () => {
-      enqueueSmartModeCommand(() => invoke("set_smart_screenshot_controls_bounds", {
-        left: 0,
-        top: 0,
-        width: 0,
-        height: 0,
-      }), false);
       window.removeEventListener("resize", updateCapturePanelPosition);
     };
   }, [mode, ready, monitorWorkArea, selection, selectMode, captureKind, enqueueSmartModeCommand]);
+
+  /**
+   * 智能截图（窗口模式）控件区排除范围的启停。
+   *
+   * 必须独立成一个不依赖 `selection` 的 effect：原先这段「清零」写在上面布局 effect 的
+   * cleanup 里，而该 effect 的依赖含 `selection`，于是拖框时每一次选区更新都会跟着发一次
+   * 清零 IPC（实测真机上每帧一次；jsdom 环境更放大到每事件一次）。这里依赖只有模式开关，
+   * 进入/离开窗口模式（含组件卸载、会话复位切回区域模式）时才清零一次，与既有语义一致。
+   */
+  useEffect(() => {
+    if (mode !== "selecting" || captureKind !== "normal" || selectMode !== "window") return;
+    return () => {
+      smartControlsBoundsRef.current = null;
+      enqueueSmartModeCommand(
+        () =>
+          invoke("set_smart_screenshot_controls_bounds", {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+          }),
+        false,
+      );
+    };
+  }, [mode, captureKind, selectMode, enqueueSmartModeCommand]);
 
   useEffect(() => {
     const unlistenTheme = subscribeThemePreferences();
@@ -423,14 +490,38 @@ function ScreenshotTool() {
   }, []);
   // 标注
   const annotations = useAnnotations();
+  // 这两个引用稳定（useState setter / useCallback），供 effect 依赖与滚轮编辑收口使用
+  const setAnnotationDraft = annotations.setDraft;
+  const commitAnnotation = annotations.commit;
   const clearRef = useRef(annotations.clear);
   clearRef.current = annotations.clear;
   const translateRef = useRef(annotations.translate);
   translateRef.current = annotations.translate;
   const annotateRef = useRef<AnnotationCanvasHandle>(null);
   const [tool, setTool] = useState<ActiveTool>(DEFAULT_TOOL);
-  const [color, setColor] = useState<string>(DEFAULT_COLOR);
-  const [widthIndex, setWidthIndex] = useState<number>(DEFAULT_WIDTH_INDEX);
+  // 颜色/粗细按工具分别保存：每个绘图工具各自记住自己的颜色与粗细，互不影响。
+  // 移动工具不产生标注，取其兜底样式（内容不会被用到，仅供 canvas 组件 props 完整）。
+  const [toolStyles, setToolStyles] = useState<ToolStyles>(DEFAULT_TOOL_STYLES);
+  const activeStyle = tool === "move" ? DEFAULT_TOOL_STYLES.rect : toolStyles[tool];
+  // 工具栏二级面板只编辑「当前工具」的样式，因此 setter 写回当前工具那一项。
+  const setActiveColor = useCallback(
+    (c: string) => {
+      setToolStyles((prev) =>
+        tool === "move" ? prev : { ...prev, [tool]: { ...prev[tool], color: c } },
+      );
+    },
+    [tool],
+  );
+  const setActiveStrokeWidth = useCallback(
+    (next: number) => {
+      setToolStyles((prev) =>
+        tool === "move"
+          ? prev
+          : { ...prev, [tool]: { ...prev[tool], strokeWidth: clampStrokeWidth(next) } },
+      );
+    },
+    [tool],
+  );
   // 选区的调整快照。非 null 表示「正在调整选区」：`adjustAnchor` 冻结调整前的选区，
   // 底图 canvas 停在原处不动（旧裁剪的像素本来就等于桌面在那个位置的像素），
   // 遮罩/选框跟随 selection 实时更新，露出的新区域直接透出下方的实时桌面，
@@ -447,6 +538,79 @@ function ScreenshotTool() {
   } | null>(null);
   // 调整重截的代际计数：只有最新一次的结果允许落地，避免连续拖动时旧结果覆盖新选区
   const adjustGenRef = useRef(0);
+
+  // 标注编辑会话：在「移动」工具下命中已提交标注后拖动它（缩放/整体移动）。
+  // 与选区调整互斥 —— 命中标注则编辑标注，未命中仍走选区调整。
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 悬停光标（覆盖 .ss-adjust-body 的 cursor:move）：命中的部位决定缩放/移动光标
+  const [hoverCursor, setHoverCursor] = useState("move");
+  // 当前鼠标悬停在哪条标注上（由 .ss-adjust-body 的 pointermove 维护）。
+  // 滚轮改线宽用它来判断「鼠标确实压在这条选中的标注上」——比读 wheel 事件的坐标更稳，
+  // 也与指针实际位置同源。
+  const hoveredAnnIdRef = useRef<string | null>(null);
+  const annEditRef = useRef<{
+    pointerId: number;
+    zone: EditZone;
+    original: Annotation;
+    /** 拖动中的实时结果；同步写 ref，供 pointerup 在同一批内立即读到（不依赖 state 渲染） */
+    draft: Annotation;
+    start: { x: number; y: number }; // 画布内部物理像素
+    moved: boolean;
+  } | null>(null);
+
+  // 滚轮调「已选中的已提交标注」线宽的会话：一次滚轮爆发合并成一步撤销。
+  // 首次滚轮记下 original，之后每次滚轮更新 draft 并重置空闲定时器，定时器到点才 commit。
+  const wheelEditRef = useRef<{
+    id: string;
+    original: Annotation;
+    draft: Annotation;
+    timer: number;
+  } | null>(null);
+
+  /** 滚轮编辑收口：把这一版提交进撤销栈，并清掉预览与定时器 */
+  const finishWheelEdit = useCallback(() => {
+    const edit = wheelEditRef.current;
+    if (!edit) return;
+    window.clearTimeout(edit.timer);
+    wheelEditRef.current = null;
+    setAnnotationDraft(null);
+    // 文字/序号的字号、序号的半径都由 strokeWidth 派生，故只比 strokeWidth 即可判断是否真的变了
+    if (edit.draft.strokeWidth !== edit.original.strokeWidth) commitAnnotation(edit.draft);
+  }, [commitAnnotation, setAnnotationDraft]);
+
+  /** 丢弃滚轮编辑（不提交）：用于取消/复位/卸载等整个会话被拆掉的路径 */
+  const discardWheelEdit = useCallback(() => {
+    const edit = wheelEditRef.current;
+    if (!edit) return;
+    window.clearTimeout(edit.timer);
+    wheelEditRef.current = null;
+    setAnnotationDraft(null);
+  }, [setAnnotationDraft]);
+
+  // 切到非「移动」工具时先收口滚轮编辑（保留用户刚调的线宽），再清掉标注选中态与预览
+  useEffect(() => {
+    if (tool === "move") return;
+    finishWheelEdit();
+    setSelectedId(null);
+    setAnnotationDraft(null);
+  }, [tool, setAnnotationDraft, finishWheelEdit]);
+
+  // 工具栏的「撤销/重做」按钮不走键盘钩子（见下面的 onKey），必须同样先落定挂起的滚轮编辑：
+  // 否则按钮先撤销（index 回退），450ms 后定时器再 commit 一版，把刚撤销掉的东西又推回来。
+  const undoAnnotation = useCallback(() => {
+    finishWheelEdit();
+    annotations.undo();
+  }, [finishWheelEdit, annotations.undo]);
+  const redoAnnotation = useCallback(() => {
+    finishWheelEdit();
+    annotations.redo();
+  }, [finishWheelEdit, annotations.redo]);
+  // 工具栏只需要 undo/redo/canUndo/canRedo；用包裹后的版本覆盖这两个方法
+  const toolbarAnnotations: typeof annotations = {
+    ...annotations,
+    undo: undoAnnotation,
+    redo: redoAnnotation,
+  };
 
   // 显示一条临时错误提示（4 秒后自动清除），用于 OCR 等失败时给用户可见反馈
   const showError = useCallback((msg: string) => {
@@ -649,19 +813,23 @@ function ScreenshotTool() {
       if (mod && e.key.toLowerCase() === "z") {
         if (e.shiftKey) {
           e.preventDefault();
+          // 先把挂起的滚轮编辑落定，否则撤销后定时器会截断 redo 尾巴再 push，重做语义错乱
+          finishWheelEdit();
           redoRef.current();
         } else {
           e.preventDefault();
+          finishWheelEdit();
           undoRef.current();
         }
       } else if (mod && e.key.toLowerCase() === "y") {
         e.preventDefault();
+        finishWheelEdit();
         redoRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [finishWheelEdit]);
 
   // 监听后端全局 Esc 退出事件（透明全屏窗口失焦时前端 keydown 可能收不到，
   // 由 WH_KEYBOARD_LL 全局钩子触发 screenshot-cancelled 兜底）
@@ -690,12 +858,16 @@ function ScreenshotTool() {
       setTool(DEFAULT_TOOL);
       // 同步清空标注与失焦抑制，避免下次截图残留
       clearRef.current();
+      // 一并丢弃标注编辑态（选中 / 拖动会话 / 挂起的滚轮编辑）
+      setSelectedId(null);
+      annEditRef.current = null;
+      discardWheelEdit();
       suppressFocusReset.current = false;
     });
     return () => {
       un.then((fn) => fn());
     };
-  }, []);
+  }, [discardWheelEdit]);
 
   useEffect(() => {
     const un = listen("long-capture-overlay-reset", () => {
@@ -718,11 +890,14 @@ function ScreenshotTool() {
       resetAdjust();
       setTool(DEFAULT_TOOL);
       clearRef.current();
+      setSelectedId(null);
+      annEditRef.current = null;
+      discardWheelEdit();
     });
     return () => {
       un.then((fn) => fn());
     };
-  }, []);
+  }, [discardWheelEdit]);
 
   // 失焦退出标注态：普通失焦（切走窗口、系统弹窗等）应清空截图状态，
   // 但 save/pin 弹系统对话框夺焦期间由 suppressFocusReset 抑制，避免与对话框冲突。
@@ -766,6 +941,9 @@ function ScreenshotTool() {
     return () => {
       if (errorTimer.current) clearTimeout(errorTimer.current);
       if (blurTimer.current) clearTimeout(blurTimer.current);
+      // 挂起的滚轮编辑定时器同样要在卸载时清掉（丢弃即可，组件都没了）
+      if (wheelEditRef.current) window.clearTimeout(wheelEditRef.current.timer);
+      wheelEditRef.current = null;
     };
   }, []);
 
@@ -793,13 +971,17 @@ function ScreenshotTool() {
     // 工具回到默认的移动工具，避免上一次会话选的画笔/文字残留到下一次截图
     setTool(DEFAULT_TOOL);
     clearRef.current();
+    setSelectedId(null);
+    annEditRef.current = null;
+    // 挂起的滚轮编辑直接丢弃：整个会话都要重置，不需要把它提交进撤销栈
+    discardWheelEdit();
     if (errorTimer.current) {
       clearTimeout(errorTimer.current);
       errorTimer.current = null;
     }
     dragStart.current = null;
     invoke("cancel_screenshot").catch(console.error);
-  }, []);
+  }, [discardWheelEdit]);
   cancelRef.current = cancel;
 
   // 把浮点 CSS 坐标对齐到「整数物理像素」对应的 CSS 坐标。
@@ -929,10 +1111,13 @@ function ScreenshotTool() {
   };
 
   const flushAnnotated = useCallback((): string | null => {
+    // 导出前先把挂起的滚轮编辑落定（对照 AnnotationCanvas 内的 finishText）：
+    // 这样导出即所见，且这一步宽度调整会作为一步留在撤销栈里。
+    finishWheelEdit();
     if (!annotateRef.current) return image?.base64 ?? null;
     if (!annotateRef.current.isReady()) return null;
     return annotateRef.current.flushBase64();
-  }, [image]);
+  }, [image, finishWheelEdit]);
 
   /**
    * 按下选区调整层（整体移动 / 四边四角缩放）。
@@ -947,6 +1132,12 @@ function ScreenshotTool() {
     // 若放行并发会话，被代际丢弃的那一次就没机会平移标注，坐标会错开。
     // 代价是重截在途时（通常几十毫秒）的按下会被忽略。
     if (adjustRef.current) return;
+    // 标注编辑会话进行中：不并发开启选区调整（两者都由 .ss-adjust-body 接收事件）
+    if (annEditRef.current) return;
+    // 选区四边四角手柄是 .ss-adjust-body 的**兄弟节点**，不会走 body 的 onWheel/收口钩子。
+    // 这里必须先把挂起的滚轮编辑落定：否则 commitAdjusted 的 translate 只平移已提交项，
+    // 随后定时器会用「平移前坐标」的 draft 提交，去重取末次值 → 标注弹回原位。
+    finishWheelEdit();
     const anchor = adjustAnchorRef.current ?? selection;
     adjustGenRef.current++;
     adjustRef.current = {
@@ -1004,6 +1195,128 @@ function ScreenshotTool() {
     selectionRef.current = drag.anchor;
     setSelection(drag.anchor);
     setAdjustAnchor(null);
+  };
+
+  /**
+   * 「移动」工具下，选区内部（.ss-adjust-body）的按下：先命中测试已提交标注 ——
+   * 命中则进入标注编辑会话（缩放/整体移动），未命中才落回原来的选区整体移动。
+   * 选区四边四角手柄 z-index 更高，鼠标靠近选区边界时仍优先缩放选区。
+   */
+  const onBodyPointerDown = (e: React.PointerEvent) => {
+    if (mode !== "annotating" || tool !== "move" || busy || !ready || !selection) return;
+    if (adjustRef.current || annEditRef.current) return;
+    // 先把挂起的滚轮编辑落定：命中测试与 original 才会带上刚调好的新线宽，
+    // 且随后的 setAnnotationDraft(hit.annotation) 不会把滚轮预览悄悄丢掉。
+    finishWheelEdit();
+    const hit = annotateRef.current?.hitTest(e.clientX, e.clientY) ?? null;
+    hoveredAnnIdRef.current = hit ? hit.annotation.id : null;
+    if (!hit) {
+      setSelectedId(null);
+      startAdjust(e, "move");
+      return;
+    }
+    const start = annotateRef.current?.toPhysical(e.clientX, e.clientY);
+    if (!start) return;
+    annEditRef.current = {
+      pointerId: e.pointerId,
+      zone: hit.zone,
+      original: hit.annotation,
+      draft: hit.annotation,
+      start,
+      moved: false,
+    };
+    setSelectedId(hit.annotation.id);
+    // 立刻用 draft 顶替显示该标注：renderAll 会跳过同 id 的已生效项，因此不会与原版重影
+    setAnnotationDraft(hit.annotation);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const onBodyPointerMove = (e: React.PointerEvent) => {
+    const edit = annEditRef.current;
+    if (edit) {
+      if (edit.pointerId !== e.pointerId) return;
+      const p = annotateRef.current?.toPhysical(e.clientX, e.clientY);
+      if (!p) return;
+      const dx = p.x - edit.start.x;
+      const dy = p.y - edit.start.y;
+      // 小于 1 物理像素的抖动不算拖动：避免一次原地点击也产生撤销项
+      if (!edit.moved && Math.hypot(dx, dy) < 1) return;
+      edit.moved = true;
+      // 同步写进 ref：pointerup 可能与 pointermove 落在同一批，读 state/ref 回 draft 会拿到陈旧值
+      edit.draft = applyEditZone(edit.original, edit.zone, dx, dy, MIN_ANNOTATION_SIZE);
+      setAnnotationDraft(edit.draft);
+      return;
+    }
+    if (adjustRef.current) {
+      moveAdjust(e);
+      return;
+    }
+    if (mode !== "annotating" || tool !== "move" || busy || !ready) return;
+    // 未拖动：只更新悬停光标（仅在变化时 setState，避免逐帧重渲染）
+    const hit = annotateRef.current?.hitTest(e.clientX, e.clientY) ?? null;
+    hoveredAnnIdRef.current = hit ? hit.annotation.id : null;
+    const next = hit ? zoneCursor(hit.zone) : "move";
+    setHoverCursor((cur) => (cur === next ? cur : next));
+  };
+
+  const onBodyPointerUp = (e: React.PointerEvent) => {
+    const edit = annEditRef.current;
+    if (edit) {
+      if (edit.pointerId !== e.pointerId) return;
+      annEditRef.current = null;
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+      if (edit.moved) {
+        // 以同一个 id 提交这一版（撤销时自动回退到上一版，见 useAnnotations.dedupeById）
+        annotations.commit(edit.draft);
+      }
+      setAnnotationDraft(null);
+      return;
+    }
+    endAdjust(e);
+  };
+
+  const onBodyPointerCancel = (e: React.PointerEvent) => {
+    const edit = annEditRef.current;
+    if (edit && edit.pointerId === e.pointerId) {
+      annEditRef.current = null;
+      setAnnotationDraft(null);
+      return;
+    }
+    cancelAdjust(e);
+  };
+
+  /**
+   * 「移动」工具下、且已选中某标注时：鼠标悬停在该标注上滚轮 → 调它的线宽。
+   * 一次滚轮爆发由空闲定时器收口成**一步撤销**（见 finishWheelEdit）。
+   * 只按方向步进 ±1（不看 deltaY 大小），与工具栏圆点、草稿工具一致。
+   */
+  const onBodyWheel = (e: React.WheelEvent) => {
+    if (mode !== "annotating" || tool !== "move" || busy || !ready) return;
+    if (!selectedId || adjustRef.current || annEditRef.current) return;
+    // 必须真的悬停在**选中的那条**标注上，避免在选区空白处滚动就误改
+    if (hoveredAnnIdRef.current !== selectedId) return;
+    // 只认纵向滚动：触控板横向滑动（deltaY=0）不该改线宽
+    if (e.deltaY === 0) return;
+    const target = annotations.getCommitted().find((a) => a.id === selectedId);
+    if (!target) return;
+    e.preventDefault();
+
+    const existing = wheelEditRef.current;
+    const session: { id: string; original: Annotation; draft: Annotation; timer: number } =
+      existing && existing.id === selectedId
+        ? existing
+        : { id: selectedId, original: target, draft: target, timer: 0 };
+    const next = withStrokeWidth(
+      session.draft,
+      session.draft.strokeWidth + (e.deltaY < 0 ? 1 : -1),
+    );
+    // 已到边界（钳制后没有变化）：不重启定时器，让已有会话自然收口
+    if (next.strokeWidth === session.draft.strokeWidth) return;
+    session.draft = next;
+    if (session.timer) window.clearTimeout(session.timer);
+    session.timer = window.setTimeout(finishWheelEdit, WHEEL_EDIT_IDLE_MS);
+    wheelEditRef.current = session;
+    setAnnotationDraft(next);
   };
 
   /**
@@ -1352,20 +1665,23 @@ function ScreenshotTool() {
             selection={adjustAnchor ?? selection}
             scale={scaleRef.current || 1}
             tool={tool}
-            color={color}
-            widthIndex={widthIndex}
+            color={activeStyle.color}
+            strokeWidth={activeStyle.strokeWidth}
             annotations={annotations}
+            selectedId={tool === "move" ? selectedId : null}
           />
           {tool === "move" && (
             <>
-              {/* 选区内部：按住拖动整体移动。透明层，只为接管指针事件与光标 */}
+              {/* 选区内部：按住拖动整体移动；命中已提交标注时改为编辑该标注；
+                  已选中标注时滚轮改它的线宽。透明层，只为接管指针事件与光标。 */}
               <div
                 className="ss-adjust-body"
-                style={boxStyle(selection)}
-                onPointerDown={(e) => startAdjust(e, "move")}
-                onPointerMove={moveAdjust}
-                onPointerUp={endAdjust}
-                onPointerCancel={cancelAdjust}
+                style={{ ...boxStyle(selection), cursor: hoverCursor }}
+                onPointerDown={onBodyPointerDown}
+                onPointerMove={onBodyPointerMove}
+                onPointerUp={onBodyPointerUp}
+                onPointerCancel={onBodyPointerCancel}
+                onWheel={onBodyWheel}
               />
               {/* 四边四角：透明命中区，随时可抓（光标随之变缩放样式），四角在拖动时显形 */}
               {ADJUST_HANDLE_MODES.map((m) => (
@@ -1384,11 +1700,11 @@ function ScreenshotTool() {
           <AnnotationToolbar
             tool={tool}
             setTool={setTool}
-            color={color}
-            setColor={setColor}
-            widthIndex={widthIndex}
-            setWidthIndex={setWidthIndex}
-            annotations={annotations}
+            color={activeStyle.color}
+            setColor={setActiveColor}
+            strokeWidth={activeStyle.strokeWidth}
+            onStrokeWidthChange={setActiveStrokeWidth}
+            annotations={toolbarAnnotations}
             busy={busy}
             error={error}
             ready={true}

@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, URL as NodeURL } from "node:url";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearMockListeners, mockStartDragging, setMockWindow } from "../../test/tauri-mock";
+import {
+  clearMockListeners,
+  emitMockEvent,
+  mockStartDragging,
+  setMockWindow,
+} from "../../test/tauri-mock";
 import StickyNoteManager from "./StickyNoteManager";
 
 const mockInvoke = vi.mocked(invoke);
@@ -94,6 +99,96 @@ describe("StickyNoteManager", () => {
     });
   });
 
+  // 读不到列表 ≠ 没有便签。走空状态分支会说成「还没有便利贴 / 新建第一张」，
+  // 用户读了会以为便签被清空了（磁盘上其实还在），必须显示成读取失败。
+  it("列表读取失败时显示读取失败与重试，而不是空状态", async () => {
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "get_sticky_notes") return Promise.reject(new Error("数据库被占用"));
+      return Promise.resolve();
+    });
+    // 这条失败是故意的：拦下 console.error，别把栈刷进测试输出（同 TextToolbar.test.tsx）
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<StickyNoteManager />);
+
+    expect(await screen.findByText("读取便利贴列表失败，内容暂未加载")).toBeTruthy();
+    expect(screen.getByText(/数据库被占用/)).toBeTruthy();
+    // 状态是**说出来**的：屏幕阅读器也要能立刻播报（同单张便签窗的失败卡片）
+    expect(screen.getByRole("alert")).toBeTruthy();
+    // ★ 断言「不显示空状态」这条本身：只说「显示了失败」时，两个分支同时渲染也照样绿
+    expect(screen.queryByText("还没有便利贴")).toBeNull();
+    expect(screen.queryByRole("button", { name: "新建第一张" })).toBeNull();
+    // 没有任何数据时也不能挂「以下内容可能已过时」——那条提示是给上一轮列表用的，
+    // 这里下面什么都没有，挂上去只会让人以为屏幕上还有一份没看到的旧列表
+    expect(screen.queryByText(/可能已经过时/)).toBeNull();
+    // 界面之外仍要留下日志：报错原文进了 UI，排查时也不能只剩一个空手
+    expect(consoleSpy).toHaveBeenCalledWith("读取便利贴列表失败:", expect.anything());
+    consoleSpy.mockRestore();
+  });
+
+  it("读取失败后点重试：先回到加载态，成功后恢复列表并清掉报错", async () => {
+    let attempt = 0;
+    // 重试的那次读取挂住不返回，好让「点下去有没有反馈」这一段能被断言到
+    // （直接 resolve 的话，加载态可能在同一批微任务里就被列表替掉，断言会飘）。
+    let resolveRetry: (notes: unknown) => void = () => {};
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "get_sticky_notes") {
+        attempt += 1;
+        if (attempt === 1) return Promise.reject(new Error("数据库被占用"));
+        return new Promise((resolve) => {
+          resolveRetry = resolve;
+        });
+      }
+      return Promise.resolve();
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<StickyNoteManager />);
+    await screen.findByText("读取便利贴列表失败，内容暂未加载");
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    // 点下去要立刻有反馈：回到加载态，而不是停在旧报错上一动不动
+    expect(screen.getByText("加载中…")).toBeTruthy();
+    expect(screen.queryByText("读取便利贴列表失败，内容暂未加载")).toBeNull();
+
+    await act(async () => {
+      resolveRetry(NOTES);
+    });
+
+    expect(await screen.findByText("买牛奶")).toBeTruthy();
+    expect(screen.queryByText("读取便利贴列表失败，内容暂未加载")).toBeNull();
+    // ★ 读成功必须把上一轮的报错一并清掉：只清「失败态」不清 loadError 的话，列表回来了
+    // 却永远挂着「以下内容可能已经过时」—— 拿新鲜数据说它过时，同样是骗人。
+    expect(screen.queryByText(/可能已经过时/)).toBeNull();
+    consoleSpy.mockRestore();
+  });
+
+  // 手里还有上一轮数据时刷新失败：继续显示旧列表，但要说明它可能过时 ——
+  // 静默保留会让人把旧张数当成本轮的事实。
+  it("刷新失败但已有列表时保留旧数据并提示可能过时", async () => {
+    let failing = false;
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "get_sticky_notes") {
+        return failing ? Promise.reject(new Error("数据库被占用")) : Promise.resolve(NOTES);
+      }
+      return Promise.resolve();
+    });
+    render(<StickyNoteManager />);
+    await screen.findByText("买牛奶");
+
+    failing = true;
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await act(async () => {
+      emitMockEvent("sticky-notes-changed", null);
+    });
+
+    // 旧便签仍在，同时挂出「可能已经过时」的提示
+    expect(screen.getByText("买牛奶")).toBeTruthy();
+    expect(screen.getByText(/可能已经过时/)).toBeTruthy();
+    // 仍有数据时不该退化成整屏失败态
+    expect(screen.queryByText("读取便利贴列表失败，内容暂未加载")).toBeNull();
+    consoleSpy.mockRestore();
+  });
+
   it("标题栏新建按钮创建新便签", async () => {
     mockDefault();
     render(<StickyNoteManager />);
@@ -143,6 +238,16 @@ describe("StickyNoteManager", () => {
     // 空状态的新建按钮是自撑宽的胶囊，不是整宽主按钮
     expect(ruleFor(css, ".snm-add-btn")).toMatch(/display: inline-flex/);
     expect(ruleFor(css, ".snm-add-btn")).not.toMatch(/width: 100%/);
+  });
+
+  // 「读不到」和「还没有便利贴」必须是两种长得不一样的东西：同形同色的话，这次修好的
+  // 文案也会被一眼扫成空状态。声明级真值只能对着 CSS 源码断言（同本文件的高度守卫）。
+  it("读取失败态在样式上与空状态分得开", () => {
+    const css = readManagerCss();
+    // 失败态整块走危险色（选择器是并列的，用正则匹配选择器列表）
+    expect(css).toMatch(/\.snm-empty\.is-error[^{]*\{[^}]*--color-danger/);
+    // 空状态自身**不能**是危险色：那是「还没有便利贴」，不是出错
+    expect(ruleFor(css, ".snm-empty")).not.toMatch(/--color-danger/);
   });
 
   it("点击行唤出已收起的便签", async () => {

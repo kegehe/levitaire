@@ -908,6 +908,15 @@ async fn prepare_and_install(
     // 清单已是空的，再也认不回那几个窗口。
     crate::window_pin::cleanup();
 
+    // ⚠️ 光标这两种模式改的是**系统级**状态（`SetSystemCursor` 换的是整个 Windows 的箭头），
+    // 而还原用的句柄是本进程 `CopyIcon` 出来的副本 —— 进程一没了副本就销毁，**再没人能还**，
+    // 用户会一直看到取色笔 / 准星直到重启（或等别的程序重置系统光标）。
+    // 取色与置顶点选会长期保持 armed（每次采样后不自动解除），所以"安装时恰好开着"并不罕见。
+    // 这里必须是显式调用：插件内部走的是 `std::process::exit(0)`，
+    // `RunEvent::Exit` 那层兜底根本不会执行。
+    crate::hooks::mouse::stop_color_pick();
+    crate::hooks::mouse::stop_window_pin();
+
     // install() 内部会把包写到临时文件、ShellExecute 拉起安装器，随后立刻
     // std::process::exit(0)。正常路径下这一句不会返回 —— 旧实现里紧随其后的
     // app.restart() 同样不可达，这不是遗漏，而是插件的设计。

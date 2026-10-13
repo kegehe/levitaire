@@ -3881,6 +3881,39 @@ describe("FloatingToolbar 清除功能", () => {
     const icons = buttons.map((b) => b.querySelector(".toolbar-button-icon svg")?.outerHTML ?? "");
     expect(new Set(icons).size).toBe(icons.length);
   });
+
+  // ── 结果为空 ────────────────────────────────────────
+
+  it("清除后结果为空时提示用户且不调用 replace_selection", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("123");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "清除" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "删除所有数字" }));
+    });
+
+    // 后端 replace_selection 拒绝空字符串：不调用后端命令，改为错误提示避免界面毫无反应
+    expect(mockInvoke).not.toHaveBeenCalledWith("replace_selection", expect.anything());
+    expect(screen.getByRole("alert")).toHaveTextContent("清除结果为空，文本未修改");
+  });
+
+  it("清除后文本非空时正常写回并回到默认态", async () => {
+    render(<FloatingToolbar />);
+    await showToolbar("a1b2");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "清除" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "删除所有数字" }));
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("replace_selection", { text: "ab" });
+    expect(screen.getByRole("button", { name: "搜索" })).toBeInTheDocument();
+  });
 });
 
 // ── Esc 快捷键（Rust 全局钩子转发 toolbar-esc）──────────────────

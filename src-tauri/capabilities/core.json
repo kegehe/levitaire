@@ -24,7 +24,8 @@
     "pin-ocr",
     "sketch-overlay",
     "sticky-notes-manager",
-    "sticky-note-*"
+    "sticky-note-*",
+    "system-cleaner-overlay"
   ],
   "permissions": [
     "core:default",
@@ -38,6 +39,7 @@
     "core:window:allow-set-always-on-top",
     "core:window:allow-center",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
     "core:window:allow-set-focusable",
     "core:window:allow-outer-position",
     "core:window:allow-inner-size",

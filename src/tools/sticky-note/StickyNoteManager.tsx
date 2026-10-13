@@ -60,6 +60,9 @@ function StickyNoteManager() {
   const lastWindowSizeRef = useRef("");
   const [notes, setNotes] = useState<StickyNote[]>([]);
   const [loading, setLoading] = useState(true);
+  // 读取失败的原因。**非空时 `notes` 不是"没有便签"的意思**，界面必须说"读取失败"：
+  // 照旧走空状态会显示成「还没有便利贴」，用户会以为便签被清空了（磁盘上其实还在）。
+  const [loadError, setLoadError] = useState<string | null>(null);
   // 删除二次确认：记录当前待确认删除的便利贴 id，3 秒内再次点击才真正删除
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const confirmTimerRef = useRef<number | null>(null);
@@ -164,12 +167,22 @@ function StickyNoteManager() {
     try {
       const list = await invoke<StickyNote[]>("get_sticky_notes");
       setNotes(list);
+      setLoadError(null);
     } catch (err) {
+      // 失败不能只留一行控制台日志：列表保持上一轮内容（可能为空），由 loadError
+      // 决定界面说"读取失败"还是"还没有便利贴"。
       console.error("读取便利贴列表失败:", err);
+      setLoadError(String(err));
     } finally {
       setLoading(false);
     }
   }, []);
+
+  /** 读取失败后的重试：先回到加载态，避免连点期间停在旧报错上没有任何反馈 */
+  const retryLoad = useCallback(() => {
+    setLoading(true);
+    void refresh();
+  }, [refresh]);
 
   // 挂载：恢复所有"已钉在桌面"的便签窗口（若工具曾被禁用销毁过），并刷新列表
   useEffect(() => {
@@ -287,6 +300,15 @@ function StickyNoteManager() {
           </div>
         </header>
 
+        {/* 刷新失败但手里还留着上一轮列表时，不清空、也不装作没事：继续显示旧数据，
+            同时说清「这可能是过时的」—— 张数不一定准，用户不该被一个安静的数字骗到。
+            放在摘要行**之前**：要过时的正是下面那些数字和条目，提示必须在它们上面。 */}
+        {!loading && loadError && notes.length > 0 && (
+          <div className="snm-error-note" role="alert">
+            列表刷新失败，下面显示的内容可能已经过时：{loadError}
+          </div>
+        )}
+
         {/* 摘要行只在有便签时出现："桌面 0 张" 是纯噪声，还会把空状态顶下去 */}
         {notes.length > 0 && (
           <div className="snm-summary">
@@ -299,6 +321,21 @@ function StickyNoteManager() {
 
         {loading ? (
           <div className="snm-empty">加载中…</div>
+        ) : loadError && notes.length === 0 ? (
+          /* ★ 读不出来就说读不出来。这里**必须**先于空状态判定：一旦落到下一分支，
+             界面会显示「还没有便利贴 / 新建第一张」，用户读了会以为便签被清空了。
+             「内容暂未加载」这半句与单张便签窗的失败卡片（StickyNote.tsx）同一措辞 ——
+             同一个功能、同一种失败，两处说法不该各写一套。 */
+          <div className="snm-empty is-error" role="alert">
+            <ToolIcon name="StickyNote" size={24} />
+            <p>读取便利贴列表失败，内容暂未加载</p>
+            <p className="snm-error-detail" title={loadError}>
+              {loadError}
+            </p>
+            <button type="button" className="snm-add-btn" onClick={retryLoad}>
+              重试
+            </button>
+          </div>
         ) : notes.length === 0 ? (
           <div className="snm-empty">
             <ToolIcon name="StickyNote" size={24} />

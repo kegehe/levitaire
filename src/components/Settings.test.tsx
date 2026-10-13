@@ -31,8 +31,25 @@ describe("Settings 悬浮窗位置恢复", () => {
     expect(screen.getAllByText("系统监控").length).toBeGreaterThanOrEqual(1);
     // 番茄钟已并入时间工具，不再有独立的窗口位置入口
     expect(screen.getAllByText("时间工具").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByRole("button", { name: "恢复默认位置" })).toHaveLength(4);
+    // 悬浮球 / 系统监控 / 时间工具 / 待办清单 / 系统清理 / 便利贴
+    expect(screen.getAllByText("系统清理").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("便利贴").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByRole("button", { name: "恢复默认位置" })).toHaveLength(6);
     expect(screen.getByRole("button", { name: "全部恢复默认位置" })).toBeInTheDocument();
+  });
+
+  it("悬浮窗位置的说明文案与下方入口逐项一致，不再提及已并入的番茄钟", async () => {
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const hint = screen.getByText(/会记住上次拖拽的位置/);
+    // 文案由 WINDOW_POSITION_TARGETS 派生，顺序、顿号分隔与名称都应与下方入口一致
+    expect(hint.textContent).toMatch(
+      /^悬浮球、系统监控、时间工具、待办清单、系统清理、便利贴会记住/,
+    );
+    expect(hint.textContent).not.toContain("番茄钟");
   });
 
   it("点击单个悬浮窗的恢复按钮时调用后端清除记忆", async () => {
@@ -194,6 +211,12 @@ describe("Settings 悬浮窗位置恢复", () => {
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "monitor-overlay" });
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "time-overlay" });
     expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", { id: "todo-overlay" });
+    expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", {
+      id: "system-cleaner-overlay",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("reset_window_position", {
+      id: "sticky-notes-manager",
+    });
   });
 
   it("恢复失败时按钮显示失败反馈", async () => {
@@ -538,6 +561,151 @@ describe("Settings 快速输入剪贴板历史管理", () => {
     expect(mockInvoke).toHaveBeenCalledWith("remove_quick_input_history_item", {
       text: "secret",
     });
+  });
+});
+
+describe("Settings 快速输入音效反馈", () => {
+  const openQuickInputTab = async () => {
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "快速输入" }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    localStorage.clear();
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_sound_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_sound_style") return Promise.resolve("standard");
+      if (command === "get_quick_input_sound_volume") return Promise.resolve(45);
+      return Promise.resolve("");
+    });
+  });
+
+  it("渲染开关与三档参数，默认从后端读取", async () => {
+    await openQuickInputTab();
+    expect(screen.getByRole("switch", { name: "音效反馈" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // 风格下拉只有 minimal / standard 两档（none 不对外暴露）
+    const style = screen.getByLabelText("音效风格") as HTMLSelectElement;
+    expect(Array.from(style.options).map((o) => o.value)).toEqual(["standard", "minimal"]);
+    expect(style.value).toBe("standard");
+    expect((screen.getByLabelText("音量") as HTMLInputElement).value).toBe("45");
+  });
+
+  it("关闭音效时参数控件随之禁用", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_sound_enabled") return Promise.resolve(false);
+      if (command === "get_quick_input_sound_style") return Promise.resolve("standard");
+      if (command === "get_quick_input_sound_volume") return Promise.resolve(45);
+      return Promise.resolve("");
+    });
+    await openQuickInputTab();
+    expect(screen.getByLabelText("音效风格")).toBeDisabled();
+    expect(screen.getByLabelText("音量")).toBeDisabled();
+    // 试听按钮也应禁用（关闭状态下不该能试听）
+    expect(screen.getByRole("button", { name: /试听「唤出」/ })).toBeDisabled();
+  });
+
+  it("切换开关时保存启用状态", async () => {
+    await openQuickInputTab();
+    const toggle = screen.getByRole("switch", { name: "音效反馈" });
+    await act(async () => {
+      fireEvent.click(toggle);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("set_quick_input_sound_enabled", { enabled: false });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("切换风格时保存并试听该风格的样本音", async () => {
+    await openQuickInputTab();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("音效风格"), { target: { value: "minimal" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("set_quick_input_sound_style", { style: "minimal" });
+    // 极简风格没有刻度音，用「确认」当样本
+    expect(mockInvoke).toHaveBeenCalledWith("preview_quick_input_sound", { cue: "confirm" });
+  });
+
+  it("拖动音量时保存并夹取到 0-100", async () => {
+    await openQuickInputTab();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("音量"), { target: { value: "70" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("set_quick_input_sound_volume", { volume: 70 });
+  });
+
+  it("音量拖到 0 时不再试听（否则用户按了没反应会以为试听坏了）", async () => {
+    await openQuickInputTab();
+    const volume = screen.getByLabelText("音量");
+    await act(async () => {
+      fireEvent.change(volume, { target: { value: "0" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    mockInvoke.mockClear();
+    await act(async () => {
+      fireEvent.mouseUp(volume);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("preview_quick_input_sound", {
+      cue: "confirm",
+    });
+  });
+
+  it("极简风格下禁用「划过」试听按钮", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_sound_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_sound_style") return Promise.resolve("minimal");
+      if (command === "get_quick_input_sound_volume") return Promise.resolve(45);
+      return Promise.resolve("");
+    });
+    await openQuickInputTab();
+    expect(screen.getByRole("button", { name: /试听「划过」/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /试听「确认」/ })).not.toBeDisabled();
+  });
+
+  it("迟到的初始读取不得覆盖用户刚改的风格", async () => {
+    let resolveStyle!: (value: string) => void;
+    const styleRead = new Promise<string>((resolve) => {
+      resolveStyle = resolve;
+    });
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_sound_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_sound_style") return styleRead;
+      if (command === "get_quick_input_sound_volume") return Promise.resolve(45);
+      return Promise.resolve("");
+    });
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "快速输入" }));
+
+    const style = screen.getByLabelText("音效风格") as HTMLSelectElement;
+    await act(async () => {
+      fireEvent.change(style, { target: { value: "minimal" } });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveStyle("standard");
+      await styleRead;
+    });
+    expect(style.value).toBe("minimal");
   });
 });
 

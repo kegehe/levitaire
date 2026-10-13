@@ -19,7 +19,8 @@ export type ToolIconName =
   | "Check"
   | "GripVertical"
   | "Grid3x3"
-  | "StickyNote";
+  | "StickyNote"
+  | "Broom";
 
 interface ToolIconProps {
   name: ToolIconName;
@@ -210,6 +211,17 @@ function ToolIcon({ name, size = 20, className = "", style }: ToolIconProps) {
           <path d="M6 3.5h9l4 4V20.5H6z" />
           <path d="M15 3.5V7.5h4" />
           <path d="M9 12h6M9 15.5h6M9 9h2.5" />
+        </svg>
+      );
+
+    // 系统清理 — 扫帚
+    case "Broom":
+      return (
+        <svg {...common}>
+          <path d="M13.6 3.4 20.6 10.4" />
+          <path d="M18.2 2.4l3.4 3.4" />
+          <path d="M10.4 6.6 17.4 13.6" />
+          <path d="M12.4 12.4 4.6 20.2a1.2 1.2 0 0 0 0 1.7l.5.5a1.2 1.2 0 0 0 1.7 0l7.8-7.8z" />
         </svg>
       );
 

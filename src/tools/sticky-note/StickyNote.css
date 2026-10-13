@@ -5,7 +5,11 @@
 
 .sn-window {
   box-sizing: border-box;
-  width: 100%;
+  /* 自动模式下宽度钉死 264（= NOTE_WIDTH，与 constants.ts / 后端 NOTE_WIDTH_LOGICAL 同步）。
+     钉死的目的是让「量内容算高度」与**窗口当时的宽度**无关：双击纸角从较宽的手动尺寸回到
+     自动高度时，窗口还宽着的那一瞬量出的高度是按宽布局算的，宽度切回 264 后文字换行更多，
+     底部（footer 与纸角手柄）就会被裁在窗口外。手动模式下改回 100%（跟着用户拖出的窗口走）。 */
+  width: 264px;
   padding: 16px 16px 22px;
   font-family:
     system-ui,
@@ -31,8 +35,7 @@
   border-radius: 14px;
   background:
     radial-gradient(120% 80% at 18% 0%, rgb(255 255 255 / 0.28), transparent 42%),
-    linear-gradient(165deg, rgb(255 255 255 / 0.1), transparent 55%),
-    var(--sn-paper);
+    linear-gradient(165deg, rgb(255 255 255 / 0.1), transparent 55%), var(--sn-paper);
   box-shadow:
     0 0 0 1px rgb(40 32 12 / 0.05),
     0 1px 2px rgb(40 32 12 / 0.06),
@@ -51,17 +54,37 @@
   transform: translateY(-1px);
 }
 
-/* 右下角"纸片厚度"——很轻的阴影三角，增加纸感层次 */
-.sn-card::after {
-  content: "";
+/* 右下角纸角 = 拖拽改大小的手柄（双击恢复「高度随内容」）。
+   早先这里是一块纯装饰的「纸片厚度」三角：尺寸可以拖之后，同一个位置必须让给手柄 ——
+   一个只能看的三角和一个能拖的手柄叠在一起，用户根本分不清哪个能动。
+   手柄常显但很淡（与 .sn-grip 同一套语言），悬停变实并换成强调色。 */
+.sn-resize {
   position: absolute;
   right: 0;
   bottom: 0;
-  width: 16px;
-  height: 16px;
-  background: rgb(0 0 0 / 0.07);
-  clip-path: polygon(0 0, 100% 0, 100% 100%);
-  pointer-events: none;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  opacity: 0.34;
+  background-color: rgb(40 34 18 / 0.95);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M15 6 6 15M15 11 11 15'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M15 6 6 15M15 11 11 15'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: right 3px bottom 3px;
+  mask-position: right 3px bottom 3px;
+  -webkit-mask-size: 16px;
+  mask-size: 16px;
+  transition: opacity var(--transition-fast, 120ms ease);
+}
+
+.sn-card:hover .sn-resize {
+  opacity: 0.62;
+}
+
+.sn-resize:hover {
+  opacity: 0.95;
 }
 
 /* 删除确认态：整体轻微偏红提示 */
@@ -196,6 +219,12 @@
 /* 正文 */
 .sn-body {
   padding: 4px 12px 6px;
+  min-height: 0;
+}
+
+/* 正文的定位上下文：图片行光标条按它算坐标（它没有内边距，与编辑器严格同框） */
+.sn-editor-wrap {
+  position: relative;
 }
 
 .sn-editor {
@@ -211,6 +240,68 @@
   word-break: break-word;
   white-space: pre-wrap;
   cursor: text;
+}
+
+/* 手动尺寸模式（用户拖过右下角 / 窗口边）：卡片撑满窗口，正文吃掉剩余高度并在内部滚动。
+   自动模式下窗口高度是「量内容量出来的」，所以那里不能用 height:100%（会互相追逐）。 */
+.sn-window[data-manual="true"] {
+  height: 100%;
+  /* 手动模式跟着用户拖出的窗口宽度走（见 .sn-window 的 width 注释） */
+  width: 100%;
+}
+
+.sn-window[data-manual="true"] .sn-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.sn-window[data-manual="true"] .sn-body {
+  flex: 1;
+}
+
+.sn-window[data-manual="true"] .sn-editor-wrap,
+.sn-window[data-manual="true"] .sn-editor {
+  height: 100%;
+}
+
+.sn-window[data-manual="true"] .sn-editor {
+  /* 手动尺寸下由窗口高度决定正文高度：min-height 96px 在窗口被拖到下限（146）时会把
+     卡片内容顶出卡片，footer 与右下角手柄被 overflow:hidden 裁掉 */
+  min-height: 0;
+  max-height: none;
+}
+
+/* 光标紧邻图片时显示的「图片行光标条」：与图片等高（高度由 JS 写死），
+   让用户一眼看出「现在在图片这一行」。Chromium 的原生光标高度只跟字体走，
+   图片再大也拉不高它，所以这里自己画一根。
+   位置由 JS 摆到图片右边缘外侧 3px（见 syncImageCaret），白色描边保证在任何背景上都读得出来。 */
+.sn-image-caret {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: rgb(48 41 22 / 0.78);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.55);
+  pointer-events: none;
+  opacity: 0;
+}
+
+.sn-image-caret[data-visible="true"] {
+  opacity: 1;
+  animation: sn-image-caret-enter 120ms ease-out both;
+}
+
+@keyframes sn-image-caret-enter {
+  from {
+    transform: scaleY(0.72);
+    opacity: 0;
+  }
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
 }
 
 /* 占位提示：空内容且未聚焦时显示，聚焦后留白等待输入 */
@@ -230,16 +321,31 @@
   background: rgb(0 0 0 / 0.12);
 }
 
-/* 便利贴图片：限宽贴边，圆角融入纸面；src 未就绪（目录未返回）时先隐藏 */
+/* 便利贴图片：行内块 + 贴边圆角。
+   ⚠️ 必须是 inline-block 而不是 block：
+   1. 行盒高度会跟着图片撑起来，划选/框选经过图片时高亮能整块盖住图片（「选中的区域大一点」）；
+   2. 光标落在图片前后时不会掉到下一行行首（block 图片后紧跟换行时光标会被画到下一行）。
+   也不再加 user-select: none —— 那会让框选直接跳过图片，复制一张图必须先精确框住它。 */
 .sn-editor img[data-note-img] {
-  display: block;
+  display: inline-block;
+  vertical-align: bottom;
   box-sizing: border-box;
   max-width: 100%;
   height: auto;
   margin: 4px 0;
   border-radius: 6px;
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.16);
-  user-select: none;
+  /* 点一下 = 把光标放到图片之后（见 StickyNote.tsx 的 onEditorMouseDown），
+     整块图片都是命中区，所以给一个「这里可点」的光标 */
+  cursor: pointer;
+  transition: box-shadow var(--transition-fast, 120ms ease);
+}
+
+/* 光标就在这张图片旁边：描边点亮，配合右侧的光标条说明「现在在图片这一行」 */
+.sn-editor img[data-note-img].is-caret-line {
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.16),
+    0 0 0 2px rgb(48 41 22 / 0.42);
 }
 
 .sn-editor img[data-note-img]:not([src]) {
@@ -282,8 +388,9 @@
   opacity: 1;
 }
 
-/* 粘贴图片保存失败的内联提示（短暂展示后自动消失） */
-.sn-paste-error {
+/* 内联提示条（短暂展示后自动消失）：保存失败 / 读取失败 / 复制图床都是错误态，
+   复制成功、尺寸保存成功走 .is-ok 的绿调，避免「已复制图片」也顶着红色警告框。 */
+.sn-notice {
   margin: 6px 10px 0;
   padding: 4px 8px;
   border-radius: 8px;
@@ -293,6 +400,11 @@
   line-height: 1.4;
   text-align: center;
   overflow-wrap: anywhere;
+}
+
+.sn-notice.is-ok {
+  background: rgba(21, 128, 61, 0.12);
+  color: #15803d;
 }
 
 /* 读取失败的重试区：读取便签遇到瞬时错误（IPC/锁竞争）时不再自毁窗口，

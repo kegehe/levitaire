@@ -41,7 +41,7 @@ reqwest-0-13 = { package = "reqwest", version = "0.13", default-features = false
 tokio = { version = "1", features = ["rt", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
-image = { version = "0.25", default-features = false, features = ["png", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "bmp"] }
 sysinfo = { version = "0.32", default-features = false, features = ["system", "disk", "network"] }
 thiserror = "1"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "api-24", "std", "tracing"] }
@@ -67,9 +67,16 @@ features = [
     "Win32_System_DataExchange",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    # 系统清理工具（disk_cleanup/）要直接做文件系统级操作：GetFileAttributesExW 查重解析点、
+    # GetFullPathNameW/GetLongPathNameW 做不跟随链接的规范化、DeleteFileW/RemoveDirectoryW
+    # 做只删链接不删目标的删除。这些都在 Win32_Storage_FileSystem 下。
+    "Win32_Storage_FileSystem",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Controls",
     "Win32_UI_Controls_RichEdit",
+    # 转盘窗口要按「光标所在显示器」的 DPI 下发物理尺寸（quick_input::scale_at_point），
+    # GetDpiForMonitor 在 Win32_UI_HiDpi 下；此前只在录制指示层用 GetDeviceCaps 近似取过系统缩放。
+    "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",
     "Win32_Security_Cryptography",
     "Win32_System_Power",

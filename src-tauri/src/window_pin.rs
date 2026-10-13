@@ -154,6 +154,25 @@ fn root_window_at(app: &AppHandle, x: i32, y: i32) -> Option<HWND> {
 
 // ─── 清单与推送 ────────────────────────────────────────────────
 
+/// 淘汰清单里**已经不存在的条目**。
+///
+/// 用户把被置顶的目标窗口自己关掉时，没有任何事件会通知本模块 —— 不回收，清单就会随
+/// 「置顶 → 关窗（不取消）」的次数一直累积，面板上还会留着一排点不动的死条目。
+/// 判据与 `unpin` / `unpin_all` 完全一致：`IsWindow` **加** pid 校验 ——
+/// 句柄值会被系统复用给别的窗口，只判 `IsWindow` 会把别人的窗口当成我们的置顶对象。
+///
+/// 只在**读取口**（`list` / `emit_update`）调用，不塞进 `snapshot()`：`snapshot` 是纯映射，
+/// 单测要靠它断言清单的簿记逻辑（去重、删除），而那些用例用的是伪造句柄。
+fn prune_closed_entries() {
+    let mut list = lock_list();
+    list.retain(|item| {
+        let hwnd = HWND(item.hwnd as *mut c_void);
+        // 括号不能省：`unsafe { .. }` 出现在语句开头时会被当成语句，后面的 `&&` 会被解析成
+        // 取地址（曾因此得到 `&&u32` 与 `u32` 比较的编译错误）。
+        (unsafe { IsWindow(Some(hwnd)).as_bool() }) && window_pid(hwnd) == item.pid
+    });
+}
+
 fn snapshot() -> Vec<PinnedWindowInfo> {
     lock_list()
         .iter()
@@ -190,6 +209,9 @@ fn raise_hub(app: &AppHandle) {
 
 /// 推送最新清单 + 一句提示。面板不可用时静默丢弃（它本就没显示）。
 fn emit_update(app: &AppHandle, message: Option<String>, error: bool) {
+    // 推送前先回收：用户自己关掉被置顶窗口时没有任何事件通知本模块，
+    // 不在这里淘汰，面板会一直留着一排点不动的死条目。
+    prune_closed_entries();
     let payload = PinUpdate {
         windows: snapshot(),
         message,
@@ -326,6 +348,9 @@ pub fn cleanup() {
 
 /// 读取当前清单（前端挂载或重新获焦时同步真值）。
 pub fn list() -> Vec<PinnedWindowInfo> {
+    // 同步真值时就该回收：这是"面板刚打开/重新获焦"的时刻，
+    // 也正是用户最可能刚在别处关掉过某个被置顶窗口的时刻。
+    prune_closed_entries();
     snapshot()
 }
 

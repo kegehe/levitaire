@@ -37,17 +37,65 @@ const mockHide = vi.fn().mockResolvedValue(undefined);
  */
 const mockIsVisible = vi.fn().mockResolvedValue(true);
 const mockStartDragging = vi.fn().mockResolvedValue(undefined);
+const mockStartResizeDragging = vi.fn().mockResolvedValue(undefined);
 const mockSetAlwaysOnBottom = vi.fn().mockResolvedValue(undefined);
 const mockSetAlwaysOnTop = vi.fn().mockResolvedValue(undefined);
 
 // 可配置的窗口属性，测试用 setMockWindow 设置
 let mockWindowLabel = "toolbar";
 let mockScaleFactor = 1;
+// 原生窗口内尺寸（物理像素）：手动改大小 / 拖动窗口边后的读回值
+let mockInnerSizeValue = { width: 400, height: 50 };
+const mockInnerSize = vi.fn(() => ({ ...mockInnerSizeValue }));
 const mockFocusHandlers: Array<(p: { payload: boolean }) => void> = [];
+// onResized 的回调带 payload（新的物理尺寸），与 Tauri 的 WindowEvent::Resized 一致
+const mockResizeHandlers: Array<(event: { payload: { width: number; height: number } }) => void> =
+  [];
 
 export function setMockWindow(opts: { label?: string; scaleFactor?: number } = {}) {
   if (opts.label !== undefined) mockWindowLabel = opts.label;
   if (opts.scaleFactor !== undefined) mockScaleFactor = opts.scaleFactor;
+}
+
+/** 设置 innerSize() 的返回值（物理像素，测试里配合 scaleFactor 换算成逻辑尺寸） */
+export function setMockInnerSize(size: { width: number; height: number }) {
+  mockInnerSizeValue = size;
+}
+
+/** 触发一次原生 resize（模拟用户拖窗口边缘 / 拖手柄），payload 是新的物理尺寸 */
+export function emitMockResize(size: { width: number; height: number }) {
+  mockResizeHandlers.forEach((handler) => handler({ payload: size }));
+}
+
+// onScaleChanged 的回调带新的缩放系数，与 Tauri 的 WindowEvent::ScaleFactorChanged 一致。
+// 窗口被拖到另一台缩放不同的显示器时，系统会先发这个、随后再发一次 Resized。
+const mockScaleChangeHandlers: Array<
+  (event: { payload: { scaleFactor: number; size: { width: number; height: number } } }) => void
+> = [];
+
+/** 触发一次缩放变化（模拟窗口被拖到另一台缩放不同的显示器） */
+export function emitMockScaleChanged(scaleFactor: number) {
+  const size = { ...mockInnerSizeValue };
+  mockScaleFactor = scaleFactor;
+  mockScaleChangeHandlers.forEach((handler) => handler({ payload: { scaleFactor, size } }));
+}
+
+// 拖放事件（便签窗把图片文件拖进来用）
+const mockDragDropHandlers: Array<(event: { payload: unknown }) => void> = [];
+
+export function emitMockDragDrop(payload: unknown) {
+  mockDragDropHandlers.forEach((handler) => handler({ payload }));
+}
+
+/**
+ * 清掉窗口事件回调（resize / 拖放）。
+ * 组件卸载后 testing-library 不会自动摘掉这些 mock 回调，多个用例串起来时
+ * emit 会打到已卸载组件的闭包上，断言次数就会莫名其妙地多出来。
+ */
+export function clearMockWindowEventHandlers() {
+  mockResizeHandlers.length = 0;
+  mockScaleChangeHandlers.length = 0;
+  mockDragDropHandlers.length = 0;
 }
 
 // 触发 focus 变化（测试失焦保护用）
@@ -78,11 +126,20 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     }),
     scaleFactor: vi.fn(() => Promise.resolve(mockScaleFactor)),
     outerPosition: vi.fn(() => Promise.resolve({ x: 0, y: 0 })),
-    innerSize: vi.fn(() => ({ width: 400, height: 50 })),
+    innerSize: mockInnerSize,
     hide: mockHide,
     show: vi.fn().mockResolvedValue(undefined),
     setSize: mockSetSize,
+    setMinSize: vi.fn().mockResolvedValue(undefined),
     startDragging: mockStartDragging,
+    startResizeDragging: mockStartResizeDragging,
+    onDragDropEvent: vi.fn((handler: (event: { payload: unknown }) => void) => {
+      mockDragDropHandlers.push(handler);
+      return Promise.resolve(() => {
+        const index = mockDragDropHandlers.indexOf(handler);
+        if (index >= 0) mockDragDropHandlers.splice(index, 1);
+      });
+    }),
     setFocusable: vi.fn().mockResolvedValue(undefined),
     setAlwaysOnBottom: mockSetAlwaysOnBottom,
     setAlwaysOnTop: mockSetAlwaysOnTop,
@@ -95,8 +152,27 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     isFocused: vi.fn().mockResolvedValue(false),
     isVisible: mockIsVisible,
     close: vi.fn().mockResolvedValue(undefined),
-    onResized: vi.fn(() => Promise.resolve(() => {})),
+    onResized: vi.fn((handler: (event: { payload: { width: number; height: number } }) => void) => {
+      mockResizeHandlers.push(handler);
+      return Promise.resolve(() => {
+        const index = mockResizeHandlers.indexOf(handler);
+        if (index >= 0) mockResizeHandlers.splice(index, 1);
+      });
+    }),
     onMoved: vi.fn(() => Promise.resolve(() => {})),
+    onScaleChanged: vi.fn(
+      (
+        handler: (event: {
+          payload: { scaleFactor: number; size: { width: number; height: number } };
+        }) => void,
+      ) => {
+        mockScaleChangeHandlers.push(handler);
+        return Promise.resolve(() => {
+          const index = mockScaleChangeHandlers.indexOf(handler);
+          if (index >= 0) mockScaleChangeHandlers.splice(index, 1);
+        });
+      },
+    ),
   })),
 }));
 
@@ -169,4 +245,12 @@ export function clearMockListeners() {
   listeners.clear();
 }
 
-export { mockSetSize, mockHide, mockIsVisible, mockStartDragging, menuState };
+export {
+  mockSetSize,
+  mockHide,
+  mockIsVisible,
+  mockStartDragging,
+  mockStartResizeDragging,
+  mockInnerSize,
+  menuState,
+};

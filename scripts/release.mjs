@@ -102,12 +102,12 @@ if (bumpOnly) {
 
 /* ── 2. 打包（复用现有 build：frontend + resources + tauri build --bundles nsis）── */
 if (!noBuild) {
-  // 预检：ffmpeg.exe / onnxruntime.dll 体积大、未纳入 Git（见 .gitignore），
+  // 预检：ffmpeg.exe / onnxruntime.dll 未纳入 Git（见 .gitignore），
   // 但发版必须打进安装包。缺失时在这里给出明确指引，而不是等 tauri build 报晦涩错误。
   const requiredBinaries = [
     {
       path: join(repoRoot, "src-tauri/binaries/ffmpeg.exe"),
-      hint: "MP4 录制依赖。放到 src-tauri/binaries/ffmpeg.exe",
+      hint: "MP4 录制依赖。放到 src-tauri/binaries/ffmpeg.exe（精简构建约 4 MB，见 README「可选二进制资源」）",
     },
     {
       path: join(repoRoot, "src-tauri/libs/onnxruntime.dll"),

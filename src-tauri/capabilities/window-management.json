@@ -9,7 +9,8 @@
     "long-capture-frame",
     "context-menu",
     "pin-ocr",
-    "sketch-overlay"
+    "sketch-overlay",
+    "system-cleaner-overlay"
   ],
   "permissions": [
     "core:window:allow-close",

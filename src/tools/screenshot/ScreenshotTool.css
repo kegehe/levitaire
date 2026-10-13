@@ -27,6 +27,26 @@
   box-shadow: 0 0 0 1px oklch(1 0 0 / 0.4);
   pointer-events: none;
   z-index: 6;
+}
+
+/* 呼吸光晕。
+   刻意**不**对 .ss-selection-box 本身做 box-shadow 动画：box-shadow 属 paint 阶段、
+   无法在合成器线程运行，1.8s infinite 会让主线程在截图界面开启的整个期间持续重绘，
+   拖框时还和 pointermove 抢同一个主线程（真机实测：主线程占用 2.98% → 0.34%）。
+   这里改为对伪元素做 opacity 动画——opacity 可合成，动画跑在 GPU 上。
+   inset: -1px 让伪元素与 border box 重合，光晕外扩距离与原实现一致。
+   ⚠️ 与旧实现**不是像素级相同**：旧版在 50% 关键帧整体替换 box-shadow（峰值时那条
+   1px 基础描边消失），这里基础描边常驻、光晕叠加其上，故峰值白圈会略亮一点点。
+   要完全复刻需再加一个伪元素做反向 opacity 动画，为这点差异不值得。 */
+.ss-selection-box::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  box-shadow:
+    0 0 0 2px oklch(1 0 0 / 0.28),
+    0 0 8px var(--color-accent-subtle);
+  opacity: 0;
+  pointer-events: none;
   animation: ss-selection-glow 1.8s ease-in-out infinite;
 }
 
@@ -409,32 +429,29 @@
   box-shadow: inset 0 0 0 1px var(--color-accent-hover);
 }
 
-/* 颜色选择 */
-.ss-color {
+/* 工具按钮 + 其「二级设置面板」（每工具独立的颜色/粗细）。
+   wrapper 提供定位上下文，使面板贴着对应工具按钮弹出，而不是和工具同级平铺。 */
+.ss-tool-group {
   position: relative;
   display: inline-flex;
 }
 
-.ss-color-btn {
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--color-border);
-  cursor: pointer;
-  padding: 0;
-}
-
-.ss-color-pop {
-  display: none;
+/* 二级设置面板：选中某个绘图工具后就近弹出，只显示该工具自己的颜色与粗细。
+   纵向刻意「远离选区」弹出：工具条在选区下方时向下弹、翻到选区上方时向上弹（见
+   .ss-toolbar-above），这样浮层不会盖住选区里正在标注的内容。
+   横向与工具按钮左对齐（而不是居中）：工具条贴在 selection.left 上，选区贴近屏幕左缘时
+   居中的宽面板会越过视口左边被 .ss-overlay 的 overflow:hidden 裁掉。 */
+.ss-tool-subpanel {
   position: absolute;
-  bottom: 100%;
+  top: calc(100% + 6px);
   left: 0;
-  /* 顶部 padding 形成视觉间距；面板上边缘紧贴按钮，
-     鼠标从按钮移入面板时无空隙跨越，hover 不会中断 */
-  padding: 6px;
-  gap: 4px;
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  width: 116px;
+  gap: 4px;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 6px;
   background: var(--toolbar-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -442,9 +459,23 @@
   z-index: 12;
 }
 
-.ss-color:hover .ss-color-pop,
-.ss-color:focus-within .ss-color-pop {
+.ss-toolbar-wrap.ss-toolbar-above .ss-tool-subpanel {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+/* 面板里的分隔线：贴内容垂直居中，而不是像工具栏分隔线那样撑满（stretch） */
+.ss-tool-subpanel > .ss-sep {
+  align-self: center;
+  height: 16px;
+  margin: 0 2px;
+}
+
+.ss-color-swatches {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
 }
 
 .ss-color-swatch {
@@ -502,39 +533,47 @@
   outline-offset: 1px;
 }
 
-/* 粗细 */
-.ss-width {
+/* 线宽：圆点（直径随线宽变化）+ 数值；悬停其上滚轮/方向键调节（与草稿工具的宽度控件同款） */
+.ss-width-dot {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-}
-
-.ss-width-btn {
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
   border-radius: var(--radius-sm);
-  cursor: pointer;
-  padding: 0;
+  cursor: ns-resize;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.ss-width-btn:hover:not(:disabled) {
+.ss-width-dot:hover,
+.ss-width-dot:focus-visible {
   background: var(--button-hover-bg);
 }
 
-.ss-width-btn-active {
-  background: var(--color-accent-subtle);
-  box-shadow: inset 0 0 0 1px var(--color-accent);
+.ss-width-dot:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
 }
 
-.ss-width-line {
-  width: 16px;
+.ss-width-dot[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ss-width-dot-marker {
+  display: block;
+  flex: 0 0 auto;
+  /* 直径由内联 style 按线宽给出 */
+  border-radius: var(--radius-full);
   background: var(--color-fg);
-  border-radius: 2px;
+}
+
+.ss-width-dot-value {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--color-fg-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 /* 文字输入浮层 */
@@ -679,12 +718,10 @@
 @keyframes ss-selection-glow {
   0%,
   100% {
-    box-shadow: 0 0 0 1px oklch(1 0 0 / 0.4);
+    opacity: 0;
   }
   50% {
-    box-shadow:
-      0 0 0 2px oklch(1 0 0 / 0.28),
-      0 0 8px var(--color-accent-subtle);
+    opacity: 1;
   }
 }
 
@@ -693,7 +730,7 @@
   .ss-ocr-result,
   .ss-capture-error,
   .ss-busy::after,
-  .ss-selection-box {
+  .ss-selection-box::after {
     animation: none;
   }
 }

@@ -86,19 +86,55 @@ export const PRESET_COLORS = [
 
 export const COLOR_AUTO = "auto";
 
-// 粗细三档（物理像素），0/1/2 对应细/中/粗
-export const STROKE_WIDTHS = [3, 5, 8];
-
 // 默认落在移动工具上：截图完成后的第一诉求通常是微调选区，而不是立刻画图形。
 export const DEFAULT_TOOL: ActiveTool = "move";
 export const DEFAULT_COLOR = "#E53935";
-export const DEFAULT_WIDTH_INDEX = 1;
 
-export function strokeWidthFor(index: number): number {
-  return STROKE_WIDTHS[index] ?? STROKE_WIDTHS[1];
+// 线宽（物理像素）：连续可调（滚轮/方向键每次 ±1），夹在 [MIN, MAX]。
+export const MIN_STROKE_WIDTH = 1;
+export const MAX_STROKE_WIDTH = 32;
+export const DEFAULT_STROKE_WIDTH = 5;
+
+/** 线宽只取整数并夹在允许范围内 */
+export function clampStrokeWidth(width: number): number {
+  if (!Number.isFinite(width)) return DEFAULT_STROKE_WIDTH;
+  return Math.min(MAX_STROKE_WIDTH, Math.max(MIN_STROKE_WIDTH, Math.round(width)));
 }
 
-// 文字字号随粗细档位放大，保证可读
-export function fontSizeFor(index: number): number {
-  return (STROKE_WIDTHS[index] ?? STROKE_WIDTHS[1]) * 6;
+/**
+ * 每种绘图工具（rect/arrow/brush/text/number/mosaic）各自独立的颜色与线宽。
+ * 各工具互不影响：切换工具时，画布与工具栏都取该工具自己的设置。
+ * 移动工具不产生标注，不进这张表。
+ */
+export interface ToolStyle {
+  color: string;
+  strokeWidth: number;
+}
+
+export type ToolStyles = Record<ToolKind, ToolStyle>;
+
+export const DEFAULT_TOOL_STYLES: ToolStyles = {
+  rect: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
+  arrow: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
+  brush: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
+  text: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
+  number: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
+  mosaic: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
+};
+
+/**
+ * 文字字号随线宽放大，保证可读；下限 12 避免线宽很小时文字小到看不清。
+ * 原三档 3/5/8 上分别得 18/30/48，与旧的 fontSizeFor 完全一致。
+ */
+export function fontSizeFor(strokeWidth: number): number {
+  return Math.max(12, Math.round(strokeWidth * 6));
+}
+
+// 序号的大小随线宽放大。原先内联在 AnnotationCanvas 里，收拢到这里与文字口径一致。
+export function numberRadiusFor(strokeWidth: number): number {
+  return Math.max(strokeWidth * 2.5, 12);
+}
+
+export function numberFontSizeFor(strokeWidth: number): number {
+  return Math.max(strokeWidth * 3, 14);
 }

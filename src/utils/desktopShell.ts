@@ -70,9 +70,29 @@ export function isBlockedBrowserShortcut(event: {
   return BLOCKED_CTRL_KEYS.has(key);
 }
 
+/**
+ * 右键接管的注册口。
+ *
+ * 有些窗口对右键有**比文本菜单更合适**的语义，例如便利贴里右键一张图片应该是
+ * 「复制图片 / 删除图片」而不是「剪切 / 复制 / 粘贴 / 全选」（后者在没选中东西时
+ * 复制是灰的，用户得先框选图片才能复制）。这类窗口在挂载时注册一个拦截器：
+ * 返回 true 表示「这次右键我已经处理了」，返回 false 则继续走通用文本菜单。
+ *
+ * 只有一份：每个窗口一张页面，注册者（便利贴）在卸载时清掉，避免拿着已卸载组件的闭包。
+ */
+export type ContextMenuInterceptor = (event: MouseEvent) => boolean;
+
+let contextMenuInterceptor: ContextMenuInterceptor | null = null;
+
+/** 注册 / 注销右键拦截器（传 null 注销）。 */
+export function setContextMenuInterceptor(interceptor: ContextMenuInterceptor | null): void {
+  contextMenuInterceptor = interceptor;
+}
+
 function handleContextMenu(event: MouseEvent): void {
   // 无论是否需要菜单，先无条件阻止 WebView2 默认菜单
   event.preventDefault();
+  if (contextMenuInterceptor?.(event)) return;
   const editable = findEditableHost(event.target);
   if (editable) {
     showTextContextMenu({ ...menuPoint(event, editable), target: editable });
@@ -153,6 +173,8 @@ export function installDesktopShell(): () => void {
     window.removeEventListener("drop", handleExternalDrag, true);
     window.removeEventListener("blur", hideTextContextMenu);
     hideTextContextMenu();
+    // 拦截器由各窗口自己维护：守卫卸载时一并断掉，避免卸载后还指向旧闭包
+    contextMenuInterceptor = null;
     dispose = undefined;
   };
 

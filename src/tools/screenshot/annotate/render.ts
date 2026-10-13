@@ -1,5 +1,6 @@
 import type { Annotation, NumberAnnotation, TextAnnotation } from "./types";
 import { COLOR_AUTO, DEFAULT_COLOR } from "./types";
+import { annotationBounds, handlePoints } from "./edit";
 
 // 马赛克降采样用临时 1×1 canvas，模块级复用避免每块新建
 let mosaicTmpCanvas: HTMLCanvasElement | null = null;
@@ -254,17 +255,65 @@ export function drawAnnotation(
   }
 }
 
-// 整体重绘：清空→底图→已生效标注→draft
+// 编辑手柄颜色接近品牌蓝；canvas 里读不到 CSS 变量，故与 cursorSkin 一样写死常量。
+const HANDLE_COLOR = "#1E88E5";
+
+/**
+ * 选中标注的编辑手柄：框类画 8 个方块（四边四角），箭头画两个端点圆点，
+ * 移动类（画笔/文字/序号）画虚线包围盒。尺寸随 scale 放大，1× 与高 DPI 下手感一致。
+ */
+export function drawEditHandles(ctx: CanvasRenderingContext2D, a: Annotation, scale: number) {
+  const points = handlePoints(a);
+  const line = Math.max(1, 1.5 * scale);
+  ctx.save();
+  ctx.strokeStyle = HANDLE_COLOR;
+  ctx.lineWidth = line;
+
+  if (points.length === 0) {
+    const b = annotationBounds(a);
+    ctx.setLineDash([6 * scale, 4 * scale]);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.restore();
+    return;
+  }
+
+  const size = 8 * scale;
+  const half = size / 2;
+  ctx.setLineDash([]);
+  for (const p of points) {
+    ctx.beginPath();
+    // 箭头端点是「点」，画圆点；框类的边/角是「拉伸点」，画方块。
+    if (p.zone === "end1" || p.zone === "end2") {
+      ctx.arc(p.x, p.y, half, 0, Math.PI * 2);
+    } else {
+      ctx.rect(p.x - half, p.y - half, size, size);
+    }
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// 整体重绘：清空→底图→已生效标注→draft→选中手柄。
+// draft 与某条已生效标注同 id 时（编辑预览），跳过已生效那条、用 draft 顶替，避免重影；
+// 新增绘制时 draft.id 是新的，该跳过完全惰性。
 export function renderAll(
   ctx: CanvasRenderingContext2D,
   baseImg: HTMLImageElement | null,
   committed: Annotation[],
   draft: Annotation | null,
+  selected: Annotation | null = null,
+  scale = 1,
 ) {
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   if (baseImg) {
     ctx.drawImage(baseImg, 0, 0);
   }
-  for (const a of committed) drawAnnotation(ctx, a, baseImg);
+  for (const a of committed) {
+    if (draft && a.id === draft.id) continue;
+    drawAnnotation(ctx, a, baseImg);
+  }
   if (draft) drawAnnotation(ctx, draft, baseImg);
+  if (selected) drawEditHandles(ctx, selected, scale);
 }

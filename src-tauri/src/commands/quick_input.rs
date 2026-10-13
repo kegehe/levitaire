@@ -161,14 +161,31 @@ pub fn set_quick_input_highlight(index: i32) -> Result<(), String> {
 
 /// 提交「按住唤起」模式在松开触发键瞬间结算出的扇区。
 /// generation 用于拒绝滞后事件，避免旧会话的确认影响下一次唤起。
+/// 返回 `true` 表示落在父级扇区、转盘保持并已请求前端换级展开；
+/// `false` 表示会话已结束（叶子选中 / 取消 / 过期请求）。
 #[tauri::command]
 pub fn confirm_quick_input_hold(
     generation: u64,
     selected_index: Option<usize>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
-    crate::quick_input::confirm_hold_wheel(&app, generation, selected_index);
+) -> Result<bool, String> {
+    Ok(crate::quick_input::confirm_hold_wheel(
+        &app, generation, selected_index,
+    ))
+}
+
+/// 同步当前层级中「父级扇区」的索引集合（转盘前端每次换级渲染后调用）。
+#[tauri::command]
+pub fn set_quick_input_wheel_parents(indices: Vec<usize>) -> Result<(), String> {
+    crate::quick_input::set_wheel_parents(indices);
     Ok(())
+}
+
+/// 子级转盘返回上一级：保持会话，复位高亮与刻度哨兵。
+/// 返回 `false` 表示会话已结束或代次不匹配，前端不应换级。
+#[tauri::command]
+pub fn back_quick_input_wheel(generation: u64) -> Result<bool, String> {
+    Ok(crate::quick_input::back_wheel(generation))
 }
 
 
@@ -199,6 +216,89 @@ pub fn set_quick_input_snippets_enabled(
     config: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     config.update_quick_input_snippets_enabled(enabled)
+}
+
+
+/// 获取快速输入转盘的音效反馈开关。
+#[tauri::command]
+pub fn get_quick_input_sound_enabled(config: State<'_, ConfigManager>) -> Result<bool, String> {
+    config.get_quick_input_sound_enabled()
+}
+
+
+#[tauri::command]
+pub fn set_quick_input_sound_enabled(
+    enabled: bool,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config.update_quick_input_sound_enabled(enabled)?;
+    sync_quick_input_sound(&config);
+    Ok(())
+}
+
+
+/// 获取音效风格："minimal"（只保留唤出与确认）| "standard"（含切扇区刻度音）| "none"（静音）
+#[tauri::command]
+pub fn get_quick_input_sound_style(config: State<'_, ConfigManager>) -> Result<String, String> {
+    config.get_quick_input_sound_style()
+}
+
+
+#[tauri::command]
+pub fn set_quick_input_sound_style(
+    style: String,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    // 直接落库归一化后的值：非法串一旦被持久化，下次启动读出来的风格就是脏的。
+    config.update_quick_input_sound_style(style)?;
+    sync_quick_input_sound(&config);
+    Ok(())
+}
+
+
+/// 获取音效音量（0-100 百分比）
+#[tauri::command]
+pub fn get_quick_input_sound_volume(config: State<'_, ConfigManager>) -> Result<u32, String> {
+    config.get_quick_input_sound_volume()
+}
+
+
+#[tauri::command]
+pub fn set_quick_input_sound_volume(
+    volume: u32,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    config.update_quick_input_sound_volume(volume)?;
+    sync_quick_input_sound(&config);
+    Ok(())
+}
+
+
+/// 试听音效：按当前音量配置播放指定音效（cue: open/tick/confirm/cancel）。
+///
+/// 命令层**故意不检查**「音效开关」—— 试听按钮本身在设置页里已由该开关置灰，
+/// 而这里保持无门是为了让「先听再决定开不开」成为可能（前端若想放开限制无需改后端）。
+/// 音量仍读配置，保证试听到的就是实际效果。
+#[tauri::command]
+pub fn preview_quick_input_sound(
+    cue: String,
+    config: State<'_, ConfigManager>,
+) -> Result<(), String> {
+    let cue = match cue.trim().to_lowercase().as_str() {
+        "open" => crate::sound::Cue::Open,
+        "tick" => crate::sound::Cue::Tick,
+        "confirm" => crate::sound::Cue::Confirm,
+        "cancel" => crate::sound::Cue::Cancel,
+        other => return Err(format!("无法识别的音效: {}", other)),
+    };
+    let volume = config.get_quick_input_sound_volume()?;
+    if volume == 0 {
+        // 音量为 0 时不播放：调用方（设置页滑杆松手）按了没反应会以为试听坏了，
+        // 这里直接返回让上层无感，好过播一段听不见的声音。
+        return Ok(());
+    }
+    crate::sound::play_cue_preview(cue, volume as f64 / 100.0);
+    Ok(())
 }
 
 

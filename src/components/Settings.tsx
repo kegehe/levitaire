@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import type { DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
@@ -53,6 +53,12 @@ import {
   fetchClearOptions,
   saveClearOptions,
 } from "../constants/clearConfig";
+import {
+  WATCHDOG_INTERVAL_OPTIONS,
+  WATCHDOG_MIN_AGE_OPTIONS,
+  WATCHDOG_MIN_BYTES_OPTIONS,
+  WATCHDOG_MIN_DELTA_OPTIONS,
+} from "../constants/diskCleanupConfig";
 import {
   DEFAULT_TTS_CONFIG,
   fetchTtsConfig,
@@ -151,11 +157,27 @@ const TOOL_SETTINGS_TABS = [
   { id: "timer", label: "时间工具", icon: "Clock" as IconName },
   { id: "todo", label: "待办清单", icon: "ListFilter" as IconName },
   { id: "toolbar", label: "文字工具栏", icon: "Grid3x3" as IconName },
+  { id: "system-cleaner", label: "系统清理", icon: "Trash2" as IconName },
 ] as const;
 
 const SETTINGS_TABS = [...SYSTEM_SETTINGS_TABS, ...TOOL_SETTINGS_TABS] as const;
 
 type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
+
+/** 看门狗状态（与 Rust 侧 `disk_cleanup::watchdog::WatchStatus` 对应）。 */
+type WatchStatus = {
+  enabled: boolean;
+  intervalHours: number;
+  minBytes: number;
+  minDeltaBytes: number;
+  minAgeDays: number;
+  targets: string[];
+  lastRunAt: string | null;
+  lastError: string | null;
+  current: string | null;
+  dirsVisited: number;
+  alerts: Array<{ path: string; bytes: number; deltaBytes: number; deltaDays: number }>;
+};
 
 type HotkeyConflictResult = {
   id: string;
@@ -164,13 +186,26 @@ type HotkeyConflictResult = {
   message: string;
 };
 
-/** 支持一键恢复默认位置的悬浮窗（与后端 window_positions 的窗口 id 对应） */
+/**
+ * 支持一键恢复默认位置的悬浮窗。
+ *
+ * 判据是「谁调用了 `persistWindowPositionOnMove`」—— 记了位置就必须有入口，否则用户
+ * 把窗口拖丢之后没有任何一键复位的地方（便利贴管理窗曾如此）；反过来列了却不被后端复位，
+ * 按钮会亮「已恢复」而窗口纹丝不动（系统清理曾如此）。后端 `RESETTABLE_WINDOW_IDS` 与之
+ * 逐项对应，守卫 `resettable_windows_match_frontend_targets` 与
+ * `src/test/windowPositionTargetsGuard.test.ts` 会拦住任何单边改动。
+ */
 const WINDOW_POSITION_TARGETS = [
   { id: "orb", label: "悬浮球", icon: "GripVertical" as IconName },
   { id: "monitor-overlay", label: "系统监控", icon: "Activity" as IconName },
   { id: "time-overlay", label: "时间工具", icon: "Clock" as IconName },
   { id: "todo-overlay", label: "待办清单", icon: "ListFilter" as IconName },
+  { id: "system-cleaner-overlay", label: "系统清理", icon: "Trash2" as IconName },
+  { id: "sticky-notes-manager", label: "便利贴", icon: "StickyNote" as IconName },
 ] as const;
+
+/** 说明文案的窗口清单从 WINDOW_POSITION_TARGETS 派生，避免工具合并/增删（如番茄钟并入时间工具）后文案再次过期 */
+const WINDOW_POSITION_HINT = `${WINDOW_POSITION_TARGETS.map((target) => target.label).join("、")}会记住上次拖拽的位置；窗口被拖到角落或屏幕布局变化后可在此一键恢复默认位置。`;
 
 function Settings() {
   const windowLabel = getCurrentWebviewWindow().label;
@@ -420,6 +455,11 @@ function Settings() {
   interface QuickInputSnippet {
     label: string;
     text: string;
+    /**
+     * 子项（可选）。非空数组 = 转盘中的「父级扇区」：点击进入子转盘（整盘置换），
+     * 自身 text 在子转盘语义下不参与输入。历史项无子项。
+     */
+    children?: Array<{ label: string; text: string }>;
   }
   interface QuickInputHistoryItem {
     preview: string;
@@ -460,6 +500,24 @@ function Settings() {
   >("idle");
   const qiSnippetsEnabledRef = useRef(true);
   const qiSnippetsEnabledSaveVersionRef = useRef(0);
+  // 音效反馈（默认关闭：转盘会被高频唤起，声音应由用户主动打开）
+  const [qiSoundEnabled, setQiSoundEnabled] = useState(false);
+  const [qiSoundEnabledStatus, setQiSoundEnabledStatus] = useState<"idle" | "saved" | "error">(
+    "idle",
+  );
+  const qiSoundEnabledRef = useRef(false);
+  const qiSoundEnabledSaveVersionRef = useRef(0);
+  const [qiSoundStyle, setQiSoundStyle] = useState("standard");
+  const qiSoundStyleRef = useRef("standard");
+  const qiSoundStyleSaveVersionRef = useRef(0);
+  const [qiSoundStyleStatus, setQiSoundStyleStatus] = useState<"idle" | "saved" | "error">("idle");
+  const [qiSoundVolume, setQiSoundVolume] = useState(45);
+  const [qiSoundVolumeStatus, setQiSoundVolumeStatus] = useState<"idle" | "saved" | "error">(
+    "idle",
+  );
+  const qiSoundVolumeRef = useRef(45);
+  const qiSoundVolumeSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const qiSoundVolumeSaveVersionRef = useRef(0);
   const [qiHistoryLimit, setQiHistoryLimit] = useState(5);
   const [qiHistoryLimitStatus, setQiHistoryLimitStatus] = useState<"idle" | "saved" | "error">(
     "idle",
@@ -481,6 +539,10 @@ function Settings() {
   const [qiEditingIndex, setQiEditingIndex] = useState<number | null>(null);
   const [qiEditLabel, setQiEditLabel] = useState("");
   const [qiEditText, setQiEditText] = useState("");
+  // 子项编辑器展开在哪个片段上（null = 收起）；子项为一级扁平列表，不支持再嵌套
+  const [qiChildEditorIndex, setQiChildEditorIndex] = useState<number | null>(null);
+  const [qiNewChildLabel, setQiNewChildLabel] = useState("");
+  const [qiNewChildText, setQiNewChildText] = useState("");
 
   const checkHotkeyConflicts = useCallback(async () => {
     const requestId = ++hotkeyCheckRequestRef.current;
@@ -534,6 +596,20 @@ function Settings() {
   const [autostartError, setAutostartError] = useState(false);
   // 系统监控工具是否启用（自启动仅对已启用工具生效，未加载到后端状态前按启用处理）
   const [systemMonitorEnabled, setSystemMonitorEnabled] = useState(true);
+  const [systemCleanerEnabled, setSystemCleanerEnabled] = useState(false);
+  const [watchStatus, setWatchStatus] = useState<WatchStatus | null>(null);
+  const [watchError, setWatchError] = useState<string | null>(null);
+  /**
+   * 一次性动作的**成功**回执（与 `watchError` 分开）。
+   *
+   * 原来「立即检查」成功时把话写进 `watchError`，而那个字段只在 `watchStatus`
+   * 为空时才会渲染 —— 也就是说设置正常加载的情况下，用户点了按钮**什么反馈都没有**。
+   * 成功与失败必须走两个字段、渲染在两处。
+   */
+  const [watchNotice, setWatchNotice] = useState<string | null>(null);
+  const [watchBusy, setWatchBusy] = useState(false);
+  const [settingsAuditConfirm, setSettingsAuditConfirm] = useState(false);
+  const [settingsAuditMessage, setSettingsAuditMessage] = useState<string | null>(null);
   const [timerEnabled, setTimerEnabled] = useState(false);
   const [timerRemindersEnabled, setTimerRemindersEnabled] = useState(true);
   const [timerReminderSound, setTimerReminderSound] = useState("tone");
@@ -767,6 +843,106 @@ function Settings() {
         setEnabledClearIdsState(previous);
         emit("levitaire-clear-options-changed", previous);
       });
+  };
+
+  /** 保存看门狗设置。入参里没有监视目录 —— 那条通路只能走目录对话框（I1）。 */
+  const saveWatchSettings = async (patch: {
+    enabled?: boolean;
+    intervalHours?: number;
+    minBytes?: number;
+    minDeltaBytes?: number;
+    minAgeDays?: number;
+  }) => {
+    if (!watchStatus) return;
+    setWatchBusy(true);
+    setWatchError(null);
+    // 成功回执也要清：否则改完设置之后，上一句"已开始检查"会一直挂在页面上
+    setWatchNotice(null);
+    try {
+      const status = await invoke<WatchStatus>("disk_cleanup_watch_update", {
+        input: {
+          enabled: patch.enabled ?? watchStatus.enabled,
+          intervalHours: patch.intervalHours ?? watchStatus.intervalHours,
+          minBytes: patch.minBytes ?? watchStatus.minBytes,
+          minDeltaBytes: patch.minDeltaBytes ?? watchStatus.minDeltaBytes,
+          minAgeDays: patch.minAgeDays ?? watchStatus.minAgeDays,
+        },
+      });
+      setWatchStatus(status);
+    } catch (error) {
+      setWatchError(String(error));
+    } finally {
+      setWatchBusy(false);
+    }
+  };
+
+  /** 添加监视目录：路径来自系统对话框，不经过 WebView。 */
+  const addWatchTarget = async () => {
+    setWatchBusy(true);
+    setWatchError(null);
+    // 成功回执也要清：否则改完设置之后，上一句"已开始检查"会一直挂在页面上
+    setWatchNotice(null);
+    try {
+      const status = await invoke<WatchStatus | null>("disk_cleanup_watch_add_directory");
+      if (status) setWatchStatus(status);
+    } catch (error) {
+      setWatchError(String(error));
+    } finally {
+      setWatchBusy(false);
+    }
+  };
+
+  /** 立即检查：后台跑，结果由 `disk-cleanup-watchdog` 事件推回来。 */
+  const runWatchNow = async () => {
+    setWatchError(null);
+    setWatchNotice(null);
+    try {
+      // ★ 后端如实返回"有没有真的开始"。抢不到 I9 闸门时它什么都不做、
+      //   也不写任何状态 —— 无条件提示"已开始检查"会让用户永远等不到结果，
+      //   也看不到任何错误。
+      const started = await invoke<boolean>("disk_cleanup_watch_run_now");
+      if (started) {
+        setWatchNotice("已开始检查，扫描期间结果会在清理面板里出现");
+      } else {
+        setWatchError("正在扫描或清理，看门狗这一轮没法开始 —— 等它结束后再点一次。");
+      }
+    } catch (error) {
+      setWatchError(String(error));
+    }
+  };
+
+  /** 不再监视某个目录。只传下标 —— 路径不经过前端（I1）。 */
+  const removeWatchTarget = async (index: number) => {
+    setWatchBusy(true);
+    setWatchError(null);
+    // 成功回执也要清：否则改完设置之后，上一句"已开始检查"会一直挂在页面上
+    setWatchNotice(null);
+    try {
+      const status = await invoke<WatchStatus>("disk_cleanup_watch_remove_directory", { index });
+      setWatchStatus(status);
+    } catch (error) {
+      setWatchError(String(error));
+    } finally {
+      setWatchBusy(false);
+    }
+  };
+
+  /**
+   * 清空审计日志（§12.3）。
+   *
+   * 两步：先点「我要清空…」再点「确认清空？」。文档写的是"一键清空"，
+   * 但它销毁的是**出事之后唯一的取证依据**，值得多一次点击。动作本身在设置页可见 ✓。
+   */
+  const clearAuditLogs = async () => {
+    setSettingsAuditMessage(null);
+    try {
+      const removed = await invoke<number>("disk_cleanup_audit_clear");
+      setSettingsAuditMessage(`已清空 ${removed} 份审计日志`);
+    } catch (error) {
+      setSettingsAuditMessage(String(error));
+    } finally {
+      setSettingsAuditConfirm(false);
+    }
   };
 
   const handleToggleToolAutostart = (id: string) => {
@@ -1076,33 +1252,76 @@ function Settings() {
           invoke<boolean>("get_quick_input_history_enabled"),
           invoke<boolean>("get_quick_input_snippets_enabled"),
           invoke<number>("get_quick_input_history_limit"),
-        ]).then(([key, mode, snippets, historyEnabled, snippetsEnabled, historyLimit]) => {
-          if (key.status === "fulfilled") setQiTriggerKey(key.value || "CapsLock");
-          if (mode.status === "fulfilled") setQiMode(mode.value === "hold" ? "hold" : "click");
-          if (snippets.status === "fulfilled" && snippets.value) {
-            try {
-              setQiSnippets(JSON.parse(snippets.value) as QuickInputSnippet[]);
-            } catch {
-              /* 忽略解析错误 */
+          invoke<boolean>("get_quick_input_sound_enabled"),
+          invoke<string>("get_quick_input_sound_style"),
+          invoke<number>("get_quick_input_sound_volume"),
+        ]).then(
+          ([
+            key,
+            mode,
+            snippets,
+            historyEnabled,
+            snippetsEnabled,
+            historyLimit,
+            soundEnabled,
+            soundStyle,
+            soundVolume,
+          ]) => {
+            if (key.status === "fulfilled") setQiTriggerKey(key.value || "CapsLock");
+            if (mode.status === "fulfilled") setQiMode(mode.value === "hold" ? "hold" : "click");
+            if (snippets.status === "fulfilled" && snippets.value) {
+              try {
+                setQiSnippets(JSON.parse(snippets.value) as QuickInputSnippet[]);
+              } catch {
+                /* 忽略解析错误 */
+              }
             }
-          }
-          if (historyEnabled.status === "fulfilled") {
-            qiHistoryEnabledRef.current = historyEnabled.value;
-            setQiHistoryEnabled(historyEnabled.value);
-          }
-          if (snippetsEnabled.status === "fulfilled") {
-            qiSnippetsEnabledRef.current = snippetsEnabled.value;
-            setQiSnippetsEnabled(snippetsEnabled.value);
-          }
-          if (historyLimit.status === "fulfilled") {
-            // 用户已开始修改时，忽略较晚返回的初始读取结果，避免覆盖用户输入。
-            if (qiHistoryLimitSaveVersionRef.current === 0) {
-              const normalized = Math.max(0, Math.min(20, Math.trunc(historyLimit.value)));
-              qiHistoryLimitRef.current = normalized;
-              setQiHistoryLimit(normalized);
+            if (historyEnabled.status === "fulfilled") {
+              qiHistoryEnabledRef.current = historyEnabled.value;
+              setQiHistoryEnabled(historyEnabled.value);
             }
-          }
-        });
+            if (snippetsEnabled.status === "fulfilled") {
+              qiSnippetsEnabledRef.current = snippetsEnabled.value;
+              setQiSnippetsEnabled(snippetsEnabled.value);
+            }
+            if (historyLimit.status === "fulfilled") {
+              // 用户已开始修改时，忽略较晚返回的初始读取结果，避免覆盖用户输入。
+              if (qiHistoryLimitSaveVersionRef.current === 0) {
+                const normalized = Math.max(0, Math.min(20, Math.trunc(historyLimit.value)));
+                qiHistoryLimitRef.current = normalized;
+                setQiHistoryLimit(normalized);
+              }
+            }
+            if (soundEnabled.status === "fulfilled") {
+              qiSoundEnabledRef.current = soundEnabled.value;
+              setQiSoundEnabled(soundEnabled.value);
+            }
+            if (soundStyle.status === "fulfilled") {
+              // 同音量：用户已经改过风格就不要再被迟到的初始读取覆盖。
+              // "none" 不暴露在设置页（它等价于「关掉音效开关」），因此下拉框里只有
+              // minimal / standard 两档；读到 none 时按 standard 展示，避免出现空选项。
+              if (qiSoundStyleSaveVersionRef.current === 0) {
+                const style = soundStyle.value === "minimal" ? "minimal" : "standard";
+                qiSoundStyleRef.current = style;
+                setQiSoundStyle(style);
+              }
+            }
+            if (soundVolume.status === "fulfilled") {
+              // 同保留条数：用户已拖动过音量就不要再被初始读取覆盖。
+              if (qiSoundVolumeSaveVersionRef.current === 0) {
+                const normalized = Math.max(0, Math.min(100, Math.trunc(soundVolume.value)));
+                qiSoundVolumeRef.current = normalized;
+                setQiSoundVolume(normalized);
+              }
+            }
+          },
+        );
+        break;
+      case "system-cleaner":
+        // 看门狗设置是长驻后台任务的配置，不在工具开关快照里，单独拉一次
+        invoke<WatchStatus>("disk_cleanup_watch_status")
+          .then((status) => setWatchStatus(status))
+          .catch(() => {});
         break;
       case "monitor":
         // 工具启用/自动打开状态由进入页签时的快照刷新统一处理（见 refreshToolEnableSnapshot）
@@ -1189,12 +1408,14 @@ function Settings() {
     toolSnapshotLoadedRef.current = true;
     void Promise.allSettled([
       invoke<boolean>("get_system_monitor_enabled"),
+      invoke<boolean>("get_system_cleaner_enabled"),
       invoke<boolean>("get_todo_enabled"),
       invoke<boolean>("get_timer_enabled"),
       invoke<string[]>("get_tools_autostart"),
     ])
-      .then(([monitor, todo, timer, autostart]) => {
+      .then(([monitor, cleaner, todo, timer, autostart]) => {
         if (monitor.status === "fulfilled") setSystemMonitorEnabled(monitor.value);
+        if (cleaner.status === "fulfilled") setSystemCleanerEnabled(cleaner.value);
         if (todo.status === "fulfilled") setTodoEnabled(todo.value);
         if (timer.status === "fulfilled") setTimerEnabled(timer.value);
         if (autostart.status === "fulfilled") {
@@ -1225,7 +1446,10 @@ function Settings() {
   useEffect(() => {
     if (
       !toolSnapshotLoadedRef.current &&
-      (activeTab === "monitor" || activeTab === "timer" || activeTab === "todo")
+      (activeTab === "monitor" ||
+        activeTab === "system-cleaner" ||
+        activeTab === "timer" ||
+        activeTab === "todo")
     ) {
       refreshToolEnableSnapshot();
     }
@@ -1262,6 +1486,7 @@ function Settings() {
           if (activeTabRef.current === "quick-input") void refreshQiHistory();
           if (
             activeTabRef.current === "monitor" ||
+            activeTabRef.current === "system-cleaner" ||
             activeTabRef.current === "timer" ||
             activeTabRef.current === "todo"
           ) {
@@ -1760,6 +1985,11 @@ function Settings() {
       if (qiEditingIndex === idx) setQiEditingIndex(null);
       else if (qiEditingIndex > idx) setQiEditingIndex(qiEditingIndex - 1);
     }
+    // 子项编辑器跟随同样的索引平移规则
+    if (qiChildEditorIndex !== null) {
+      if (qiChildEditorIndex === idx) setQiChildEditorIndex(null);
+      else if (qiChildEditorIndex > idx) setQiChildEditorIndex(qiChildEditorIndex - 1);
+    }
     void saveQiSnippets(next);
   };
 
@@ -1779,6 +2009,8 @@ function Settings() {
         setQiEditingIndex(qiEditingIndex + 1);
       }
     }
+    // 子项编辑器挂在特定片段上，重排后直接收起，避免指错行
+    if (qiChildEditorIndex !== null) setQiChildEditorIndex(null);
     qiDragSnippetsRef.current = next;
     qiDragIndexRef.current = to;
     qiDragDirtyRef.current = true;
@@ -1841,14 +2073,15 @@ function Settings() {
   /** 保存当前编辑结果，落库并退出编辑模式 */
   const saveEditQiSnippet = () => {
     if (qiEditingIndex === null) return;
-    // 文本为空则不保存
-    if (!qiEditText.trim()) {
+    const editing = qiSnippets[qiEditingIndex];
+    // 文本为空则不保存——但带子项的分组条目允许空文本（转盘中点击分组进入子级，不输入文本）
+    if (!qiEditText.trim() && !editing?.children?.length) {
       setQiEditingIndex(null);
       return;
     }
     const next = qiSnippets.map((s, i) =>
       i === qiEditingIndex
-        ? { label: qiEditLabel.trim() || qiEditText.slice(0, 20), text: qiEditText }
+        ? { ...s, label: qiEditLabel.trim() || qiEditText.slice(0, 20), text: qiEditText }
         : s,
     );
     setQiEditingIndex(null);
@@ -1856,6 +2089,34 @@ function Settings() {
   };
 
   const cancelEditQiSnippet = () => setQiEditingIndex(null);
+
+  /** 给指定片段添加子项（转盘中的二级条目）；标签缺省时取文本前 20 字 */
+  const addChildQiSnippet = (parentIdx: number) => {
+    if (!qiNewChildText.trim()) return;
+    const parent = qiSnippets[parentIdx];
+    if (!parent) return;
+    const child = {
+      label: qiNewChildLabel.trim() || qiNewChildText.slice(0, 20),
+      text: qiNewChildText,
+    };
+    const next = qiSnippets.map((s, i) =>
+      i === parentIdx ? { ...s, children: [...(s.children ?? []), child] } : s,
+    );
+    setQiNewChildLabel("");
+    setQiNewChildText("");
+    void saveQiSnippets(next);
+  };
+
+  /** 删除指定片段的一个子项；子项删空后移除 children 字段，条目退回普通片段 */
+  const removeChildQiSnippet = (parentIdx: number, childIdx: number) => {
+    const parent = qiSnippets[parentIdx];
+    if (!parent) return;
+    const children = (parent.children ?? []).filter((_, i) => i !== childIdx);
+    const next = qiSnippets.map((s, i) =>
+      i === parentIdx ? { ...s, children: children.length ? children : undefined } : s,
+    );
+    void saveQiSnippets(next);
+  };
 
   const changeQiHistoryEnabled = async (enabled: boolean) => {
     const previous = qiHistoryEnabledRef.current;
@@ -1902,6 +2163,106 @@ function Settings() {
       setQiSnippetsEnabledStatus("error");
       setTimeout(() => setQiSnippetsEnabledStatus("idle"), 3000);
     }
+  };
+
+  /** 音效开关：转盘被高频唤起，开关必须即时生效，因此独立于风格与音量单发一次同步。 */
+  const changeQiSoundEnabled = async (enabled: boolean) => {
+    const previous = qiSoundEnabledRef.current;
+    const version = ++qiSoundEnabledSaveVersionRef.current;
+    qiSoundEnabledRef.current = enabled;
+    setQiSoundEnabled(enabled);
+    setQiSoundEnabledStatus("idle");
+    try {
+      await invoke("set_quick_input_sound_enabled", { enabled });
+      if (version !== qiSoundEnabledSaveVersionRef.current) return;
+      setQiSoundEnabledStatus("saved");
+      setTimeout(() => setQiSoundEnabledStatus("idle"), 2000);
+    } catch (err) {
+      if (version !== qiSoundEnabledSaveVersionRef.current) return;
+      console.error("Failed to save quick input sound enabled state:", err);
+      qiSoundEnabledRef.current = previous;
+      setQiSoundEnabled(previous);
+      setQiSoundEnabledStatus("error");
+      setTimeout(() => setQiSoundEnabledStatus("idle"), 3000);
+    }
+  };
+
+  /** 音效风格：切换后立即试听一下当前风格的「确认」音，让用户听到差异。 */
+  const changeQiSoundStyle = async (style: string) => {
+    const previous = qiSoundStyleRef.current;
+    if (previous === style) return;
+    const version = ++qiSoundStyleSaveVersionRef.current;
+    qiSoundStyleRef.current = style;
+    setQiSoundStyle(style);
+    setQiSoundStyleStatus("idle");
+    try {
+      await invoke("set_quick_input_sound_style", { style });
+      if (version !== qiSoundStyleSaveVersionRef.current) return;
+      setQiSoundStyleStatus("saved");
+      setTimeout(() => setQiSoundStyleStatus("idle"), 2000);
+      // 极简风格没有刻度音，用「确认」音作为风格样本；标准风格顺带演示刻度音。
+      if (style === "minimal") {
+        void invoke("preview_quick_input_sound", { cue: "confirm" }).catch(() => {});
+      } else {
+        void invoke("preview_quick_input_sound", { cue: "tick" }).catch(() => {});
+      }
+    } catch (err) {
+      if (version !== qiSoundStyleSaveVersionRef.current) return;
+      console.error("Failed to set quick input sound style:", err);
+      qiSoundStyleRef.current = previous;
+      setQiSoundStyle(previous);
+      setQiSoundStyleStatus("error");
+      setTimeout(() => setQiSoundStyleStatus("idle"), 3000);
+    }
+  };
+
+  /**
+   * 音量保存（滑杆会高频触发，沿用保留条数的「队列 + 版本号」模式）：
+   * 串行化写盘避免乱序，版本号保证只有最后一次的结果被采纳。
+   */
+  const changeQiSoundVolume = async (volume: number) => {
+    const normalized = Math.max(0, Math.min(100, Math.trunc(volume)));
+    const previous = qiSoundVolumeRef.current;
+    if (normalized === previous) return;
+    const version = ++qiSoundVolumeSaveVersionRef.current;
+    qiSoundVolumeRef.current = normalized;
+    setQiSoundVolume(normalized);
+    setQiSoundVolumeStatus("idle");
+
+    const run = qiSoundVolumeSaveQueueRef.current.then(async () => {
+      try {
+        await invoke("set_quick_input_sound_volume", { volume: normalized });
+        if (version !== qiSoundVolumeSaveVersionRef.current) return;
+        setQiSoundVolumeStatus("saved");
+        setTimeout(() => setQiSoundVolumeStatus("idle"), 2000);
+      } catch (err) {
+        if (version !== qiSoundVolumeSaveVersionRef.current) return;
+        console.error("Failed to save quick input sound volume:", err);
+        qiSoundVolumeRef.current = previous;
+        setQiSoundVolume(previous);
+        setQiSoundVolumeStatus("error");
+        setTimeout(() => setQiSoundVolumeStatus("idle"), 3000);
+      }
+    });
+    qiSoundVolumeSaveQueueRef.current = run.catch(() => {});
+    await run;
+  };
+
+  /** 试听某个音效（不受音效开关约束，音量取当前配置）。 */
+  const previewQiSound = (cue: "open" | "tick" | "confirm" | "cancel") => {
+    void invoke("preview_quick_input_sound", { cue }).catch((err) =>
+      console.error("preview quick input sound failed:", err),
+    );
+  };
+
+  /**
+   * 松手试听。音量 0 时直接跳过：后端会返回「音量为 0 不播放」的静默结果，
+   * 用户按了没反应会以为试听坏了，不如不响应。
+   * 音量取 ref 而不是 state —— state 在滑杆高频 onChange 下有闭包陈旧风险。
+   */
+  const previewQiSoundAtCurrentVolume = () => {
+    if (qiSoundVolumeRef.current <= 0) return;
+    previewQiSound("confirm");
   };
 
   /** 清空剪贴板历史（后端内存缓冲区） */
@@ -2345,9 +2706,7 @@ function Settings() {
 
               <hr className="settings-divider" />
               <h3 className="settings-subsection-title">悬浮窗位置</h3>
-              <p className="settings-hint">
-                悬浮球、系统监控、番茄钟会记住上次拖拽的位置；窗口被拖到角落或屏幕布局变化后可在此一键恢复默认位置。
-              </p>
+              <p className="settings-hint">{WINDOW_POSITION_HINT}</p>
               <div className="settings-pos-list">
                 {WINDOW_POSITION_TARGETS.map((target) => {
                   const status = resetPosStatus[target.id] ?? "idle";
@@ -3025,42 +3384,111 @@ function Settings() {
                         </button>
                       </div>
                     ) : (
-                      <div
-                        className={`qi-snippet-row${qiDraggingIndex === i ? " qi-snippet-dragging" : ""}`}
-                        key={i}
-                        draggable
-                        onDragStart={(e) => onQiSnippetDragStart(e, i)}
-                        onDragOver={(e) => onQiSnippetDragOver(e, i)}
-                        onDrop={onQiSnippetDrop}
-                        onDragEnd={onQiSnippetDragEnd}
-                      >
-                        <div className="qi-snippet-label" title={s.label}>
-                          {s.label}
+                      <Fragment key={i}>
+                        <div
+                          className={`qi-snippet-row${qiDraggingIndex === i ? " qi-snippet-dragging" : ""}`}
+                          draggable
+                          onDragStart={(e) => onQiSnippetDragStart(e, i)}
+                          onDragOver={(e) => onQiSnippetDragOver(e, i)}
+                          onDrop={onQiSnippetDrop}
+                          onDragEnd={onQiSnippetDragEnd}
+                        >
+                          <div className="qi-snippet-label" title={s.label}>
+                            {s.label}
+                            {s.children?.length ? (
+                              <span className="qi-snippet-children-badge">
+                                {s.children.length} 子项
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="qi-snippet-text" title={s.text}>
+                            {s.text}
+                          </div>
+                          <div className="qi-snippet-actions">
+                            <button
+                              className="settings-toggle-btn settings-toggle-btn-sm"
+                              draggable={false}
+                              onClick={() => startEditQiSnippet(i)}
+                              title="编辑"
+                              aria-label="编辑"
+                            >
+                              <Icon name="Pencil" size={14} />
+                            </button>
+                            <button
+                              className={`settings-toggle-btn settings-toggle-btn-sm${qiChildEditorIndex === i ? " is-active" : ""}`}
+                              draggable={false}
+                              onClick={() =>
+                                setQiChildEditorIndex(qiChildEditorIndex === i ? null : i)
+                              }
+                              title="子项（转盘二级条目）"
+                              aria-label="子项"
+                            >
+                              <Icon name="FolderOpen" size={14} />
+                            </button>
+                            <button
+                              className="settings-toggle-btn settings-toggle-btn-sm"
+                              draggable={false}
+                              onClick={() => removeQiSnippet(i)}
+                              title="删除"
+                              aria-label="删除"
+                            >
+                              <Icon name="X" size={14} />
+                            </button>
+                          </div>
                         </div>
-                        <div className="qi-snippet-text" title={s.text}>
-                          {s.text}
-                        </div>
-                        <div className="qi-snippet-actions">
-                          <button
-                            className="settings-toggle-btn settings-toggle-btn-sm"
-                            draggable={false}
-                            onClick={() => startEditQiSnippet(i)}
-                            title="编辑"
-                            aria-label="编辑"
-                          >
-                            <Icon name="Pencil" size={14} />
-                          </button>
-                          <button
-                            className="settings-toggle-btn settings-toggle-btn-sm"
-                            draggable={false}
-                            onClick={() => removeQiSnippet(i)}
-                            title="删除"
-                            aria-label="删除"
-                          >
-                            <Icon name="X" size={14} />
-                          </button>
-                        </div>
-                      </div>
+                        {qiChildEditorIndex === i && (
+                          <div className="qi-child-editor">
+                            {(s.children ?? []).map((c, ci) => (
+                              <div className="qi-snippet-row qi-child-row" key={ci}>
+                                <div className="qi-snippet-label" title={c.label}>
+                                  {c.label}
+                                </div>
+                                <div className="qi-snippet-text" title={c.text}>
+                                  {c.text}
+                                </div>
+                                <div className="qi-snippet-actions">
+                                  <button
+                                    className="settings-toggle-btn settings-toggle-btn-sm"
+                                    onClick={() => removeChildQiSnippet(i, ci)}
+                                    title="删除子项"
+                                    aria-label="删除子项"
+                                  >
+                                    <Icon name="X" size={14} />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                            <div className="qi-snippet-add qi-child-add">
+                              <input
+                                type="text"
+                                value={qiNewChildLabel}
+                                onChange={(e) => setQiNewChildLabel(e.target.value)}
+                                placeholder="子标签（可选）"
+                                className="settings-input"
+                                style={{ width: 120 }}
+                              />
+                              <input
+                                type="text"
+                                value={qiNewChildText}
+                                onChange={(e) => setQiNewChildText(e.target.value)}
+                                placeholder="子项文本…"
+                                className="settings-input"
+                                style={{ flex: 1 }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") addChildQiSnippet(i);
+                                }}
+                              />
+                              <button
+                                className="settings-toggle-btn"
+                                onClick={() => addChildQiSnippet(i)}
+                                title="添加子项"
+                              >
+                                <Icon name="Check" size={16} />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </Fragment>
                     ),
                   )}
                 </div>
@@ -3094,6 +3522,121 @@ function Settings() {
                     保存失败
                   </span>
                 )}
+              </div>
+              <div className="settings-item">
+                <div className="settings-item-head">
+                  <label className="settings-label">音效反馈</label>
+                  <span
+                    className="settings-hint-inline"
+                    title="转盘唤出、鼠标划过扇区、确认输入、取消退出时各有一个短音效。默认关闭。"
+                  >
+                    <Icon name="AlertCircle" size={14} aria-hidden="true" />
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={qiSoundEnabled}
+                    aria-label="音效反馈"
+                    className={`qi-toggle-switch${qiSoundEnabled ? " is-on" : ""}`}
+                    onClick={() => void changeQiSoundEnabled(!qiSoundEnabled)}
+                  >
+                    <span className="qi-toggle-switch-thumb" />
+                  </button>
+                </div>
+                {qiSoundEnabledStatus === "saved" && <span className="settings-hint">已保存</span>}
+                {qiSoundEnabledStatus === "error" && (
+                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    保存失败
+                  </span>
+                )}
+                <div className={`qi-sound-panel${qiSoundEnabled ? "" : " is-disabled"}`}>
+                  <div className="settings-item-head">
+                    <label className="settings-label" htmlFor="settings-qi-sound-style">
+                      音效风格
+                    </label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <select
+                        id="settings-qi-sound-style"
+                        className="settings-select"
+                        value={qiSoundStyle}
+                        disabled={!qiSoundEnabled}
+                        onChange={(e) => void changeQiSoundStyle(e.target.value)}
+                      >
+                        <option value="standard">标准（含刻度音）</option>
+                        <option value="minimal">极简（仅唤出与确认）</option>
+                      </select>
+                      {qiSoundStyleStatus === "saved" && (
+                        <span className="settings-hint">已保存</span>
+                      )}
+                      {qiSoundStyleStatus === "error" && (
+                        <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                          保存失败
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="settings-item-head" style={{ marginTop: 10 }}>
+                    <label className="settings-label" htmlFor="settings-qi-sound-volume">
+                      音量
+                    </label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input
+                        id="settings-qi-sound-volume"
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={qiSoundVolume}
+                        disabled={!qiSoundEnabled}
+                        onChange={(e) => void changeQiSoundVolume(Number(e.target.value))}
+                        // 松手时用「刚刚保存的」音量试听，让用户听到的就是实际音量。
+                        // 音量为 0 时不试听 —— 放了也听不到，只会让人以为试听坏了。
+                        onMouseUp={previewQiSoundAtCurrentVolume}
+                        onTouchEnd={previewQiSoundAtCurrentVolume}
+                        style={{ width: 160 }}
+                      />
+                      <span className="settings-hint" style={{ minWidth: 34 }}>
+                        {qiSoundVolume}%
+                      </span>
+                      {qiSoundVolumeStatus === "saved" && (
+                        <span className="settings-hint">已保存</span>
+                      )}
+                      {qiSoundVolumeStatus === "error" && (
+                        <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                          保存失败
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="qi-sound-preview-row">
+                    <span className="settings-hint">试听</span>
+                    {(
+                      [
+                        ["open", "唤出"],
+                        ["tick", "划过"],
+                        ["confirm", "确认"],
+                        ["cancel", "取消"],
+                      ] as const
+                    ).map(([cue, label]) => (
+                      <button
+                        key={cue}
+                        type="button"
+                        className="settings-toggle-btn settings-toggle-btn-sm qi-sound-preview-btn"
+                        disabled={
+                          !qiSoundEnabled || (cue === "tick" && qiSoundStyle !== "standard")
+                        }
+                        onClick={() => previewQiSound(cue)}
+                        title={`试听「${label}」音效`}
+                        // 按钮可见文本只有「唤出/划过/确认/取消」，读屏器无法区分同名按钮，
+                        // 因此显式给出可访问名称。
+                        aria-label={`试听「${label}」音效`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <span className="settings-hint">拖动音量滑杆松手时会试听一次「确认」音。</span>
               </div>
               <div className="settings-item">
                 <div className="settings-item-head">
@@ -3210,6 +3753,251 @@ function Settings() {
                     <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
                       {qiHistoryActionError}
                     </span>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* ── 系统清理 ──────────────────────────────────── */}
+          {activeTab === "system-cleaner" && (
+            <>
+              <h2 className="settings-panel-title">系统清理</h2>
+              <p className="settings-panel-desc">
+                {"扫描并清理磁盘垃圾。清理项与保留期由后端规则表决定，逐项写明后果；" +
+                  "被占用的文件一律跳过，不会为了「清干净」而强删或改动文件属性。" +
+                  "审计日志只存在本机用户数据目录下的 levitaire/cleanup-audit，绝不上传，可随时一键清空。"}
+              </p>
+              <div className="settings-item">
+                <label
+                  className={`settings-checkbox-label${systemCleanerEnabled ? "" : " is-disabled"}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={autostartIds.includes("system-cleaner")}
+                    disabled={!autostartLoaded || !systemCleanerEnabled}
+                    onChange={() => handleToggleToolAutostart("system-cleaner")}
+                  />
+                  <span>启动时自动打开</span>
+                </label>
+                {!autostartLoaded && <span className="settings-hint">正在读取配置…</span>}
+                {autostartLoaded && !systemCleanerEnabled && (
+                  <span className="settings-hint">该工具未启用，需先在悬浮球面板中启用</span>
+                )}
+                {autostartError && (
+                  <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                    设置失败
+                  </span>
+                )}
+              </div>
+
+              {/* ── 看门狗（§11）────────────────────────────── */}
+              <h3 className="settings-subsection-title">失控看门狗</h3>
+              <p className="settings-panel-desc">
+                {"每天低频比对历次快照，把「一直很大」和「正在失控」分开：只有同时超过大小与增长" +
+                  "两条阈值的目录才会通知你。"}
+                <b>它一个字节都不删</b>
+                {"，只发通知，要不要处理由你在清理面板里决定。"}
+              </p>
+              {!watchStatus ? (
+                <span className="settings-hint">{watchError ?? "正在读取看门狗设置…"}</span>
+              ) : (
+                <>
+                  <div className="settings-item">
+                    <label className="settings-checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={watchStatus.enabled}
+                        disabled={watchBusy}
+                        onChange={(event) =>
+                          void saveWatchSettings({ enabled: event.target.checked })
+                        }
+                      />
+                      <span>启用看门狗</span>
+                    </label>
+                    <span className="settings-hint">
+                      {watchStatus.lastRunAt
+                        ? `上次检查：${watchStatus.lastRunAt}`
+                        : "还没有检查过"}
+                    </span>
+                    {watchStatus.lastError && (
+                      <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        最近一次检查没能完成：{watchStatus.lastError}
+                        {"（这不代表没有目录在变大，只是这一轮没查出来）"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="settings-item settings-row">
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-watch-interval">
+                        检查间隔
+                      </label>
+                      <select
+                        id="settings-watch-interval"
+                        value={watchStatus.intervalHours}
+                        disabled={watchBusy}
+                        onChange={(event) =>
+                          void saveWatchSettings({ intervalHours: Number(event.target.value) })
+                        }
+                        className="settings-select"
+                      >
+                        {WATCHDOG_INTERVAL_OPTIONS.map((hours) => (
+                          <option key={hours} value={hours}>
+                            {hours >= 24 ? `${hours / 24} 天` : `${hours} 小时`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-watch-min-bytes">
+                        目录大于
+                      </label>
+                      <select
+                        id="settings-watch-min-bytes"
+                        value={watchStatus.minBytes}
+                        disabled={watchBusy}
+                        onChange={(event) =>
+                          void saveWatchSettings({ minBytes: Number(event.target.value) })
+                        }
+                        className="settings-select"
+                      >
+                        {WATCHDOG_MIN_BYTES_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-watch-min-delta">
+                        且增长超过
+                      </label>
+                      <select
+                        id="settings-watch-min-delta"
+                        value={watchStatus.minDeltaBytes}
+                        disabled={watchBusy}
+                        onChange={(event) =>
+                          void saveWatchSettings({ minDeltaBytes: Number(event.target.value) })
+                        }
+                        className="settings-select"
+                      >
+                        {WATCHDOG_MIN_DELTA_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="settings-inline-group">
+                      <label className="settings-label" htmlFor="settings-watch-min-age">
+                        观察窗口
+                      </label>
+                      <select
+                        id="settings-watch-min-age"
+                        value={watchStatus.minAgeDays}
+                        disabled={watchBusy}
+                        onChange={(event) =>
+                          void saveWatchSettings({ minAgeDays: Number(event.target.value) })
+                        }
+                        className="settings-select"
+                      >
+                        {WATCHDOG_MIN_AGE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="settings-item">
+                    <div className="settings-inline-group">
+                      <span className="settings-label">监视范围</span>
+                      <span className="settings-hint">
+                        {watchStatus.targets.length === 0
+                          ? "没有可监视的目标"
+                          : "默认只盯系统卷；加一个自定义目录就只盯那些目录"}
+                      </span>
+                    </div>
+                    {watchStatus.targets.map((target, index) => (
+                      <div key={target} className="settings-inline-group">
+                        <span className="settings-hint">{target}</span>
+                        <button
+                          type="button"
+                          className="settings-toggle-btn"
+                          disabled={watchBusy}
+                          title="不再监视这个目录"
+                          aria-label={`不再监视 ${target}`}
+                          onClick={() => void removeWatchTarget(index)}
+                        >
+                          <Icon name="X" size={14} />
+                        </button>
+                      </div>
+                    ))}
+                    <div className="settings-inline-group">
+                      <button
+                        type="button"
+                        className="settings-save-btn"
+                        disabled={watchBusy}
+                        onClick={() => void addWatchTarget()}
+                      >
+                        添加监视目录…
+                      </button>
+                      <button
+                        type="button"
+                        className="settings-save-btn"
+                        disabled={watchBusy}
+                        onClick={() => void runWatchNow()}
+                      >
+                        立即检查
+                      </button>
+                    </div>
+                    {watchNotice && (
+                      <span className="settings-hint">{watchNotice}</span>
+                    )}
+                    {watchError && (
+                      <span className="settings-hint" style={{ color: "var(--color-danger-fg)" }}>
+                        {watchError}
+                      </span>
+                    )}
+                    {watchStatus.alerts.length > 0 && (
+                      <span className="settings-hint" style={{ color: "var(--color-warning-fg)" }}>
+                        当前有 {watchStatus.alerts.length} 条失控告警，可在清理面板查看
+                      </span>
+                    )}
+
+                  </div>
+                </>
+              )}
+
+              {/* ── 审计日志（§12.3：清空动作必须在设置页可见）────── */}
+              <h3 className="settings-subsection-title">审计日志</h3>
+              <p className="settings-panel-desc">
+                {'每次清理都会记录"删了什么、跳过了什么、为什么"。记录的是文件路径全文，'}
+                <b>只存在本机</b>
+                {"，不会上报、不随更新检查或崩溃报告带出去。" +
+                  "默认保留 90 天或最近 100 次，到期自动删除。"}
+              </p>
+              <div className="settings-item">
+                <div className="settings-inline-group">
+                  <button
+                    type="button"
+                    className="settings-save-btn"
+                    disabled={!settingsAuditConfirm}
+                    onClick={() => void clearAuditLogs()}
+                  >
+                    {settingsAuditConfirm ? "确认清空？" : "清空审计日志"}
+                  </button>
+                  {!settingsAuditConfirm && (
+                    <button
+                      type="button"
+                      className="settings-save-btn"
+                      onClick={() => setSettingsAuditConfirm(true)}
+                    >
+                      我要清空…
+                    </button>
+                  )}
+                  {settingsAuditMessage && (
+                    <span className="settings-hint">{settingsAuditMessage}</span>
                   )}
                 </div>
               </div>

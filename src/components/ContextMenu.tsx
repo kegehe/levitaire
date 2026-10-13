@@ -139,7 +139,10 @@ export const CONTEXT_MENUS: Record<ContextMenuSource, ContextMenuItem[][]> = {
       { id: "settings", label: "设置", icon: Settings },
       { id: "tool-config", label: "工具配置", icon: Wrench },
     ],
-    [{ id: "quit", label: "退出", icon: X, destructive: true }],
+    [
+      { id: "restart", label: "重启应用", icon: RotateCw },
+      { id: "quit", label: "退出", icon: X, destructive: true },
+    ],
   ],
 };
 
@@ -162,6 +165,25 @@ function ContextMenu() {
   const trayInstallingRef = useRef(false);
   const hideTimer = useRef<number | null>(null);
   const trayCheckGeneration = useRef(0);
+
+  /**
+   * 撤销「失焦 80ms 后自动隐藏」。
+   *
+   * ⚠️ 这个「取消」不是可有可无的收尾，取消不掉就会变成「菜单自己关自己」：
+   * `showContextMenu()`（utils/toolWindows.ts）每次都会先 `await window.hide()`，
+   * 而隐藏一个**正持有焦点**的菜单窗会立刻让它失焦（tao 在 WM_KILLFOCUS 上发
+   * `Focused(false)`），于是**每一次重开菜单都会先埋下一个 80ms 的隐藏定时器**；
+   * 紧接着的 `show()+setFocus()` 又把它变回获焦状态。重新获焦时若不清掉它，
+   * 菜单会在重新打开后 80ms 被自己关掉 —— 「右键托盘，菜单闪一下就没」。
+   *
+   * 更新期间用户会反复右键托盘看「正在下载更新 x%」，每次重开都闪，观感就是
+   * 「托盘的右键菜单一直在触发」。回归用例：`ContextMenu.focusHide.test.tsx`。
+   */
+  const cancelPendingHide = useCallback(() => {
+    if (hideTimer.current === null) return;
+    window.clearTimeout(hideTimer.current);
+    hideTimer.current = null;
+  }, []);
 
   /**
    * 手动检查更新：走后端 `check_for_updates`（不再用 JS 插件的 `check()`）。
@@ -272,12 +294,17 @@ function ContextMenu() {
       setRequest(event.payload);
     });
     const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
-      if (focused) return;
+      if (focused) {
+        // 重新获焦 = 菜单正开着（很可能是刚被 show 回来）：上一轮失焦排下的隐藏必须撤销，
+        // 否则它会在 80ms 后关掉这个刚打开的菜单。理由见 cancelPendingHide。
+        cancelPendingHide();
+        return;
+      }
       // 安装进行中不自动隐藏：此刻菜单是「正在安装」的唯一提示面，
       // 被一次误点隐藏后用户会以为什么都没发生。安装失败会复位该标记，
       // 安装成功则由安装器接管并重启应用，窗口随之销毁。
       if (trayInstallingRef.current) return;
-      if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
+      cancelPendingHide();
       hideTimer.current = window.setTimeout(() => {
         hideTimer.current = null;
         void hideContextMenu();
@@ -296,17 +323,21 @@ function ContextMenu() {
       unlistenShow.then((fn) => fn());
       unlistenFocus.then((fn) => fn());
       unlistenReadyRequest.then((fn) => fn());
-      if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
+      cancelPendingHide();
     };
-  }, [win]);
+  }, [win, cancelPendingHide]);
 
   useEffect(() => {
     if (!request) return;
+    // 打开前再撤一次残留的隐藏定时器（双保险）：上面那条「先 hide 再 show」由两次独立
+    // 的消息投递组成，失焦回调与本次 context-menu-show 的到达顺序在慢链路上不保证先来，
+    // 只靠 onFocusChanged 的分支兜不住。
+    cancelPendingHide();
     void win
       .show()
       .then(() => win.setFocus())
       .catch(console.error);
-  }, [request, win]);
+  }, [request, win, cancelPendingHide]);
 
   useEffect(() => {
     if (request?.source !== "tray") return;
@@ -402,6 +433,9 @@ function ContextMenu() {
           return;
         case "toggle-orb":
           await invoke("toggle_orb");
+          return;
+        case "restart":
+          await invoke("restart_app");
           return;
         case "quit":
           await invoke("exit_app");

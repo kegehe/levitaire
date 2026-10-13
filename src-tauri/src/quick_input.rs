@@ -45,6 +45,11 @@ static QUICK_INPUT_X: AtomicI32 = AtomicI32::new(0);
 static QUICK_INPUT_Y: AtomicI32 = AtomicI32::new(0);
 static QUICK_INPUT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// 转盘窗口的逻辑边长（CSS px），与前端 `QuickInputTool.tsx` 的 `WINDOW_SIZE` 必须一致：
+/// 前端按它排布 SVG（盘面半径、扇区、中心环都是相对这个边长的），后端按它乘显示器缩放比
+/// 算窗口的物理尺寸。两边对不上，转盘就会溢出窗口被裁掉。
+const WINDOW_SIZE_LOGICAL: f64 = 320.0;
+
 /// 自愈阈值：active 置位后转盘持续不可见超过该时长才判定为卡死并自愈复位。
 /// 避免误伤「刚触发、窗口正在 show」窗口期内的快速二次触发（该窗口期应正常走关闭分支）。
 const WHEEL_HEAL_AFTER_MS: u64 = 400;
@@ -65,6 +70,27 @@ static TRIGGER_MODE: AtomicU8 = AtomicU8::new(1);
 /// 供「按住唤起」模式在松开触发键时读取并作为选中项。
 static CURRENT_HIGHLIGHT: AtomicI32 = AtomicI32::new(-1);
 
+/// 当前层级里「父级扇区」的索引集合（片段带子项时，点击/松开落在这些扇区上
+/// 表示进入子转盘而不是输入文本）。由前端在每次换级渲染后通过命令同步。
+/// 会话开始时清空；后端不解析片段内容，只认这份索引表。
+static WHEEL_PARENTS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// 同步当前层级的父级扇区索引（转盘前端在每次换级后调用）。
+pub fn set_wheel_parents(indices: Vec<usize>) {
+    if let Ok(mut parents) = WHEEL_PARENTS.lock() {
+        *parents = indices;
+    }
+}
+
+/// 读取当前层级的父级扇区索引快照。
+/// 锁中毒时按「无父级」降级：点击父级扇区会退化为普通选择，不会卡死。
+fn wheel_parents() -> Vec<usize> {
+    WHEEL_PARENTS
+        .lock()
+        .map(|parents| parents.clone())
+        .unwrap_or_default()
+}
+
 /// 按住模式收到 keyup 后，等待前端按 keyup 时的鼠标坐标结算选中项。
 /// 这段很短的确认阶段避免异步 IPC 中的最新高亮尚未抵达时就结束会话。
 static HOLD_CONFIRM_PENDING: AtomicBool = AtomicBool::new(false);
@@ -83,6 +109,86 @@ const HOLD_CONFIRM_TIMEOUT_MS: u64 = 500;
 pub const MODE_CLICK: u8 = 1;
 pub const MODE_HOLD: u8 = 2;
 
+// ─── 音效反馈 ──────────────────────────────────────────────────
+
+/// 音效开关（由命令层在配置变更时同步）。
+/// 默认 false：转盘会被高频唤起，新增的声音不该在用户没同意前就出现。
+static SOUND_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// 音效风格：是否播放「切扇区」刻度音。
+///
+/// 只用一个 bool 而不是完整风格串，是因为三种风格实际只区分两件事
+/// （有没有刻度音 / 要不要静音），静音由 SOUND_ENABLED 表达，这里只剩刻度音。
+/// `none` 风格落库时会被归一化成「关闭音效」，因此不会流到这里。
+static SOUND_TICK_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// 音效音量百分比（0-100）。0 视为静音。
+static SOUND_VOLUME: AtomicUsize = AtomicUsize::new(45);
+
+/// 同一次转盘会话内已经播放过刻度音的最大扇区索引，避免同一扇区反复响。
+/// 用 `-2` 作为哨兵：`-1` 是「无选中」，不能与「还没响过任何扇区」混淆。
+static SOUND_LAST_TICK_SECTOR: AtomicI32 = AtomicI32::new(-2);
+
+/// 同步音效配置到运行时（开关 / 风格 / 音量）。
+/// 命令层在初始化与配置变更时调用；`style` 传原始串，在这里归一化。
+pub fn set_sound_config(enabled: bool, style: &str, volume: u32) {
+    // `none` 风格等价于「静音」，直接并入开关，避免调用方还要自己判断两处。
+    let style_none = crate::config::normalize_sound_style(style) == crate::config::SOUND_STYLE_NONE;
+    SOUND_ENABLED.store(enabled && !style_none, Ordering::SeqCst);
+    SOUND_TICK_ENABLED.store(
+        crate::config::normalize_sound_style(style) != crate::config::SOUND_STYLE_MINIMAL,
+        Ordering::SeqCst,
+    );
+    SOUND_VOLUME.store(
+        volume.min(crate::config::SOUND_VOLUME_MAX) as usize,
+        Ordering::SeqCst,
+    );
+}
+
+/// 播放一个转盘音效，按当前配置过滤。`is_tick` 的音效受风格开关约束。
+/// 关闭、音量 0、或极简风格下的刻度音都直接返回，不产生播放线程。
+///
+/// ⚠️ 调用点包含 keyboard / mouse hook 线程（`end_wheel_inner` 会从 keyup 分支进来），
+/// 因此这里必须**只做原子读 + 起线程**：`play_cue` 内部是 `std::thread::spawn`，
+/// 建线程耗时在微秒级，远低于 LowLevelHooksTimeout。绝不能在这里改成同步播放
+/// （合成 WAV + WinRT 初始化会到毫秒级，超时会让系统静默卸载整个钩子）。
+/// 配置读取全部走原子量而不是 `ConfigManager`，也是为了不在钩子线程上抢配置锁。
+pub fn play_sound(cue: crate::sound::Cue, is_tick: bool) {
+    if !SOUND_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+    if is_tick && !SOUND_TICK_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+    let volume = SOUND_VOLUME.load(Ordering::SeqCst);
+    if volume == 0 {
+        return;
+    }
+    crate::sound::play_cue(cue, volume as f64 / 100.0);
+}
+
+/// 扇区高亮变化时播放刻度音：同一扇区不重复响。
+/// 非刻度类音效（唤出/确认/取消）不走这里。
+fn play_tick_if_sector_changed(index: i32) {
+    let previous = SOUND_LAST_TICK_SECTOR.swap(index, Ordering::SeqCst);
+    if !should_tick_for_sector(previous, index) {
+        return;
+    }
+    play_sound(crate::sound::Cue::Tick, true);
+}
+
+/// 该不该为这次高亮变化响一声刻度音。
+///
+/// 两条判据缺一不可：
+/// - **同一扇区不重复响**。前端已有 `highlightedRef` 去重，这里是第二层；
+///   少了它，任何绕过前端去重的调用路径（或前端的轻微抖动）都会连响。
+/// - **`-1`（中心死区）不响**。死区不是「某个扇区」，鼠标划到圆心是为了看中心
+///   放大的完整标签 —— 那是一段没有换扇区的动作，响一声等于误报"你换了个扇区"。
+///   只按 `previous != index` 判断会把「扇区 → 死区」和「死区 → 扇区」都当成换扇区，
+///   用户来回穿过圆心就会听到一串多余的"咔咔"。
+fn should_tick_for_sector(previous: i32, current: i32) -> bool {
+    current >= 0 && previous != current
+}
 /// 转盘模式是否激活
 pub fn is_active() -> bool {
     QUICK_INPUT_ACTIVE.load(Ordering::SeqCst)
@@ -123,8 +229,13 @@ pub fn set_mode(mode: u8) {
 }
 
 /// 更新前端同步过来的高亮扇区索引（-1 = 无选中）
+///
+/// 刻度音在这里播而不是在前端：前端只是「报告高亮的扇区」，而是否真的
+/// 值得响一声（同一扇区重复上报不响、极简风格不响、音效关掉不响）是后端
+/// 已经持有全部状态的判断，放这里能一次收口，前端不需要知道音效存在。
 pub fn set_highlight(idx: i32) {
     CURRENT_HIGHLIGHT.store(idx, Ordering::SeqCst);
+    play_tick_if_sector_changed(idx);
 }
 
 /// 当前配置的触发键 vk_code（0 = 未启用）
@@ -183,7 +294,9 @@ pub fn ensure_window(app: &tauri::AppHandle) -> Result<(), String> {
         WebviewUrl::App("index.html".into()),
     )
     .title("Levitaire Quick Input")
-    .inner_size(320.0, 320.0)
+    // 逻辑尺寸，建窗时按所在显示器的缩放比换算物理尺寸。这里只是初始值：
+    // 真正生效的尺寸由 begin_wheel_inner 每次唤起时按光标所在显示器重新下发。
+    .inner_size(WINDOW_SIZE_LOGICAL, WINDOW_SIZE_LOGICAL)
     .resizable(false)
     .transparent(true)
     .decorations(false)
@@ -218,6 +331,31 @@ pub fn wheel_visible() -> bool {
         return false;
     }
     unsafe { IsWindowVisible(HWND(ptr)).as_bool() }
+}
+
+/// 指定物理坐标所在显示器的缩放比（1.0 = 100%）。
+///
+/// 直接问 Win32，而不是用 `win.scale_factor()`：tao 记的窗口缩放比只在窗口收到
+/// `WM_DPICHANGED` 时才更新，而转盘窗口没有 `.position()`（建窗时按主显示器的缩放比定尺寸），
+/// 之后每次触发都是在**隐藏状态**下被 `set_position` 搬到光标所在显示器 —— Windows 不会给
+/// 隐藏窗口补这条消息。于是 tao 的缩放比和窗口物理尺寸都停在旧屏的值上，而 WebView2 的
+/// `devicePixelRatio` 已经跟着新屏变化：CSS 视口 = 物理尺寸 / DPR 被压小，320px 的转盘溢出窗口，
+/// 被裁成「正方形」（四角还被圆盘的弧线削掉）。按光标所在显示器取缩放比才能算对。
+///
+/// 取不到时返回 `None`，由调用方退回 `win.scale_factor()`。
+fn scale_at_point(x: i32, y: i32) -> Option<f64> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+
+    let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+    let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.ok()?;
+    // 调用失败已由 `?` 短路；这里再挡一次 0，避免把它当成有效缩放比（算出 0 尺寸的窗口）。
+    if dpi_x == 0 {
+        return None;
+    }
+    Some(dpi_x as f64 / 96.0)
 }
 
 /// 进入转盘模式：开启鼠标移动 emit，通知前端显示转盘。
@@ -261,8 +399,34 @@ fn begin_wheel_inner(app: &tauri::AppHandle) {
     QUICK_INPUT_ACTIVE.store(true, Ordering::SeqCst);
     // 开始时复位高亮，避免上一次会话的残留高亮被「按住唤起」模式在松开时误读
     CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+    // 复位刻度哨兵：新会话的第一个扇区必须能响，否则会与上一次会话的末位扇区比较而静音。
+    SOUND_LAST_TICK_SECTOR.store(-2, Ordering::SeqCst);
+    // 新会话从根级开始：清空上一次会话残留的父级扇区索引表。
+    if let Ok(mut parents) = WHEEL_PARENTS.lock() {
+        parents.clear();
+    }
     // 后端先定位并显示窗口，避免前端事件监听尚未就绪导致转盘完全不出现。
-    let half = (160.0 * win.scale_factor().unwrap_or(1.0)).round() as i32;
+    //
+    // ⚠️ 尺寸必须在每次唤起时按「光标所在显示器」重算并下发：
+    // 转盘窗口没有 .position()，建窗时按当时主显示器的缩放比算物理尺寸（100% 屏 → 320），
+    // 之后一直在隐藏状态下被搬到光标所在显示器，而 Windows 不给隐藏窗口补 WM_DPICHANGED，
+    // 于是窗口物理尺寸永远停在旧屏的值，WebView2 的 DPR 却已跟到新屏 —— 视口变小、
+    // 转盘溢出被裁（表现就是"圆盘变正方形"）。详见 scale_at_point 与 WINDOW_SIZE_LOGICAL。
+    let scale =
+        scale_at_point(pos.x, pos.y).unwrap_or_else(|| win.scale_factor().unwrap_or(1.0));
+    let side = (WINDOW_SIZE_LOGICAL * scale).round().max(1.0) as i32;
+    let half = side / 2;
+    crate::utils::logger::log(
+        "quick_input",
+        &format!(
+            "begin_wheel: pos=({},{}) scale={} side={}",
+            pos.x, pos.y, scale, side
+        ),
+    );
+    // 顺序不能反：tao 的 set_outer_position 是在**调用线程直接** SetWindowPos（不经执行器），
+    // 窗口跨屏引发的 WM_DPICHANGED 会在主线程上旋即处理完（tao 会按它记的逻辑尺寸重算一次
+    // 窗口大小）；而 set_inner_size 是经执行器**排队**到主线程的，必然排在后面生效 ——
+    // 这样最终尺寸一定等于这里下发的物理尺寸。
     if let Err(e) = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
         pos.x - half,
         pos.y - half,
@@ -275,6 +439,11 @@ fn begin_wheel_inner(app: &tauri::AppHandle) {
         CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
         let _ = win.hide();
         return;
+    }
+    // set_size 用物理尺寸（不经过窗口自身 DPI 换算），窗口左上角不变，中心正好落在光标上。
+    if let Err(e) = win.set_size(tauri::PhysicalSize::new(side as u32, side as u32)) {
+        // 尺寸下发失败不终止流程：转盘仍按老尺寸出现（可能被裁），由下一次唤起重试。
+        crate::utils::logger::log("quick_input", &format!("begin_wheel: set size failed: {}", e));
     }
     if let Err(e) = win.set_always_on_top(true).and_then(|_| win.show()) {
         crate::utils::logger::log("quick_input", &format!("begin_wheel: show failed: {}", e));
@@ -299,6 +468,8 @@ fn begin_wheel_inner(app: &tauri::AppHandle) {
             &format!("begin_wheel: start event emitted generation={}", generation),
         );
     }
+    // 唤出音：放在窗口 show 成功之后。播放本身是另起线程，不会拖慢这里的时序。
+    play_sound(crate::sound::Cue::Open, false);
 }
 
 pub fn begin_wheel(app: &tauri::AppHandle) {
@@ -320,8 +491,16 @@ fn end_wheel_inner(app: &tauri::AppHandle, selected_index: Option<usize>) {
     // 结束也推进会话序号，使尚未完成的 start 查询无法复活已结束的转盘。
     QUICK_INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
     CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+    SOUND_LAST_TICK_SECTOR.store(-2, Ordering::SeqCst);
     if let Some(win) = app.get_webview_window("quick-input-overlay") {
         let _ = win.hide();
+    }
+    // 有选中项播「确认」，未选中（取消 / 鼠标停在死区）播「取消」——
+    // 两者听感方向相反，用户在看不到转盘的那一刻也能靠声音确认这次操作算不算数。
+    // 确认音在前端真正输入文本之前响，是「已选定」而非「已输入」的反馈。
+    match selected_index {
+        Some(_) => play_sound(crate::sound::Cue::Confirm, false),
+        None => play_sound(crate::sound::Cue::Cancel, false),
     }
     let _ = app.emit_to(
         "quick-input-overlay",
@@ -413,25 +592,71 @@ pub fn request_hold_confirmation(app: &tauri::AppHandle) {
 
 /// 提交前端根据 keyup 时鼠标位置结算出的扇区。
 /// 会话代次与 pending 标志共同防止过期确认结束下一次转盘会话。
+///
+/// 返回值：`true` 表示落在父级扇区上、会话保持且已通知前端换级展开；
+/// `false` 表示会话已结束（叶子选中 / 取消 / 过期请求）。
 pub fn confirm_hold_wheel(
     app: &tauri::AppHandle,
     generation: u64,
     selected_index: Option<usize>,
-) {
+) -> bool {
     if generation != QUICK_INPUT_GENERATION.load(Ordering::SeqCst)
         || !is_active()
         || HOLD_CONFIRM_PENDING
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
     {
-        return;
+        return false;
+    }
+    if let Some(index) = selected_index {
+        if wheel_parents().contains(&index) {
+            // 按住模式在父级扇区松开：保持会话，前端换级进入子转盘。
+            // 换级 = 新的扇区集合，刻度哨兵必须复位，否则换级后首个刻度音
+            // 会与换级前的末位扇区比较而静默丢失。
+            CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+            SOUND_LAST_TICK_SECTOR.store(-2, Ordering::SeqCst);
+            play_sound(crate::sound::Cue::Tick, false);
+            // 复查会话仍然有效（极端竞态下 toggle 恰好在此间关闭了转盘）
+            if QUICK_INPUT_GENERATION.load(Ordering::SeqCst) != generation || !is_active() {
+                return false;
+            }
+            return true;
+        }
     }
     end_wheel(app, selected_index);
+    false
+}
+
+/// 子级转盘返回上一级：保持会话与窗口可见，复位高亮与刻度哨兵。
+/// 由前端在「死区点击 / Esc / 按住模式死区松开」且处于子级时调用；
+/// 根级时前端直接走取消命令，不经这里。
+/// 返回 `false` 表示会话已结束或代次不匹配，前端不应换级。
+pub fn back_wheel(generation: u64) -> bool {
+    let Ok(_lifecycle) = WHEEL_LIFECYCLE_LOCK.lock() else {
+        return false;
+    };
+    if QUICK_INPUT_GENERATION.load(Ordering::SeqCst) != generation || !is_active() {
+        return false;
+    }
+    // 按住模式的确认可能仍处于 pending（死区松开路径），一并复位防止超时线程收尾。
+    HOLD_CONFIRM_PENDING.store(false, Ordering::SeqCst);
+    HOLD_CONFIRM_X.store(0, Ordering::SeqCst);
+    HOLD_CONFIRM_Y.store(0, Ordering::SeqCst);
+    HOLD_RELEASE_PENDING.store(false, Ordering::SeqCst);
+    CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+    // 换级 = 新的扇区集合，复位刻度哨兵（与会话边界同一契约）。
+    SOUND_LAST_TICK_SECTOR.store(-2, Ordering::SeqCst);
+    play_sound(crate::sound::Cue::Tick, false);
+    true
 }
 
 /// 转盘模式下鼠标点击选中：退出转盘模式并通知前端。
 /// 当前高亮扇区由前端持有（highlightedRef），因此这里只发点击信号，
 /// 前端读到高亮项后执行输入并隐藏窗口，后端不再回传 index。
+///
+/// 两种例外**不结束会话**，交由前端裁决：
+/// - 死区点击（highlight = -1）：子级时前端按「返回上一级」处理，根级时前端调取消命令；
+/// - 父级扇区点击（索引在 WHEEL_PARENTS 中）：前端换级进入子转盘。
 pub fn confirm_by_click(app: &tauri::AppHandle, generation: u64) {
     let Ok(_lifecycle) = WHEEL_LIFECYCLE_LOCK.lock() else {
         return;
@@ -442,16 +667,42 @@ pub fn confirm_by_click(app: &tauri::AppHandle, generation: u64) {
     {
         return;
     }
+    let click_highlight = CURRENT_HIGHLIGHT.load(Ordering::SeqCst);
+    if click_highlight < 0 {
+        // 死区点击：保持会话。前端按当前层级决定返回上级还是取消。
+        let _ = app.emit_to(
+            "quick-input-overlay",
+            "quick-input-click",
+            serde_json::json!({ "generation": generation, "deadZone": true }),
+        );
+        return;
+    }
+    if wheel_parents().contains(&(click_highlight as usize)) {
+        // 父级扇区点击：保持会话，前端换级进入子转盘。
+        // 换级 = 新的扇区集合，刻度哨兵必须复位（与会话边界同一契约）。
+        CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+        SOUND_LAST_TICK_SECTOR.store(-2, Ordering::SeqCst);
+        play_sound(crate::sound::Cue::Tick, false);
+        let _ = app.emit_to(
+            "quick-input-overlay",
+            "quick-input-click",
+            serde_json::json!({ "generation": generation, "expand": true }),
+        );
+        return;
+    }
     QUICK_INPUT_ACTIVE.store(false, Ordering::SeqCst);
     HOLD_CONFIRM_PENDING.store(false, Ordering::SeqCst);
     HOLD_CONFIRM_X.store(0, Ordering::SeqCst);
     HOLD_CONFIRM_Y.store(0, Ordering::SeqCst);
     HOLD_RELEASE_PENDING.store(false, Ordering::SeqCst);
+    // 走到这里必为叶子点击（highlight ≥ 0）：直接播确认音。
     QUICK_INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
     CURRENT_HIGHLIGHT.store(-1, Ordering::SeqCst);
+    SOUND_LAST_TICK_SECTOR.store(-2, Ordering::SeqCst);
     if let Some(win) = app.get_webview_window("quick-input-overlay") {
         let _ = win.hide();
     }
+    play_sound(crate::sound::Cue::Confirm, false);
     let _ = app.emit_to(
         "quick-input-overlay",
         "quick-input-click",
@@ -1153,7 +1404,8 @@ mod tests {
         clear_history, get_history, get_history_enabled, get_history_limit, history_path,
         is_dangerous_trigger_vk, load_history, load_history_from, parse_trigger_key, push_history,
         remove_history_item, save_history_to, set_history_enabled, set_history_favorite,
-        set_history_limit, vk_to_name, ClipboardHistoryItem, HISTORY_DEFAULT_LIMIT, HISTORY_MAX,
+        set_history_limit, should_tick_for_sector, vk_to_name, ClipboardHistoryItem,
+        HISTORY_DEFAULT_LIMIT, HISTORY_MAX,
     };
 
     /// 串行化操作全局 HISTORY 的测试，避免并行运行互相污染
@@ -1718,5 +1970,155 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
         set_history_limit(HISTORY_DEFAULT_LIMIT);
+    }
+
+    /// 源码级哨兵：`begin_wheel_inner` 每次唤起都要按「光标所在显示器」重算并下发窗口物理尺寸。
+    ///
+    /// 转盘窗口是**隐藏着**被搬到光标所在显示器的，Windows 不给隐藏窗口补 WM_DPICHANGED，
+    /// 所以必须每次主动下发。若退回 `win.scale_factor()`（隐藏搬屏后它仍是旧屏的值）或删掉
+    /// `set_size`，在非 100% 缩放的屏幕上窗口物理尺寸与 WebView2 的 DPR 就会错位：
+    /// CSS 视口被压小、320px 的转盘溢出窗口，被裁成「正方形」。
+    #[test]
+    fn begin_wheel_rescales_window_to_cursor_monitor() {
+        let src = include_str!("quick_input.rs");
+        // 只取该函数体：断言字符串本身也写在本文文件里，全文件 contains 会自己命中自己（假绿）。
+        let start = src
+            .find("fn begin_wheel_inner")
+            .expect("begin_wheel_inner 被改名/移动，请同步本守卫");
+        let end = src[start..]
+            .find("\npub fn begin_wheel(")
+            .expect("未找到 begin_wheel_inner 的结束边界，请同步本守卫");
+        let body = &src[start..start + end];
+
+        assert!(
+            body.contains("scale_at_point(pos.x, pos.y)"),
+            "begin_wheel_inner 必须用 scale_at_point 按光标所在显示器取缩放比，\
+             不能用 win.scale_factor()（隐藏搬屏后它还是旧屏的值）"
+        );
+        assert!(
+            body.contains("set_size(tauri::PhysicalSize::new("),
+            "begin_wheel_inner 必须按显示器缩放比下发窗口物理尺寸，\
+             否则 WebView2 的 DPR 变了而窗口尺寸没变，转盘会溢出被裁成正方形"
+        );
+    }
+
+    // ─── 音效：刻度音的播放判据 ────────────────────────────────
+
+    /// 换到另一个真实扇区才响。
+    #[test]
+    fn tick_fires_only_when_moving_between_real_sectors() {
+        assert!(should_tick_for_sector(0, 1), "0 → 1 是换扇区，应响");
+        assert!(should_tick_for_sector(1, 0), "1 → 0 是换扇区，应响");
+        assert!(should_tick_for_sector(-2, 0), "会话首个扇区应响");
+        assert!(!should_tick_for_sector(3, 3), "同一扇区不应重复响");
+        assert!(
+            !should_tick_for_sector(-1, -1),
+            "死区里持续上报 -1 不应响"
+        );
+    }
+
+    /// 回归：鼠标划进 / 划出中心死区（-1）不应产生刻度音。
+    ///
+    /// 死区不是「某个扇区」—— 用户把鼠标移到圆心是为了看中心放大的完整标签。
+    /// 若判据只写 `previous != index`，则「扇区 → 死区」与「死区 → 扇区」都会被
+    /// 当成换扇区：来回穿过圆心就会听到一串多余的"咔咔"。
+    #[test]
+    fn tick_is_silent_around_the_dead_zone() {
+        // 扇区 2 → 死区：不响
+        assert!(
+            !should_tick_for_sector(2, -1),
+            "划入中心死区不该响：死区不是扇区"
+        );
+        // 死区 → 扇区 2：这确实是从「无选中」变成「选中了 2」，应响一次
+        assert!(
+            should_tick_for_sector(-1, 2),
+            "从死区划回扇区应响一次，否则用户感觉不到选中了什么"
+        );
+        // 连续在死区里上报（前端 16ms 一次的坐标可能一直落在死区内）：一次都不响
+        for _ in 0..5 {
+            assert!(!should_tick_for_sector(-1, -1), "死区内重复上报不该响");
+        }
+    }
+
+    /// 契约：`play_sound` 是钩子线程安全的 —— 只能做原子读 + 起线程。
+    ///
+    /// `end_wheel_inner` 会从 keyboard hook 的 keyup 分支进来。若 `play_sound` 里
+    /// 出现同步播放（合成 WAV + WinRT 初始化是毫秒级），会超出 LowLevelHooksTimeout，
+    /// 使系统**静默卸载整个键盘钩子**（症状：触发键突然全失效）。
+    /// 源码级钉住：函数体里不得出现 `play_inner` / `synth_wav` 这类同步路径。
+    ///
+    /// ⚠️ 取函数体前必须先**归一化行尾**。本文件是 CRLF，而按 `\n` 拼的边界串
+    /// 在 `\r\n` 里只是「碰巧」能匹配 —— 一旦工作区行尾被切换（本项目行尾不统一，
+    /// 见 RUNTIME.md），守卫会静默失效而不是报错。归一化后与行尾无关。
+    #[test]
+    fn play_sound_stays_hook_thread_safe() {
+        let src = include_str!("quick_input.rs").replace("\r\n", "\n");
+        let start = src
+            .find("pub fn play_sound(")
+            .expect("play_sound 被改名/移动，请同步本守卫");
+        let end = src[start..]
+            .find("\n/// 扇区高亮变化时播放刻度音")
+            .expect("未找到 play_sound 的结束边界，请同步本守卫");
+        let body = &src[start..start + end];
+        // 先剥注释：把同步调用注释掉在文本层面仍会命中，那样守卫形同虚设。
+        let code: String = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in ["play_inner", "synth_wav", "CoInitializeEx", "thread::sleep"] {
+            assert!(
+                !code.contains(forbidden),
+                "play_sound 里出现了 `{forbidden}` —— 这会让它在钩子线程上阻塞，\
+                 超出 LowLevelHooksTimeout 后系统会静默卸载整个键盘钩子。\
+                 音效必须只走 `play_cue`（内部 thread::spawn 后立即返回）"
+            );
+        }
+        assert!(
+            code.contains("play_cue("),
+            "play_sound 应通过 play_cue 起线程播放，而不是自己同步播"
+        );
+    }
+
+    /// 覆盖守卫：**每个会话边界函数**都要复位刻度哨兵。
+    ///
+    /// 哨兵（`SOUND_LAST_TICK_SECTOR = -2`）的唯一作用是让「新会话的第一个扇区必定响」。
+    /// 漏掉一处复位，就会拿上一次会话的末位扇区做比较 —— 若鼠标恰好停在同一索引的扇区上，
+    /// `should_tick_for_sector(prev, cur)` 判为「同扇区」⇒ **首个刻度音静默丢失**，
+    /// 症状是「有时唤出转盘后第一下没声音」，极难复现也极难归因。
+    ///
+    /// 这里按「函数」而不是「全文件计数」对齐：文件里 `CURRENT_HIGHLIGHT.store(-1)`
+    /// 有多处，但其中 begin_wheel_inner 内的失败回滚、toggle_wheel 自愈等
+    /// 要么在复位点之前、要么紧跟着重新进 begin_wheel_inner，本就不需要各自再复位。
+    /// 真正需要成对的是这 5 个「会话 / 换级边界」——换级（expand / back）会换掉
+    /// 整个扇区集合，语义上等同新会话，漏复位会让换级后的首个刻度音静默丢失。
+    #[test]
+    fn every_session_boundary_resets_the_tick_sentinel() {
+        let src = include_str!("quick_input.rs").replace("\r\n", "\n");
+        for (func, boundary) in [
+            ("fn begin_wheel_inner", "\npub fn begin_wheel("),
+            ("fn end_wheel_inner", "\npub fn end_wheel("),
+            ("pub fn confirm_hold_wheel", "\npub fn back_wheel("),
+            ("pub fn back_wheel(", "\npub fn confirm_by_click("),
+            ("pub fn confirm_by_click", "\npub fn toggle_wheel("),
+        ] {
+            let start = src
+                .find(func)
+                .unwrap_or_else(|| panic!("{func} 被改名/移动，请同步本守卫"));
+            let rest = &src[start..];
+            let end = rest
+                .find(boundary)
+                .unwrap_or_else(|| panic!("{func} 的结束边界没找到，请同步本守卫"));
+            let body = rest[..end]
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                body.contains("SOUND_LAST_TICK_SECTOR.store(-2"),
+                "{func} 没有复位刻度哨兵 —— 新会话的首个刻度音会与上一次会话的\
+                 末位扇区比较，鼠标停在同一扇区时首声静默丢失"
+            );
+        }
     }
 }

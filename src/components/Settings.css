@@ -1045,6 +1045,54 @@
   }
 }
 
+/* ── 快速输入音效反馈 ─────────────────────────────── */
+
+/* 音效参数区：关闭时整体降透明度并禁用交互，让「关了就没有这些设置」一眼可见 */
+.qi-sound-panel {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-md);
+  background: var(--settings-section-bg);
+  transition: opacity var(--transition-fast);
+}
+
+.qi-sound-panel.is-disabled {
+  opacity: 0.55;
+}
+
+/* 区间滑杆：跟随主题强调色的原生 range，避免引入额外依赖 */
+.qi-sound-panel input[type="range"] {
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.qi-sound-panel input[type="range"]:disabled {
+  cursor: not-allowed;
+}
+
+.qi-sound-preview-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.qi-sound-preview-row .settings-hint {
+  margin-bottom: 0;
+}
+
+/* 试听按钮是窄文本按钮，不是图标按钮：去掉图标按钮的方形尺寸约束 */
+.qi-sound-preview-btn {
+  width: auto;
+  min-width: 52px;
+  padding: 0 var(--space-2-5);
+  font-size: var(--text-sm);
+}
+
 /* 剪贴板历史清空按钮 */
 .qi-history-actions {
   display: flex;
@@ -1288,4 +1336,40 @@
   max-width: 320px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* ── 快速输入·片段子项编辑器（转盘二级条目） ─────────────────── */
+
+/* 「子项」按钮激活态：提示当前展开的是哪个片段的子项 */
+.qi-snippet-actions .settings-toggle-btn-sm.is-active {
+  color: var(--color-brand);
+  border-color: var(--color-brand);
+}
+
+/* 片段行内的「N 子项」徽标 */
+.qi-snippet-children-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--color-brand);
+  background: var(--color-brand-subtle);
+}
+
+/* 子项编辑器：整体缩进一层，视觉上归属上方片段行 */
+.qi-child-editor {
+  margin-left: 22px;
+  padding-left: 8px;
+  border-left: 2px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.qi-child-row {
+  opacity: 0.85;
+}
+
+.qi-child-add {
+  margin-top: 2px;
 }

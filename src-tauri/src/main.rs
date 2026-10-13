@@ -48,6 +48,7 @@ mod automation;
 mod clipboard;
 mod commands;
 mod config;
+mod disk_cleanup;
 mod hooks;
 mod monitor;
 mod ocr;
@@ -345,6 +346,17 @@ fn main() {
                 } else {
                     quick_input::MODE_CLICK
                 });
+                // 同步音效配置：三个值必须一次性全读出来，否则未读的那项会停在默认值
+                // （例如用户开了音效、但风格读的是默认 —— 若默认恰为 none 就会静音）。
+                quick_input::set_sound_config(
+                    config_manager
+                        .get_quick_input_sound_enabled()
+                        .unwrap_or(false),
+                    &config_manager
+                        .get_quick_input_sound_style()
+                        .unwrap_or_else(|_| "standard".to_string()),
+                    config_manager.get_quick_input_sound_volume().unwrap_or(45),
+                );
                 // 启用时预创建转盘 overlay 窗口，确保键盘钩子触发 begin_wheel 时
                 // emit_to("quick-input-overlay") 能找到目标。窗口已存在时为空操作。
                 if qi_enabled {
@@ -420,6 +432,41 @@ fn main() {
             app.manage(updater::UpdaterState::default());
             updater::start_periodic_check(app.handle().clone());
 
+            // 系统清理：启动时加载规则表（资源目录里的副本优先，校验不过回退内置表）。
+            // 加载失败不 panic —— 把错误存进状态，让面板直接把原因展示给用户，
+            // 而不是让整个应用起不来（一个可选的清理工具不该有这种权力）。
+            let cleanup_rules = app
+                .path()
+                .resource_dir()
+                .map_err(|e| e.to_string())
+                .and_then(|dir| {
+                    disk_cleanup::rules::load_effective(Some(&dir)).map_err(|e| e.to_string())
+                });
+            match &cleanup_rules {
+                Ok(rules) => crate::utils::logger::log(
+                    "disk-cleanup",
+                    &format!("规则表已加载：{} 条", rules.len()),
+                ),
+                Err(e) => crate::utils::logger::log(
+                    "disk-cleanup",
+                    &format!("规则表加载失败，清理功能不可用：{e}"),
+                ),
+            }
+            app.manage(disk_cleanup::CleanState::new(cleanup_rules));
+            // 审计日志到期清理（90 天 / 最近 100 次），别让它长期累积成隐私面
+            disk_cleanup::audit::prune();
+            // 隔离区到期清理。保留期从配置读；读不到就用默认 7 天 ——
+            // **不因为一次读取失败就改变隔离区的保留语义**。
+            let quarantine_days = app
+                .try_state::<config::ConfigManager>()
+                .and_then(|manager| manager.get_system_cleaner_quarantine_days().ok())
+                .unwrap_or(disk_cleanup::quarantine::DEFAULT_RETENTION_DAYS);
+            disk_cleanup::quarantine::purge_expired(quarantine_days);
+
+            // 看门狗：低频后台比对快照，把"正在失控"的目录自动浮出来（§11）。
+            // 它**一个字节都不删**，只发通知；默认关闭，用户在设置里打开。
+            disk_cleanup::watchdog::start(app.handle().clone());
+
             // OCR 服务改为首次实际使用时懒加载（见 ocr::ensure_ocr_service），
             // 启动时不再加载模型，避免占用内存与启动开销。
 
@@ -458,6 +505,10 @@ fn main() {
                             });
                         }
                         "quit" => {
+                            // 退出时取消正在跑的清理任务：半途被杀会留下「删了一半」的目录树
+                            if let Some(state) = app.try_state::<disk_cleanup::CleanState>() {
+                                state.request_cancel();
+                            }
                             crate::hooks::mouse::stop_color_pick();
                             crate::hooks::mouse::stop_window_pin();
                             // 置顶状态写在**目标窗口**身上：不主动撤销的话，进程退出后
@@ -726,6 +777,7 @@ fn main() {
             commands::show_settings,
             commands::show_tool_config,
             commands::exit_app,
+            commands::restart_app,
             commands::call_ai,
             commands::call_ai_stream,
             commands::cancel_ai_stream,
@@ -778,6 +830,38 @@ fn main() {
             commands::get_tts_config,
             commands::set_tts_config,
             commands::show_monitor_window,
+            commands::show_system_cleaner_window,
+            commands::hide_system_cleaner_window,
+            commands::get_system_cleaner_enabled,
+            commands::set_system_cleaner_enabled,
+            commands::disk_cleanup_rules,
+            commands::disk_cleanup_status,
+            commands::disk_cleanup_volumes,
+            commands::disk_cleanup_scan,
+            commands::disk_cleanup_start,
+            commands::disk_cleanup_cancel,
+            commands::disk_cleanup_discover_start,
+            commands::disk_cleanup_discover_cancel,
+            commands::disk_cleanup_discover_status,
+            commands::disk_cleanup_watch_status,
+            commands::disk_cleanup_watch_update,
+            commands::disk_cleanup_watch_add_directory,
+            commands::disk_cleanup_watch_remove_directory,
+            commands::disk_cleanup_watch_run_now,
+            commands::disk_cleanup_audit_list,
+            commands::disk_cleanup_audit_read,
+            commands::disk_cleanup_audit_clear,
+            commands::disk_cleanup_audit_export,
+            commands::disk_cleanup_pick_directory,
+            commands::disk_cleanup_quarantine_discovery,
+            commands::disk_cleanup_forget_discovery,
+            commands::disk_cleanup_quarantine_list,
+            commands::disk_cleanup_quarantine_summary,
+            commands::disk_cleanup_quarantine_restore,
+            commands::disk_cleanup_quarantine_purge,
+            commands::disk_cleanup_quarantine_purge_all,
+            commands::get_system_cleaner_quarantine_days,
+            commands::set_system_cleaner_quarantine_days,
             commands::hide_monitor_window,
             commands::set_window_position,
             commands::reset_window_position,
@@ -848,12 +932,17 @@ fn main() {
             commands::update_sticky_note_content,
             commands::update_sticky_note_color,
             commands::set_sticky_note_position,
+            commands::set_sticky_note_size,
+            commands::reset_sticky_note_size,
             commands::show_sticky_note,
             commands::collect_sticky_note,
             commands::collect_all_notes,
             commands::show_all_notes,
             commands::delete_sticky_note,
             commands::save_sticky_note_image,
+            commands::import_sticky_note_image,
+            commands::copy_sticky_note_image,
+            commands::delete_sticky_note_image,
             commands::get_sticky_note_images_dir,
             commands::restore_pinned_notes,
             commands::show_sticky_notes_manager,
@@ -911,10 +1000,19 @@ fn main() {
             commands::set_quick_input_history_enabled,
             commands::set_quick_input_highlight,
             commands::confirm_quick_input_hold,
+            commands::set_quick_input_wheel_parents,
+            commands::back_quick_input_wheel,
             commands::get_quick_input_snippets,
             commands::set_quick_input_snippets,
             commands::get_quick_input_snippets_enabled,
             commands::set_quick_input_snippets_enabled,
+            commands::get_quick_input_sound_enabled,
+            commands::set_quick_input_sound_enabled,
+            commands::get_quick_input_sound_style,
+            commands::set_quick_input_sound_style,
+            commands::get_quick_input_sound_volume,
+            commands::set_quick_input_sound_volume,
+            commands::preview_quick_input_sound,
             commands::get_quick_input_history,
             commands::clear_quick_input_history,
             commands::remove_quick_input_history_item,
@@ -929,6 +1027,26 @@ fn main() {
             commands::unpin_window,
             commands::unpin_all_windows,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // 用 `.build(..).run(callback)` 而不是裸 `.run(..)`：这里要挂一层**退出兜底**。
+        //
+        // `SetSystemCursor` 改的是**系统级**箭头，还原句柄是本进程 `CopyIcon` 出来的副本 ——
+        // 进程一没就再也还不了，用户会一直看到取色笔 / 准星直到重启。目前显式收尾点有三处
+        // （托盘 quit、`exit_app`、更新安装），但每新增一条退出路径都会**静默**漏掉它
+        // （更新安装就是这么漏的）。这层兜底让"优雅退出"这一整类路径自动覆盖。
+        //
+        // ⚠️ 它兜不住**非优雅**退出：崩溃、被任务管理器结束，以及更新插件内部的
+        // `std::process::exit(0)`（那条只能在 `updater::install_update` 里显式收尾）。
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // 退出时取消正在跑的清理任务：半途被杀会留下「删了一半」的目录树
+                if let Some(state) = _app_handle.try_state::<disk_cleanup::CleanState>() {
+                    state.request_cancel();
+                }
+                crate::hooks::mouse::stop_color_pick();
+                crate::hooks::mouse::stop_window_pin();
+                crate::window_pin::cleanup();
+            }
+        });
 }

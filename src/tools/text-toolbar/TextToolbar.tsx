@@ -847,9 +847,9 @@ function FloatingToolbar() {
   const handleClearSelect = async (optionId: string) => {
     if (!selection) return;
     const result = clearText(selection.text, optionId as Parameters<typeof clearText>[1]);
-    // 后端 replace_selection 拒绝空字符串，清除结果为空时直接返回
+    // 后端 replace_selection 拒绝空字符串，清除结果为空时提示用户而非静默返回
     if (!result) {
-      resetToDefault();
+      showError("清除结果为空，文本未修改");
       return;
     }
     const ok = await replaceSelectionText(result);

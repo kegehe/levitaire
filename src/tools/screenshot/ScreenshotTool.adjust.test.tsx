@@ -9,8 +9,17 @@ const mockInvoke = vi.mocked(invoke);
 /** 选区固定为 (100,100)-(300,200)。底图按 1 CSS px = 1 画布像素返回，便于断言标注坐标。 */
 const SEL = { left: 100, top: 100, width: 200, height: 100 };
 
+/**
+ * 每次 strokeRect 时的 lineWidth（与 stubCanvas() 返回的 strokeRects 一一对应）。
+ * 标注线宽只能靠它观察：drawRect/drawArrow/drawBrush 都是「先设 lineWidth 再 strokeRect」，
+ * 而编辑手柄走 rect/arc，不会混进来。stubCanvas() 每次调用都会重置它。
+ */
+let annotatedStrokeWidths: number[] = [];
+
 function stubCanvas() {
   const strokeRects: number[][] = [];
+  annotatedStrokeWidths = [];
+  let lineWidth = 0;
   const noop = () => {};
   const ctx = {
     canvas: { width: 100, height: 50 },
@@ -25,11 +34,17 @@ function stubCanvas() {
     stroke: noop,
     fill: noop,
     // 标注的最终坐标靠这里观察：renderAll 会把每条已提交标注重画一遍
-    strokeRect: (...args: number[]) => strokeRects.push(args),
+    strokeRect: (...args: number[]) => {
+      strokeRects.push(args);
+      annotatedStrokeWidths.push(lineWidth);
+    },
     fillRect: noop,
     fillText: noop,
     arc: noop,
     closePath: noop,
+    // 选中标注时 drawEditHandles 会用到（框类手柄画方块、移动类画虚线包围盒）
+    rect: noop,
+    setLineDash: noop,
     measureText: () => ({ width: 10 }) as TextMetrics,
     getImageData: () => ({ data: [128, 128, 128, 255] }) as unknown as ImageData,
     set strokeStyle(_v: string) {},
@@ -40,9 +55,11 @@ function stubCanvas() {
     get fillStyle() {
       return "";
     },
-    set lineWidth(_v: number) {},
+    set lineWidth(v: number) {
+      lineWidth = v;
+    },
     get lineWidth() {
-      return 0;
+      return lineWidth;
     },
     set lineJoin(_v: string) {},
     set lineCap(_v: string) {},
@@ -307,10 +324,11 @@ describe("ScreenshotTool 选区调整", () => {
 
     const body = document.querySelector(".ss-adjust-body") as HTMLElement;
     const callsBefore = captureCalls().length;
+    // 从空白处起拖（(250,180) 不在标注上）：命中标注会进入标注编辑，这里是选区整体移动
     await act(async () => {
-      fireEvent.pointerDown(body, { clientX: 200, clientY: 150, pointerId: 3 });
-      fireEvent.pointerMove(body, { clientX: 250, clientY: 170, pointerId: 3 });
-      fireEvent.pointerUp(body, { clientX: 250, clientY: 170, pointerId: 3 });
+      fireEvent.pointerDown(body, { clientX: 250, clientY: 180, pointerId: 3 });
+      fireEvent.pointerMove(body, { clientX: 300, clientY: 200, pointerId: 3 });
+      fireEvent.pointerUp(body, { clientX: 300, clientY: 200, pointerId: 3 });
     });
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
@@ -397,9 +415,9 @@ describe("ScreenshotTool 选区调整", () => {
     const body = document.querySelector(".ss-adjust-body") as HTMLElement;
     const callsBefore = captureCalls().length;
     await act(async () => {
-      fireEvent.pointerDown(body, { clientX: 200, clientY: 150, pointerId: 8 });
-      fireEvent.pointerMove(body, { clientX: 250, clientY: 170, pointerId: 8 });
-      fireEvent.pointerUp(body, { clientX: 250, clientY: 170, pointerId: 8 });
+      fireEvent.pointerDown(body, { clientX: 250, clientY: 180, pointerId: 8 });
+      fireEvent.pointerMove(body, { clientX: 300, clientY: 200, pointerId: 8 });
+      fireEvent.pointerUp(body, { clientX: 300, clientY: 200, pointerId: 8 });
       await new Promise((r) => setTimeout(r, 0));
     });
 
@@ -464,5 +482,262 @@ describe("ScreenshotTool 选区调整", () => {
     });
     expect(screen.getByRole("button", { name: "移动" }).className).toContain("ss-tool-active");
     expect(document.querySelector(".ss-adjust-body")).not.toBeNull();
+  });
+
+  /**
+   * 连续移动后立即松手：必须以**最后一次**移动的坐标重截。
+   *
+   * 守护「调整会话必须同步记住最新选区」这条契约：第一次移动落地（触发一次渲染）后
+   * 紧接着第二次移动并立刻松手，若 endAdjust 读到的是被渲染同步覆盖过的旧值，就会按
+   * 中间位置重截，甚至因与 anchor 相等而误判为「原地点击」、直接丢弃整次调整。
+   * （这条曾被 rAF 合并提交的改动破坏过，故保留为长期回归。）
+   */
+  it("连续移动后立即松手：以最后一次移动的坐标重截", async () => {
+    stubCanvas();
+    await enterAnnotating();
+    const body = document.querySelector(".ss-adjust-body") as HTMLElement;
+    const callsBefore = captureCalls().length;
+
+    // 第一次移动：等它落地并完成一次渲染（此时 state 与 ref 是一致的）
+    await act(async () => {
+      fireEvent.pointerDown(body, { clientX: 200, clientY: 150, pointerId: 11 });
+      fireEvent.pointerMove(body, { clientX: 260, clientY: 150, pointerId: 11 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    // 第二次移动：不等这次更新完成渲染，直接松手
+    await act(async () => {
+      fireEvent.pointerMove(body, { clientX: 320, clientY: 200, pointerId: 11 });
+      fireEvent.pointerUp(body, { clientX: 320, clientY: 200, pointerId: 11 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    const calls = captureCalls();
+    expect(calls.length).toBe(callsBefore + 1);
+    // 起点 (200,150) → 终点 (320,200)：位移 +120 / +50，选区 SEL(100,100,200x100) 整体平移
+    expect(calls[calls.length - 1][1]).toEqual({
+      left: SEL.left + 120,
+      top: SEL.top + 50,
+      width: SEL.width,
+      height: SEL.height,
+    });
+  });
+
+  /**
+   * 标注「画完之后可调整」：在移动工具下，鼠标落在已提交标注的边缘/内部即进入编辑，
+   * 未命中标注时才落回选区整体移动。rect 画在画布物理 (50,30)-(100,60)。
+   */
+  it("移动工具下悬停标注边缘：光标变为缩放光标", async () => {
+    stubCanvas();
+    await enterAnnotating();
+    await drawRectAnnotation();
+    const body = document.querySelector(".ss-adjust-body") as HTMLElement;
+    await act(async () => {
+      fireEvent.pointerMove(body, { clientX: 200, clientY: 145, pointerId: 30 });
+    });
+    expect(body.style.cursor).toBe("ew-resize");
+  });
+
+  it("移动工具下拖标注右边：缩放该标注（不改选区、不重截），Ctrl+Z 可回退", async () => {
+    const strokeRects = stubCanvas();
+    await enterAnnotating();
+    await drawRectAnnotation();
+
+    const body = document.querySelector(".ss-adjust-body") as HTMLElement;
+    const callsBefore = captureCalls().length;
+    await act(async () => {
+      // 右边中点：物理 (100,45) → client (200,145)
+      fireEvent.pointerDown(body, { clientX: 200, clientY: 145, pointerId: 21 });
+      fireEvent.pointerMove(body, { clientX: 230, clientY: 145, pointerId: 21 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 拖动中：draft 顶替原标注，已按新宽度重绘
+    expect(strokeRects[strokeRects.length - 1]).toEqual([50, 30, 80, 30]);
+
+    await act(async () => {
+      fireEvent.pointerUp(body, { clientX: 230, clientY: 145, pointerId: 21 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 右边被拖 +30：宽 50 → 80，左边固定不动；且没有触发选区重截
+    expect(strokeRects[strokeRects.length - 1]).toEqual([50, 30, 80, 30]);
+    expect(captureCalls().length).toBe(callsBefore);
+
+    // 一次拖动算一步撤销：Ctrl+Z 回到拖动前的宽 50
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(strokeRects[strokeRects.length - 1]).toEqual([50, 30, 50, 30]);
+  });
+
+  it("移动工具下拖标注内部：整体移动该标注（选区不动）", async () => {
+    const strokeRects = stubCanvas();
+    await enterAnnotating();
+    await drawRectAnnotation();
+
+    const body = document.querySelector(".ss-adjust-body") as HTMLElement;
+    const callsBefore = captureCalls().length;
+    await act(async () => {
+      // 内部点：物理 (75,45) → client (175,145)；拖到 (185,155) 即位移 (10,10)
+      fireEvent.pointerDown(body, { clientX: 175, clientY: 145, pointerId: 22 });
+      fireEvent.pointerMove(body, { clientX: 185, clientY: 155, pointerId: 22 });
+      fireEvent.pointerUp(body, { clientX: 185, clientY: 155, pointerId: 22 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 标注整体平移 (10,10)；选区未动、也没重截
+    expect(strokeRects[strokeRects.length - 1]).toEqual([60, 40, 50, 30]);
+    expect(captureCalls().length).toBe(callsBefore);
+    expect((document.querySelector(".ss-selection-box") as HTMLElement).style.left).toBe(
+      `${SEL.left}px`,
+    );
+  });
+
+  /**
+   * 线宽滚轮：在「移动」工具下选中标注后，鼠标悬停在它上面滚轮即可改线宽。
+   * 一次滚轮爆发用空闲定时器收口成**一步撤销**（否则 index 式撤销栈会被几十条同样的编辑塞满）。
+   */
+  it("选中标注后滚轮调线宽：一次滚轮爆发只算一步撤销", async () => {
+    stubCanvas();
+    await enterAnnotating();
+    await drawRectAnnotation();
+    const body = document.querySelector(".ss-adjust-body") as HTMLElement;
+
+    // 点选该标注（右边中点按下抬起，无位移）
+    await act(async () => {
+      fireEvent.pointerDown(body, { clientX: 200, clientY: 145, pointerId: 41 });
+      fireEvent.pointerUp(body, { clientX: 200, clientY: 145, pointerId: 41 });
+    });
+    expect(annotatedStrokeWidths[annotatedStrokeWidths.length - 1]).toBe(5);
+
+    // 连滚 3 格（上滚 = 加粗）：预览立即生效（draft 顶替显示）
+    await act(async () => {
+      for (let i = 0; i < 3; i++) {
+        fireEvent.wheel(body, { clientX: 200, clientY: 145, deltaY: -100 });
+      }
+    });
+    expect(annotatedStrokeWidths[annotatedStrokeWidths.length - 1]).toBe(8);
+
+    // 等空闲定时器到点：收口成一步（仍是 8）
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 600));
+    });
+    expect(annotatedStrokeWidths[annotatedStrokeWidths.length - 1]).toBe(8);
+
+    // 一次 Ctrl+Z 直接回到 5：说明 3 格合并成了一版，而不是逐格回退
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(annotatedStrokeWidths[annotatedStrokeWidths.length - 1]).toBe(5);
+  });
+
+  it("未选中标注时滚轮不改任何标注", async () => {
+    const strokeRects = stubCanvas();
+    await enterAnnotating();
+    await drawRectAnnotation();
+    const body = document.querySelector(".ss-adjust-body") as HTMLElement;
+
+    await act(async () => {
+      fireEvent.wheel(body, { clientX: 200, clientY: 145, deltaY: -100 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 600));
+    });
+    // 线宽没变
+    expect(annotatedStrokeWidths[annotatedStrokeWidths.length - 1]).toBe(5);
+
+    // 也没产生编辑版本：第一次 Ctrl+Z 直接撤掉整个矩形（末次渲染不再画它）
+    const before = strokeRects.length;
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(strokeRects.length).toBe(before);
+  });
+
+  /**
+   * 回归（最高危的竞态）：滚轮编辑挂起时去拖选区边角/整体移动 —— 选区手柄是
+   * .ss-adjust-body 的兄弟节点，不会走 body 的钩子。若不在 startAdjust 里先收口，
+   * commitAdjusted 的 translate 只平移已提交项，随后定时器用「平移前坐标」的 draft 提交，
+   * 去重取末次值 → 标注会弹回原位。
+   */
+  it("滚轮挂起时去移动选区：先落定线宽，标注随屏幕内容一起平移", async () => {
+    const strokeRects = stubCanvas();
+    await enterAnnotating();
+    await drawRectAnnotation();
+    const body = document.querySelector(".ss-adjust-body") as HTMLElement;
+
+    // 先点选标注
+    await act(async () => {
+      fireEvent.pointerDown(body, { clientX: 200, clientY: 145, pointerId: 51 });
+      fireEvent.pointerUp(body, { clientX: 200, clientY: 145, pointerId: 51 });
+    });
+
+    // 滚一格（线宽 5 → 6），不等空闲定时器：让它保持挂起
+    await act(async () => {
+      fireEvent.wheel(body, { clientX: 200, clientY: 145, deltaY: -100 });
+    });
+
+    // 立刻从空白处拖选区移动 (+50,+20)
+    await act(async () => {
+      fireEvent.pointerDown(body, { clientX: 250, clientY: 180, pointerId: 52 });
+      fireEvent.pointerMove(body, { clientX: 300, clientY: 200, pointerId: 52 });
+      fireEvent.pointerUp(body, { clientX: 300, clientY: 200, pointerId: 52 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 即使挂起的定时器随后到点，也不应把坐标改回去
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 600));
+    });
+
+    // 线宽已落定为 6；标注（原物理 (50,30)-(100,60)）随选区平移 (-50,-20) 到 (0,10)-(50,30)
+    expect(annotatedStrokeWidths[annotatedStrokeWidths.length - 1]).toBe(6);
+    expect(strokeRects[strokeRects.length - 1]).toEqual([0, 10, 50, 30]);
+  });
+
+  /**
+   * 回归：工具栏的「撤销」按钮不走键盘钩子 —— 若不在按钮路径上先落定挂起的滚轮编辑，
+   * 按钮先撤销（index 回退），随后空闲定时器再 commit 一版，会把刚撤销掉的编辑又推回来。
+   */
+  it("滚轮挂起时点工具栏「撤销」按钮：先落定再撤销，不会被定时器推回", async () => {
+    stubCanvas();
+    await enterAnnotating();
+    await drawRectAnnotation();
+    const body = document.querySelector(".ss-adjust-body") as HTMLElement;
+
+    // 点选标注后滚一格（5 → 6），不等空闲定时器
+    await act(async () => {
+      fireEvent.pointerDown(body, { clientX: 200, clientY: 145, pointerId: 61 });
+      fireEvent.pointerUp(body, { clientX: 200, clientY: 145, pointerId: 61 });
+    });
+    await act(async () => {
+      fireEvent.wheel(body, { clientX: 200, clientY: 145, deltaY: -100 });
+    });
+
+    // 点工具栏的「撤销」按钮（不是 Ctrl+Z）
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    });
+    // 再等过空闲窗口：即使定时器到点，也不该把宽度改回去
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 600));
+    });
+
+    // 撤销的是「滚轮那一步」，矩形仍在、线宽回到 5
+    expect(annotatedStrokeWidths[annotatedStrokeWidths.length - 1]).toBe(5);
   });
 });

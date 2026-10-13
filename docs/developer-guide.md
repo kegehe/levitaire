@@ -468,6 +468,117 @@ pub fn count_words(text: String) -> Result<(usize, usize), String> {
     约定：开合决策由**窗口自己**用 `WebviewWindow.isVisible()` 裁决，再走既有的 show / hide
     唯一路径；跨窗口只传「意图」，不传「状态」。用例见 `ToolPalette.test.tsx`
     （原生可见 → 收起；原生已隐藏 → 打开），悬浮球侧只负责区分「面板还没被创建过」。
+23. **便利贴的可拖拽尺寸与「自动高度」互斥，且要能区分 resize 事件是谁引起的**（`StickyNote.tsx`）：
+    - 尺寸语义：`notes.json` 里 `width` / `height` **0 = 自动**（宽 264、高随内容），> 0 = 用户拖出来的
+      固定尺寸。前端 `scheduleResize()` 在手动模式下**直接 return** —— 不拦的话，用户刚拖好的窗口会
+      被下一次「量内容」打回原形。回自动只能靠 `reset_sticky_note_size`（双击右下角纸角）。
+    - **`onResized` 分不清「用户拖」与「前端量完内容 setSize」**，两者一模一样：自动高度每次内容变高
+      都会 setSize，不排除这个回声，用户多打两行字就永久切进手动尺寸。做法同第 19 条的
+      `position_save_suppress`：自己 setSize 前打一个 400ms 抑制窗口（`PROGRAMMATIC_RESIZE_*`）。
+    - **尺寸从 `onResized` 的 payload 里拿**（Tauri 的 `WindowEvent::Resized` 带的就是新物理尺寸），
+      不要回读 `innerSize()`：回读是每个 resize 事件两次 IPC（拖拽时 ~60 次/秒），而且异步结果可能
+      乱序 —— 后发的读先返回，中间尺寸就被当成最终尺寸落盘。物理→逻辑的 scale 换算推迟到**防抖
+      回调**里做一次（scale 只在换显示器缩放时才变），挂载时读一次缓存进 `scaleRef` 供事件线程用。
+    - **后端 `show_note_window` 只允许给「手动尺寸」的便签 `set_size`**。窗口是只隐藏不销毁的：
+      「收起（含 Alt+F4）→ 唤出」时页面还活着，后端这次程序性缩放会被前端当成「用户拖过窗口边」，
+      ⇒ 永久切手动模式并把回落值（264×180）落盘，而自动高度的高度本来就是前端量内容下发的、
+      被压回 180 后不会再纠偏，高便签只剩顶上一条。自动尺寸时不要碰尺寸，让前端自己量。
+    - 除了 400ms 抑制窗口，还有一道**几何**判据 `isAutoSizeEcho(logicalW, logicalH, expectedHeight)`：
+      逻辑尺寸等于自动模式的目标（宽 = `NOTE_WIDTH`、高 = 上次量到的高度，容差 1px）就说明这次变化
+      不是用户拖的。它兜住两件抑制窗口兜不住的事：迟到的回声、以及**把便签拖到另一台缩放不同的
+      显示器**（系统按新缩放重排窗口：物理尺寸变了、逻辑尺寸没变，只看物理值根本分不出来）。
+      纯函数，用例直接钉（`StickyNote.test.tsx`）。
+    - **模式位与尺寸数值要分开**：`manualMode`（state 驱动 `data-manual`）+ `manualModeRef`
+      （立即生效，给定时器/原生回调读）。尺寸数值**不进 state** —— 手动模式的布局靠 `height: 100%`
+      跟着窗口走，把数值放进 state 会让每个 resize 事件都重渲染一遍组件。
+    - 手柄走 `startResizeDragging("SouthEast")`（需要窗口 `resizable(true)` + `min_inner_size` +
+      capabilities 的 `core:window:allow-start-resize-dragging`）。**「窗口四边也能拖」这件事没有
+      源码依据**：tao 的 `RESIZABLE` 会带 WS_SIZEBOX（= WS_THICKFRAME），但无边框窗在 `WM_NCCALCSIZE`
+      里把整个窗口算作客户区（tao-0.35 `platform_impl/windows/window.rs` 的 undecorated 分支
+      `return LRESULT(0)`）—— 四边的隐形命中区是否仍生效只能在真机上确认。所以手柄是唯一确定的
+      入口，提示文案与文档都别把「拖窗口边缘」写成可用功能（失败提示指向「双击纸角回自动高度」）。
+      手柄上还叠了「双击回自动高度」，所以 mousedown 要放掉
+      `event.detail > 1`（否则第二下又开一次缩放模态循环，dblclick 可能收不到）。
+    - 手动模式下 `.sn-window` 才能 `height: 100%`（自动模式的窗口高是**量出来的**，写 100% 会互相追逐，
+      同第 10 条的四条硬约束），且 `.sn-editor` 的 `min-height` 要归零（96px 会把卡片内容顶出
+      `overflow: hidden` 的卡片，footer 与纸角手柄一起被裁掉）。
+    - 自动模式下 `.sn-window` 的宽度**钉死 264**（手动模式才 `width: 100%`）：量高度必须与窗口
+      当时的宽度无关，否则从较宽的手动尺寸双击回自动高度时，那一刻量出的高度是按宽布局算的，
+      宽度切回 264 后文字换行更多、底部（footer 与纸角手柄）被裁在窗口外，用户不打个字就永远纠不回来。
+      这条在 CSS 里（`StickyNote.css` 的 `.sn-window`），与 `constants.ts::NOTE_WIDTH` 同值。
+    - **改变卡片高度的任何 UI 状态都要重新量一次**：提示条（`.sn-notice`）插在 header 与正文之间，
+      出现时会把 footer 与纸角手柄一起往下推 ~30px，消失时又推回去 —— 只在 `onInput` / 图片 `load`
+      量高的话，用户刚触发的提示会自己把「新建 / 删除 / 改大小」三个入口顶出窗口。见 `notice` 的 effect。
+    - 「往后别再漏夹」这类守卫靠**数量对齐**：`windowInstanceGuard.test.ts` 按文件比对
+      `setSize(` 与 `clampWindowToWorkArea(` 的出现次数。新增 clamp 调用点要么走同一个 helper
+      （`clampToWorkArea`），要么就得同步调整那个守卫并说明理由。
+24. **浏览器原生光标的高度不受我们控制 ⇒ 图片行要自己画光标**：Chromium 的光标高度跟**字体度量**
+    走（实测 14px 字号恒定 18px 高，把图片设成 `inline-block` / 加大 `line-height` 都不管用），而且
+    图片后面紧跟换行时光标会被画到**下一行行首**。所以「光标高度 = 图片高度」只能自绘：
+    `StickyNote.tsx::syncImageCaret` 在 `.sn-editor-wrap`（无内边距的定位锚）里摆一根 2px 竖条。
+    - 几何单独抽成纯函数 `caretBarGeometry(imgRect, wrapRect)`，**不要在组件里就地算**：
+      这类坐标一旦错就是「条飘到别处」，而 happy-dom 的 `getBoundingClientRect()` 恒为 0，
+      只有当纯函数能在用例里钉（`StickyNote.test.tsx` 里的第一组数字直接取自预览页真实量到的值）。
+    - 收起时机有两类，其中**窗口失焦不能只看 DOM 焦点**：WebView2 在窗口失去激活时**不会**把
+      `document.activeElement` 从正文上摘掉，只判断 `editor.contains(activeElement)` 的话这根自绘的条
+      会一直留着（而浏览器已经不画原生光标了，看着就是一根卡住的残影）⇒ 另记一位 `windowFocusedRef`
+      （`window` 的 blur/focus 各更新一次）。
+    - 两条踩过的口径：**左边界取图片右缘 +3px（外侧）**，贴内侧时满宽截图会正好压在图片自己的边框上
+      （看起来像「图片右边框变粗了」）；**不要补 `scrollTop`** —— 这根条挂在**不滚动**的
+      `.sn-editor-wrap` 上（滚动的是里面的 `.sn-editor`），补了正文一滚动整根条就整体偏移。
+    - 高度取「图片 ∩ 可视区」那一段，完全不可见时收起：否则图片被滚出视口后这根条会画到编辑器外面，
+      压在卡片顶栏上。
+    - 图片本身必须是 `display: inline-block` 且**不要** `user-select: none`：前者让行盒高度跟着图片撑起来
+      （框选高亮能整块盖住图片），后者会让框选直接跳过图片（想复制一张图必须先精确框住它）。
+    - `cursor` 相关的浏览器行为不能靠推导，用真实渲染验证：`.workbuddy/design/sticky-note-resize/`
+      下的预览页 + 出图脚本会打印光标条的内联定位（实测 `left: 211px; top: 23px; height: 116px`）。
+    - **手抄的预览页会抄漏规则 ⇒ 还有一条「真组件 + 真 CSS」的核对路径**（两者的图互为印证）：
+      `src/tools/sticky-note/__real_dom__.test.tsx` 把真组件渲染出的 DOM 导出、拼上
+      `global.css` / `tokens.css` / `StickyNote.css` 的**原文**生成核对板，并打印每个状态的
+      `offsetWidth/offsetHeight` 硬数字；`.workbuddy/design/sticky-note-resize/buildRealDom.mjs`
+      出图并核对（自动模式宽度必须 264、手动/失败态卡片必须撑满、卡片不能比窗口高）。
+      实测数字可作参照：空便签 264×210、提示条出现后 264×258（**差 48px**，这就是「提示条要
+      重新量窗口高」的量化依据）、手动态卡片 328×262 = 窗口减上下内边距 38。
+      跑法（默认跳过，因为它会往 `.workbuddy` 写文件）：
+      `LEVITAIRE_REAL_DOM=1 npx vitest run src/tools/sticky-note/__real_dom__.test.tsx` →
+      `node .workbuddy/design/sticky-note-resize/buildRealDom.mjs`。
+      ⚠️ 量尺寸别挂 `requestAnimationFrame`：无头 Chrome + `--virtual-time-budget` 下 `dump-dom`
+      实测拿不到回报，用 `load → setTimeout(0)` + 一个兜底定时器。
+25. **右键接管的唯一入口是 `setContextMenuInterceptor`**：通用文本菜单在「没有选区」时
+    「复制」是灰的，而图片本来就选不中 —— 便利贴的图片右键因此改成「复制图片 / 删除图片」
+    （`showAppMenu` 复用同一套浮层样式与边缘夹取）。拦截器只有一份、按窗口注册，组件卸载时清掉；
+    **返回 `false` 才是「交回通用菜单」**，所以拦截器里只判断自己认识的目标，其余一律放行。
+    守卫：`StickyNote.test.tsx` 同时钉「图片上是图片菜单」与「图片以外仍是 剪切/复制/粘贴/全选」。
+26. **便利贴图片目录只允许一种格式（PNG），来源格式白名单受 `image` crate 特性约束**：
+    `sticky_note::save_image` 会把非 PNG 来源（JPG / GIF / BMP）解码后重新编码成 PNG 落盘，
+    好处是「复制到剪贴板」（`clipboard::copy_image` 只认 PNG）与令牌解析都只有一条路径；
+    代价是 GIF 动画丢失。`IMAGE_SOURCE_EXTS` 与 `Cargo.toml` 里 `image` 的 features
+    （png/gif/jpeg/bmp）必须同步 —— 把 WebP 加进白名单前得先给 image 加 `webp` 特性。
+    同一份清单在**三处**：前端 `constants.ts::IMG_REL_PATTERN`（水合时决定令牌是否还原成
+    图片）、后端 `IMAGE_SOURCE_EXTS`（落盘白名单）与 `is_generated_image_file`（挡越界路径）。
+    只改前端就会出现「渲染成图片、但复制/删除命令被 `validated_image_rel` 拒绝」的两套口径。
+    - ⚠️ **格式判定一律按字节内容（`with_guessed_format`），不看调用方给的扩展名 / MIME**：
+      剪贴板里的图片项 MIME 与真实字节并不总一致 —— 从资源管理器复制一张 .jpg 再粘贴，剪贴板给的是
+      `image/jpeg`，照扩展名写就会把 JPEG 字节塞进 `img_*.png`（页面靠嗅探还能显示，
+      「复制到剪贴板」却必然解码失败）。统一走 `ensure_png()`，写盘与进剪贴板两条路共用；
+      用例 `ensure_png_normalizes_by_content_not_by_name` 钉住「GIF 字节必须被转成真 PNG」。
+    - 前端粘接管道的 MIME 白名单（`PASTABLE_IMAGE_TYPES`）只放行**能落盘**的位图类型；但**落不下来的
+      图片类型也要接管**（`image/svg+xml`、未开 webp 特性的 webp）：放给浏览器默认行为，它会插一张靠
+      `blob:` / `data:` 的 `<img>`，而 `serializeEditorText` 只认 `data-note-img` ⇒ 用户在正文里
+      **看不到任何令牌**：图看着贴进来了、重新打开便签却没有，比「什么都不发生」更糟。
+      接管时自己把随图文字补回去（`clipboardData.getData("text/plain")`），再用 `showNotice`
+      说明格式不被支持。用例 `StickyNote.test.tsx` 的「不支持的图片格式」条钉住这三点。
+    - 拖入 / 粘贴图片前先要 `ensureEditorReady()`：读取中 / 读取失败态下正文还没挂载，命令却已经把
+      文件写进图片目录了 —— 插不进去的那张图从此是孤儿文件（要等整张便签删除才清），用户还以为是
+      贴成功了。**拦在发命令之前**，别拦在插入时。
+    - 短暂提示条（`.sn-notice`）必须在**所有**渲染分支都渲染：只放在主分支的话，读取失败态里的
+      图片导入失败 / 格式不支持 / 正文没准备好这些提示会全部静音（`noticeBar` 变量）。
+    - ⚠️ 正文令牌里的相对路径是**不可信输入**：`validated_image_rel` 逐段校验
+      （目录段 == 清洗后的 note id、文件名严格匹配 `img_<数字>_<数字>.<白名单扩展名>`），
+      否则「删除图片」就是一个任意文件删除洞（用例 `validated_image_rel_only_accepts_own_filenames`
+      列了 12 种越界写法）。
+    - 尺寸上限（`NOTE_MAX_*` = 10000）**只是脏数据的理智边界**，别压低：大屏用户合法拖得到的尺寸
+      一旦被后端改小，前端存进去的值与落盘值就不一致，下次开窗会静默回缩。
 
 ---
 
@@ -535,8 +646,10 @@ npm run typecheck && npm run lint
 
 ### 2. 构建发布版本
 
-发版前需先补齐两个不入库的二进制资源（见 README「构建与资源」）：
+发版前需先补齐两个不入库的二进制资源（见 README「可选二进制资源」）：
 `src-tauri/binaries/ffmpeg.exe` 与 `src-tauri/libs/onnxruntime.dll`。
+其中 ffmpeg 为**精简构建**（约 4 MB，官方 full build 的 1/57），可用
+`./scripts/build-ffmpeg-lite.sh --install` 从源码重建（含组件清单与验证步骤）。
 
 ```bash
 # 一条命令：升版本号 → 打包(--bundles nsis, 含发版叠加配置) → 签名 → 生成 latest.json

@@ -16,12 +16,50 @@ import "./QuickInputTool.css";
 interface WheelItem {
   /** 展示标签 */
   label: string;
-  /** 选中后输入的完整文本 */
+  /** 选中后输入的完整文本（分组条目可为空串） */
   text: string;
   /** 是否为剪贴板历史项（历史项用不同颜色区分） */
   isHistory: boolean;
   /** 是否为收藏的历史项（收藏项固定在历史区最前，用星标区分） */
   isFavorite?: boolean;
+  /**
+   * 子转盘条目（仅预设片段支持分组）。非空 = 父级扇区：
+   * 点击/按住确认落在其上时进入子转盘（方案 2 · 整盘置换），不输入文本。
+   */
+  children?: WheelItem[];
+}
+
+/** 子转盘导航栈的一级：换级时压入的父级标签与其所在层条目 */
+interface NavLevel {
+  label: string;
+  items: WheelItem[];
+}
+
+/**
+ * 片段 JSON 单条 → 转盘条目（归一化）：
+ * - 带 children 的条目为父级分组，允许空 text（转盘中点击进入子级，不输入文本）；
+ * - 子项里无 text 的条目被剔除，children 全部无效时视同普通条目；
+ * - 无 text 且无有效 children 的条目无效，返回 null。
+ */
+export function snippetToWheelItem(snippet: {
+  label?: string;
+  text?: string;
+  children?: Array<{ label?: string; text?: string }>;
+}): WheelItem | null {
+  const children = (snippet.children ?? [])
+    .filter((child): child is { label?: string; text: string } => !!child.text)
+    .map((child) => ({
+      label: child.label || child.text.slice(0, 20),
+      text: child.text,
+      isHistory: false,
+    }));
+  if (!snippet.text && !children.length) return null;
+  return {
+    label: snippet.label || snippet.text?.slice(0, 20) || "未命名分组",
+    text: snippet.text ?? "",
+    isHistory: false,
+    children: children.length ? children : undefined,
+  };
 }
 
 /** 后端 quick-input-start / quick-input-mouse-move 事件 payload */
@@ -70,12 +108,18 @@ const LABEL_ARC_FILL_RATIO = 0.82;
 const TANGENTIAL_LAYOUT_THRESHOLD = 4;
 const TEXT_STROKE_PADDING = 2;
 const MIN_TYPE_ICON_SIZE = 5;
-/** 中心完整标签：最大字号 */
-const CENTER_FONT_MAX = 13;
-/** 中心完整标签：最小字号 */
-const CENTER_FONT_MIN = 8;
-/** 中心完整标签：高亮时中心圆放大显示完整文本的最大半径。 */
-const CENTER_MAX_R = 42;
+/** 中心胶囊：字号（方案 A：圆角胶囊替代放大中心圆，完整展示高亮标签） */
+const CAPSULE_FONT_SIZE = 12;
+/** 中心胶囊：单侧水平内边距 */
+const CAPSULE_PADDING_X = 13;
+/** 中心胶囊：高度 */
+const CAPSULE_HEIGHT = 28;
+/** 中心胶囊：圆角半径（= 高度一半，全圆角） */
+const CAPSULE_RADIUS = 14;
+/** 中心胶囊：最大宽度，超出按宽度截断追加省略号 */
+const CAPSULE_MAX_WIDTH = 180;
+/** 中心胶囊：最小宽度，短标签时保持视觉稳定 */
+const CAPSULE_MIN_WIDTH = 56;
 /** 少量扇区时的标签绝对宽度上限。 */
 const MAX_LABEL_WIDTH = 125;
 
@@ -110,6 +154,24 @@ export function fitText(text: string, maxWidth: number, fontSize: number): strin
     out += ch;
   }
   return out + ellipsis;
+}
+
+/**
+ * 中心胶囊几何：根据高亮标签计算显示文本与胶囊宽度（逻辑 px）。
+ * 空标签返回 null（不渲染胶囊，由死区圆替代）；
+ * 超长标签先按最大内宽截断，宽度再钳制在 [CAPSULE_MIN_WIDTH, CAPSULE_MAX_WIDTH]。
+ */
+export function getCapsuleGeometry(
+  label: string,
+  maxWidth: number = CAPSULE_MAX_WIDTH,
+): { text: string; width: number } | null {
+  if (!label) return null;
+  const shown = fitText(label, maxWidth - CAPSULE_PADDING_X * 2, CAPSULE_FONT_SIZE);
+  const width = Math.max(
+    CAPSULE_MIN_WIDTH,
+    Math.min(maxWidth, textWidth(shown, CAPSULE_FONT_SIZE) + CAPSULE_PADDING_X * 2),
+  );
+  return { text: shown, width };
 }
 
 export interface WheelItemLayout {
@@ -246,6 +308,9 @@ function QuickInputTool() {
   const pendingHoldConfirmRef = useRef<HoldConfirmRequestPayload | null>(null);
   /** 当前显示器缩放比例：move 坐标为物理像素，死区/半径需按此换算成视觉（逻辑）像素 */
   const scaleRef = useRef(1);
+  /** 子转盘导航栈：换级压入父级标签与该层条目，返回时弹出。ref 镜像供事件回调读最新值 */
+  const [navStack, setNavStack] = useState<NavLevel[]>([]);
+  const navStackRef = useRef<NavLevel[]>([]);
 
   // 同步设置页主题（独立窗口，需手动读取 localStorage）
   useEffect(() => {
@@ -274,14 +339,17 @@ function QuickInputTool() {
       invoke<boolean>("get_quick_input_snippets_enabled").catch(() => true),
     ]);
     const next: WheelItem[] = [];
-    // 预设词（关闭时仅展示剪贴板历史）
+    // 预设词（关闭时仅展示剪贴板历史）；带 children 的片段为父级分组条目
     if (snippetsEnabled && snippetsJson) {
       try {
-        const parsed = JSON.parse(snippetsJson) as Array<{ label: string; text: string }>;
+        const parsed = JSON.parse(snippetsJson) as Array<{
+          label?: string;
+          text?: string;
+          children?: Array<{ label?: string; text?: string }>;
+        }>;
         for (const s of parsed) {
-          if (s.text) {
-            next.push({ label: s.label || s.text.slice(0, 20), text: s.text, isHistory: false });
-          }
+          const item = snippetToWheelItem(s);
+          if (item) next.push(item);
         }
       } catch {
         /* 忽略解析错误 */
@@ -298,8 +366,53 @@ function QuickInputTool() {
         });
       }
     }
+    syncLevel(next);
+  };
+
+  /** 渲染某一级条目：更新状态镜像，并把「父级扇区索引」同步给后端供点击/松开裁决 */
+  const syncLevel = (next: WheelItem[]) => {
     setItems(next);
     itemsRef.current = next;
+    const parentIndices = next
+      .map((it, i) => (it.children?.length ? i : -1))
+      .filter((i) => i >= 0);
+    void invoke("set_quick_input_wheel_parents", { indices: parentIndices }).catch((err) =>
+      console.error("set_quick_input_wheel_parents failed:", err),
+    );
+  };
+
+  /** 进入子转盘：当前层压栈并渲染子项。目标不是父级时返回 false */
+  const expandInto = (index: number): boolean => {
+    const item = itemsRef.current[index];
+    if (!item?.children?.length) return false;
+    navStackRef.current = [
+      ...navStackRef.current,
+      { label: item.label, items: itemsRef.current },
+    ];
+    setNavStack(navStackRef.current);
+    syncLevel(item.children);
+    setHighlightedAndSync(-1);
+    return true;
+  };
+
+  /** 纯状态出栈：恢复上一层条目（调用前须已获得后端 back 确认） */
+  const popLevelLocal = (): boolean => {
+    const stack = navStackRef.current;
+    if (!stack.length) return false;
+    const parent = stack[stack.length - 1];
+    navStackRef.current = stack.slice(0, -1);
+    setNavStack(navStackRef.current);
+    syncLevel(parent.items);
+    setHighlightedAndSync(-1);
+    return true;
+  };
+
+  /** 请求后端返回上一级，成功后出栈；会话已结束时保持原状 */
+  const popLevel = async (): Promise<boolean> => {
+    const accepted = await invoke<boolean>("back_quick_input_wheel", {
+      generation: generationRef.current,
+    }).catch(() => false);
+    return accepted && popLevelLocal();
   };
 
   /** 高亮扇区变化时同步给后端，供「按住唤起」模式在松开触发键时读取选中项 */
@@ -336,6 +449,31 @@ function QuickInputTool() {
       if (!pending || !readyRef.current) return;
       pendingHoldConfirmRef.current = null;
       const selectedIndex = syncHighlightedAt(pending.x, pending.y);
+      if (selectedIndex < 0 && navStackRef.current.length) {
+        // 按住模式在死区松开：子级视为「返回上一级」，根级维持原取消语义
+        void invoke<boolean>("back_quick_input_wheel", { generation: pending.generation })
+          .then((accepted) => {
+            if (accepted) popLevelLocal();
+          })
+          .catch((err) => console.error("quick input back failed:", err));
+        return;
+      }
+      const target = selectedIndex >= 0 ? itemsRef.current[selectedIndex] : undefined;
+      if (target?.children?.length) {
+        // 按住模式在父级扇区松开：后端保持会话并返回 true，前端换级进入子转盘
+        void invoke<boolean>("confirm_quick_input_hold", {
+          generation: pending.generation,
+          selectedIndex,
+        })
+          .then((expanded) => {
+            if (expanded) expandInto(selectedIndex);
+          })
+          .catch((err) => {
+            console.error("quick input hold confirmation failed:", err);
+            void invoke("cancel_quick_input_wheel", { generation: pending.generation });
+          });
+        return;
+      }
       invoke("confirm_quick_input_hold", {
         generation: pending.generation,
         selectedIndex: selectedIndex >= 0 ? selectedIndex : null,
@@ -348,6 +486,9 @@ function QuickInputTool() {
     const handleStart = async ({ x, y, generation = 0 }: CoordPayload) => {
       if (generation > 0 && generation <= generationRef.current) return;
       if (generation > 0) generationRef.current = generation;
+      // 新会话从根级开始：清空上一会话残留的子转盘导航栈
+      navStackRef.current = [];
+      setNavStack([]);
       const requestId = ++startRequestRef.current;
       // 窗口中心对准鼠标位置；贴近屏幕边缘时对光标所在显示器的工作区做边界回弹
       const monitor = await monitorFromPoint(x, y).catch(() => null);
@@ -467,9 +608,9 @@ function QuickInputTool() {
       setVisible(false);
       await win.hide();
       const currentItems = itemsRef.current;
-      // 仅当后端明确给出有效选中索引时才输入；否则视为取消，不做任何粘贴。
-      if (idx >= 0 && idx < currentItems.length) {
-        const item = currentItems[idx];
+      const item = idx >= 0 ? currentItems[idx] : undefined;
+      // 同点击路径：仅对有文本的叶子条目执行输入，防父级同步滞后时空文本粘贴
+      if (item?.text) {
         await invoke("quick_input_paste", { text: item.text }).catch((err) =>
           console.error("quick_input_paste failed:", err),
         );
@@ -477,12 +618,31 @@ function QuickInputTool() {
     });
 
     // 鼠标点击选中：由 mouse hook 在转盘激活时命中后触发。
-    // 点击发生后后端已退出转盘模式，此处读取当前高亮项执行输入并隐藏窗口。
-    const unlistenClick = listen<{ generation?: number }>("quick-input-click", async (event) => {
+    // 三种分支：死区点击（子级=返回上级 / 根级=取消）、父级点击（换级展开）、
+    // 叶子点击（结束后读取当前高亮项执行输入并隐藏窗口）。
+    const unlistenClick = listen<{
+      generation?: number;
+      deadZone?: boolean;
+      expand?: boolean;
+    }>("quick-input-click", async (event) => {
       if (
         event.payload.generation !== undefined &&
         event.payload.generation !== generationRef.current
       ) {
+        return;
+      }
+      if (event.payload.deadZone) {
+        if (navStackRef.current.length) {
+          await popLevel();
+        } else {
+          await invoke("cancel_quick_input_wheel", {
+            generation: event.payload.generation ?? generationRef.current,
+          }).catch((err) => console.error("quick input cancel failed:", err));
+        }
+        return;
+      }
+      if (event.payload.expand) {
+        expandInto(highlightedRef.current);
         return;
       }
       invalidatePendingStart();
@@ -490,11 +650,28 @@ function QuickInputTool() {
       setVisible(false);
       await win.hide();
       const currentItems = itemsRef.current;
-      if (idx >= 0 && idx < currentItems.length) {
-        const item = currentItems[idx];
+      const item = idx >= 0 ? currentItems[idx] : undefined;
+      // 只对有文本的叶子条目执行输入：分组条目 text 为空（且父级索引同步存在
+      // IPC 滞后窗口，此处可能把分组当叶子），空文本粘贴会走完整管线且抢占
+      // PASTE_INFLIGHT 吞掉后续真实粘贴。
+      if (item?.text) {
         await invoke("quick_input_paste", { text: item.text }).catch((err) =>
           console.error("quick_input_paste failed:", err),
         );
+      }
+    });
+
+    // Esc（keyboard hook 转发）：子级返回上一级，根级关闭转盘。
+    // overlay 无焦点收不到 DOM keydown，必须经全局钩子转发。
+    const unlistenEsc = listen<{ generation?: number }>("quick-input-esc", async (event) => {
+      const gen = event.payload.generation;
+      if (gen !== undefined && gen !== generationRef.current) return;
+      if (navStackRef.current.length) {
+        await popLevel();
+      } else {
+        await invoke("cancel_quick_input_wheel", {
+          generation: gen ?? generationRef.current,
+        }).catch((err) => console.error("quick input cancel failed:", err));
       }
     });
 
@@ -525,6 +702,7 @@ function QuickInputTool() {
       unlistenHoldConfirm.then((fn) => fn());
       unlistenConfirm.then((fn) => fn());
       unlistenClick.then((fn) => fn());
+      unlistenEsc.then((fn) => fn());
     };
   }, [win]);
 
@@ -564,24 +742,18 @@ function QuickInputTool() {
     });
   }, [items, highlighted]);
 
-  // 高亮条目的完整标签：用于中心放大圆内展示，补偿扇区标签因拥挤而截断的信息
+  // 高亮条目的完整标签：用于中心胶囊展示，补偿扇区标签因拥挤而截断的信息
   const activeLabel =
     highlighted >= 0 && highlighted < items.length ? items[highlighted].label : "";
-  const centerHint = useMemo(() => {
-    if (!activeLabel) return null;
-    // 文本宽度尽量适配中心圆，字号从大到小收缩
-    const maxInnerWidth = 2 * (CENTER_MAX_R - 6);
-    let fontSize = CENTER_FONT_MAX;
-    let width = textWidth(activeLabel, fontSize);
-    while (width > maxInnerWidth && fontSize > CENTER_FONT_MIN) {
-      fontSize -= 1;
-      width = textWidth(activeLabel, fontSize);
-    }
-    const shown = fitText(activeLabel, maxInnerWidth, fontSize);
-    const shownWidth = textWidth(shown, fontSize);
-    const radius = Math.max(DEAD_ZONE, Math.min(CENTER_MAX_R, shownWidth / 2 + 7));
-    return { text: shown, fontSize, radius };
-  }, [activeLabel]);
+  const centerHint = useMemo(() => getCapsuleGeometry(activeLabel), [activeLabel]);
+
+  // 子级面包屑：无高亮且处于子级时，中心胶囊显示「‹ 父级标签」，死区点击即返回。
+  // 面包屑宽度上限压到 140，减少与左右两侧扇区标签的视觉挤压。
+  const breadcrumb = navStack.length ? `‹ ${navStack[navStack.length - 1].label}` : null;
+  const breadcrumbHint = useMemo(
+    () => (breadcrumb ? getCapsuleGeometry(breadcrumb, 140) : null),
+    [breadcrumb],
+  );
 
   // 分组分隔线：预设词全部在前、历史项在后，交界处 = 第一个历史项的起始扇区边界。
   // 仅当两类条目同时存在时绘制；全预设或全历史时无需分隔。
@@ -642,17 +814,20 @@ function QuickInputTool() {
               }
               data-history={s.item.isHistory ? "true" : "false"}
             />
-            <text
-              x={s.cx}
-              y={s.cy}
-              transform={s.rotate}
-              className="quick-input-label"
-              textAnchor={s.anchor}
-              dominantBaseline="middle"
-              style={{ fontSize: s.fontSize }}
-            >
-              {s.label}
-            </text>
+            {/* 高亮扇区标签由中心胶囊完整展示，此处隐藏避免与胶囊文字重叠 */}
+            {!(s.isActive && centerHint) && (
+              <text
+                x={s.cx}
+                y={s.cy}
+                transform={s.rotate}
+                className="quick-input-label"
+                textAnchor={s.anchor}
+                dominantBaseline="middle"
+                style={{ fontSize: s.fontSize }}
+              >
+                {s.label}
+              </text>
+            )}
             {/* 类型标记：预设词=书签、历史=时钟、收藏历史=星标；与底色差异共同区分条目类型 */}
             <g
               transform={`translate(${s.ix - s.iconSize / 2} ${s.iy - s.iconSize / 2})`}
@@ -673,33 +848,69 @@ function QuickInputTool() {
         ))}
         {/* 分组分隔线：预设词区与剪贴板历史区的分界 */}
         {divider && <line {...divider} className="quick-input-divider" />}
-        <circle
-          cx={WINDOW_SIZE / 2}
-          cy={WINDOW_SIZE / 2}
-          r={DEAD_ZONE + 4}
-          className="quick-input-center-ring"
-          pointerEvents="none"
-        />
-        {/* 中心死区圆：高亮时放大并在其中展示完整标签，补偿扇区标签截断的信息 */}
-        <circle
-          cx={WINDOW_SIZE / 2}
-          cy={WINDOW_SIZE / 2}
-          r={centerHint ? centerHint.radius : DEAD_ZONE}
-          className={
-            centerHint ? "quick-input-center quick-input-center-active" : "quick-input-center"
-          }
-        />
+        {/* 无高亮且无面包屑（根级）时保留中心死区圆作为稳定锚点；有高亮时由胶囊替代 */}
+        {!centerHint && !breadcrumbHint && (
+          <>
+            <circle
+              cx={WINDOW_SIZE / 2}
+              cy={WINDOW_SIZE / 2}
+              r={DEAD_ZONE + 4}
+              className="quick-input-center-ring"
+              pointerEvents="none"
+            />
+            <circle
+              cx={WINDOW_SIZE / 2}
+              cy={WINDOW_SIZE / 2}
+              r={DEAD_ZONE}
+              className="quick-input-center"
+            />
+          </>
+        )}
+        {/* 中心胶囊：完整展示高亮标签，宽度随文本自适应（上限内截断） */}
         {centerHint && (
-          <text
-            x={WINDOW_SIZE / 2}
-            y={WINDOW_SIZE / 2}
-            className="quick-input-center-label"
-            textAnchor="middle"
-            dominantBaseline="middle"
-            style={{ fontSize: centerHint.fontSize }}
-          >
-            {centerHint.text}
-          </text>
+          <g>
+            <rect
+              x={WINDOW_SIZE / 2 - centerHint.width / 2}
+              y={WINDOW_SIZE / 2 - CAPSULE_HEIGHT / 2}
+              width={centerHint.width}
+              height={CAPSULE_HEIGHT}
+              rx={CAPSULE_RADIUS}
+              className="quick-input-capsule"
+            />
+            <text
+              x={WINDOW_SIZE / 2}
+              y={WINDOW_SIZE / 2}
+              className="quick-input-capsule-label"
+              textAnchor="middle"
+              dominantBaseline="middle"
+              style={{ fontSize: CAPSULE_FONT_SIZE }}
+            >
+              {centerHint.text}
+            </text>
+          </g>
+        )}
+        {/* 子级面包屑胶囊：弱化描边 + 弱化文字，与「当前选中」胶囊区分 */}
+        {!centerHint && breadcrumbHint && (
+          <g>
+            <rect
+              x={WINDOW_SIZE / 2 - breadcrumbHint.width / 2}
+              y={WINDOW_SIZE / 2 - CAPSULE_HEIGHT / 2}
+              width={breadcrumbHint.width}
+              height={CAPSULE_HEIGHT}
+              rx={CAPSULE_RADIUS}
+              className="quick-input-capsule quick-input-capsule-breadcrumb"
+            />
+            <text
+              x={WINDOW_SIZE / 2}
+              y={WINDOW_SIZE / 2}
+              className="quick-input-capsule-label quick-input-capsule-breadcrumb-label"
+              textAnchor="middle"
+              dominantBaseline="middle"
+              style={{ fontSize: CAPSULE_FONT_SIZE }}
+            >
+              {breadcrumbHint.text}
+            </text>
+          </g>
         )}
       </svg>
     </div>

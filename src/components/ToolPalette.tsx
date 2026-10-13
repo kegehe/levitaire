@@ -30,22 +30,40 @@ import {
   ensureTodoWindow,
   ensureUtilityHubWindow,
   ensureStickyNotesManagerWindow,
+  ensureSystemCleanerWindow,
   waitForNewMonitorWindowReady,
 } from "../utils/toolWindows";
 import { clampWindowToWorkArea } from "../utils/panelWindow";
 import "./ToolPalette.css";
 
+/** 各工具卡片的强调色（边框 / 底色 / 发光 / 图标 / 开关都取自它）。
+ *
+ * 判据是**感知色差**而不是色相数字或十六进制是否相同：任意两色按 CIEDE2000 算出的
+ * ΔE 都要 ≥10。这个 10 是本仓库给面板定的下限——色块只有 38px（.palette-card-icon）、
+ * 卡面底色又只是 20% 混色的淡底，比大色块更难分辨，不是通用的感知阈值。踩过两次：
+ * todo / system-monitor / quick-input 曾共用 «#1d9e75»；utility-hub 与 todo 也曾是两个
+ * 不同的绿（#2f9e78 / #1d9e75），色差却只有 ΔE 1.2，一样分不出来。守卫用例见
+ * ToolPalette.test.tsx。
+ *
+ * 当前全表最紧的一对是 sketch × sticky-notes（ΔE 12.5，跨分组），余量不大，加新工具时
+ * 先算一遍色差再落笔。另：utility-hub 的绿与滚动导航窗口「精确模式」状态点同色
+ * （src/tools/scroll-navigator/ScrollNavigator.css:56），单独改卡片色两者就会对不上。 */
 const TOOL_COLORS: Record<string, string> = {
   "utility-hub": "#2f9e78",
-  todo: "#1d9e75",
+  // 青柠绿：色相 80°，与 utility-hub 的绿拉开到 ΔE 19.6（改前只有 1.2），
+  // 也避开 sketch / sticky-notes / system-cleaner 那一串琥珀橙
+  todo: "#6a921c",
   sketch: "#ba7517",
   "text-toolbar": "#378add",
   screenshot: "#d4537e",
-  "system-monitor": "#1d9e75",
+  // 青蓝：与同组 timer 紫、sticky-notes 琥珀、system-cleaner 橙互不干扰
+  "system-monitor": "#1a9cb8",
   timer: "#7f77dd",
   recording: "#e24b4a",
-  "quick-input": "#1d9e75",
+  // 品红：与同组 text-toolbar 蓝拉开，也不与任何「绿色系」工具混淆
+  "quick-input": "#b14fbf",
   "sticky-notes": "#d99a1b",
+  "system-cleaner": "#d06a3a",
 };
 
 /** 面板分组顺序。
@@ -70,6 +88,9 @@ function ToolPalette() {
   const syncGeneration = useRef(0);
   const [activating, setActivating] = useState(false);
   const [activateError, setActivateError] = useState<string | null>(null);
+  // 「全部开启 / 全部关闭」的批量失败汇总。逐项失败的细节只写进控制台，用户看不到，
+  // 界面上必须指出「哪几项没生效」，否则只能对着面板一条条试。
+  const [batchError, setBatchError] = useState<string | null>(null);
   const activationLock = useRef(false);
   const [isVisible, setIsVisible] = useState(true);
   // 标题左侧的品牌标记用悬浮球当前角色图标：外观与 orb 完全一致，且跟随设置实时变化
@@ -184,7 +205,7 @@ function ToolPalette() {
     lastSizeRef.current = size;
     getCurrentWebviewWindow().setSize(new LogicalSize(width, height)).catch(console.error);
     clampWindowToWorkArea(width, height);
-  }, [enabledIds, activateError]);
+  }, [enabledIds, activateError, batchError]);
 
   // 与后端真值同步：text-toolbar / screenshot 的启用状态持久化于 config.json，
   // localStorage 仅作前端默认。挂载时及每次窗口获焦时以后端为准修正勾选，
@@ -400,17 +421,30 @@ function ToolPalette() {
   //
   // 连点也要排队：第二次点击在第一轮跑完后才读取 enabledIdsRef，语义上才是最新的真值。
   const batchQueue = useRef<Promise<void>>(Promise.resolve());
+  // 只有最后排队的那一批有权写提示：中途追加的批次会让上一批的结论过期
+  // （上一批失败的项可能已被这一批成功改回），过期的汇总会误导用户。
+  const batchGeneration = useRef(0);
   const applyToAll = (target: boolean) => {
+    const generation = ++batchGeneration.current;
     // 先吞掉上一批可能留下的异常：`.then` 在 rejected 链上会跳过回调，
     // 若队列里留下一环 rejected，之后所有排队的批次都不再执行
     // ——「全部开启 / 全部关闭」就变成点了没反应。
     batchQueue.current = batchQueue.current
       .catch(() => {})
       .then(async () => {
+        // 逐项失败不中断整批（其余项仍应生效），只把失败的名字攒起来最后汇总
+        const failed: string[] = [];
         for (const tool of orderedTools) {
           if (enabledIdsRef.current.includes(tool.id) === target) continue;
-          await toggleEnabled(tool.id);
+          const ok = await toggleEnabled(tool.id);
+          if (!ok) failed.push(tool.name);
         }
+        if (generation !== batchGeneration.current) return;
+        setBatchError(
+          failed.length === 0
+            ? null
+            : `${target ? "全部开启" : "全部关闭"}有 ${failed.length} 项未生效：${failed.join("、")}`,
+        );
       });
     return batchQueue.current;
   };
@@ -498,6 +532,16 @@ function ToolPalette() {
             console.error("show_monitor_window 失败:", err);
             // 窗口创建了但显示失败：销毁残留窗口，避免下次 ensureMonitorWindow 拿到无效引用
             setActivateError(`系统监控启动失败: ${err}`);
+            return;
+          }
+          await hidePalette();
+        } else if (tool.id === "system-cleaner") {
+          try {
+            await ensureSystemCleanerWindow();
+            await invoke("show_system_cleaner_window");
+          } catch (err) {
+            console.error("show_system_cleaner_window 失败:", err);
+            setActivateError(`系统清理启动失败: ${err}`);
             return;
           }
           await hidePalette();
@@ -605,6 +649,11 @@ function ToolPalette() {
               {activateError}
             </button>
           )}
+          {batchError && (
+            <button className="palette-error" onClick={() => setBatchError(null)} type="button">
+              {batchError}
+            </button>
+          )}
           {groupedTools.map(({ category, tools }) => (
             <section
               className="palette-section"
@@ -623,7 +672,13 @@ function ToolPalette() {
                       key={tool.id}
                       data-tool-id={tool.id}
                       title={`${tool.name}：${tool.description}`}
-                      style={{ "--tool-color": TOOL_COLORS[tool.id] ?? "#1d9e75" } as CSSProperties}
+                      style={
+                        {
+                          // 未登记颜色的工具回落到主题强调色（.palette-card 的默认值），
+                          // 不要硬编码某个工具的颜色——那会让新工具和该工具撞色。
+                          "--tool-color": TOOL_COLORS[tool.id] ?? "var(--color-accent)",
+                        } as CSSProperties
+                      }
                       onClick={() => {
                         if (Date.now() - lastDragAt.current > 220) handleActivate(tool);
                       }}

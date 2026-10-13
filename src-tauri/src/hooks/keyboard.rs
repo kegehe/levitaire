@@ -248,6 +248,21 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                             let _ = app_clone.emit_to("toolbar", "toolbar-esc", ());
                         });
                     }
+                } else if crate::quick_input::is_active() {
+                    // 快速输入转盘激活时，Esc 同理只转发给转盘前端（overlay 无焦点收不到 DOM 事件）：
+                    // 子级 = 返回上一级，根级 = 关闭转盘，由前端按当前层级裁决。
+                    // 只转发不吞键，emit 在独立线程执行，避免钩子回调超时被系统卸载。
+                    if let Some(app) = KB_STATE.app_handle.get() {
+                        let generation = crate::quick_input::state().generation;
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            let _ = app_clone.emit_to(
+                                "quick-input-overlay",
+                                "quick-input-esc",
+                                serde_json::json!({ "generation": generation }),
+                            );
+                        });
+                    }
                 }
                 // 不吞键，继续传递，前端 keydown 也能收到
             }

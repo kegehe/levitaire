@@ -99,7 +99,7 @@
   stroke-width: 1.5px;
 }
 
-/* 中心环：让死区与扇区边界保持清晰 */
+/* 中心环：让死区与扇区边界保持清晰（仅无高亮时显示） */
 .quick-input-center-ring {
   fill: none;
   stroke: var(--color-border);
@@ -107,33 +107,40 @@
   opacity: 0.9;
 }
 
-/* 中心死区圆：作为稳定的选择反馈锚点 */
+/* 中心死区圆：无高亮时的稳定选择反馈锚点 */
 .quick-input-center {
   fill: var(--color-bg-elevated);
   stroke: var(--color-border-strong);
   stroke-width: 1.75;
   filter: drop-shadow(0 2px 4px rgb(0 0 0 / 0.2));
-  transition:
-    r 0.15s ease,
-    fill 0.15s ease,
-    stroke 0.15s ease;
 }
 
-.quick-input-center-active {
-  fill: var(--color-brand-subtle);
+/* 中心胶囊：完整展示高亮标签，宽度随文本自适应 */
+.quick-input-capsule {
+  fill: var(--color-bg-elevated);
   stroke: var(--color-accent);
-  stroke-width: 2;
+  stroke-width: 1.5;
 }
 
-/* 中心完整标签：高亮扇区的原始文本，居中显示在放大的中心圆内 */
-.quick-input-center-label {
+/* 中心胶囊标签 */
+.quick-input-capsule-label {
   fill: var(--color-fg);
   font-weight: 600;
   letter-spacing: 0;
   paint-order: stroke fill;
-  stroke: var(--color-brand-subtle);
-  stroke-width: 1.5px;
+  stroke: var(--color-bg-elevated);
+  stroke-width: 2px;
+  stroke-linejoin: round;
   pointer-events: none;
+}
+
+/* 面包屑胶囊（子级返回锚点）：弱化描边与文字，与「当前选中」胶囊区分 */
+.quick-input-capsule-breadcrumb {
+  stroke: var(--color-border-strong);
+}
+
+.quick-input-capsule-breadcrumb-label {
+  fill: var(--color-fg-muted);
 }
 
 /* 类型标记图标：预设词=书签、历史=时钟 */
@@ -164,31 +171,21 @@
   opacity: 0.9;
 }
 
+/* 中心胶囊过渡：切换高亮扇区时宽度平滑变化（仅几何属性，Chrome 对 SVG 几何属性可过渡）。
+   必须声明在 reduced-motion 块之前，否则同特异性下 media query 的 transition:none 被覆盖 */
+.quick-input-capsule {
+  transition:
+    x 0.15s ease,
+    width 0.15s ease;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .quick-input-wheel {
     animation: none;
   }
 
   .quick-input-sector,
-  .quick-input-center {
+  .quick-input-capsule {
     transition: none;
-  }
-}
-
-.quick-input-center-active {
-  animation: quick-input-center-pulse 1.8s ease-in-out infinite;
-}
-@keyframes quick-input-center-pulse {
-  0%,
-  100% {
-    filter: drop-shadow(0 0 0 transparent);
-  }
-  50% {
-    filter: drop-shadow(0 0 5px var(--color-accent-subtle));
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .quick-input-center-active {
-    animation: none;
   }
 }

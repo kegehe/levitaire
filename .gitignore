@@ -270,3 +270,11 @@ levitaire-debug.log
 /test_ocr.html
 /test_ocr_text.txt
 /theme-lab.html
+
+# 本地调试 / 备份残留：源码副本与临时改名的副本一律不入库
+# （`*.mutation_bak` 由变异测试改写源码时产生，是整份源码拷贝，与真源码内容
+#   重复，入库后每次全仓搜索都会命中两份，容易改错文件）
+*.bak
+*.orig
+*.rej
+*_bak

@@ -123,6 +123,17 @@ pub struct AppConfig {
     /// 系统监控工具是否启用（仅启用时 palette 卡片可激活）。默认 false
     #[serde(default = "default_system_monitor_enabled")]
     pub system_monitor_enabled: bool,
+    /// 系统清理工具是否启用（仅启用时 palette 卡片可激活）。默认 false
+    #[serde(default = "default_system_cleaner_enabled")]
+    pub system_cleaner_enabled: bool,
+    /// 隔离区保留期（天）。0 = 不自动清理（由用户显式彻底删除）。
+    /// 用户数据条目例外：即使为 0 也必须先隔离（§10.1）。默认 7
+    #[serde(default = "default_system_cleaner_quarantine_days")]
+    pub system_cleaner_quarantine_days: u32,
+    /// 看门狗设置（JSON 字符串，前端解析）：见 `disk_cleanup::watchdog::WatchSettings`。
+    /// 空串表示使用默认值（默认**关闭**）
+    #[serde(default)]
+    pub system_cleaner_watch: String,
     /// 系统监控采集间隔（毫秒），默认 1000。运行时可改，无需重启采集线程
     #[serde(default = "default_system_monitor_interval_ms")]
     pub system_monitor_interval_ms: u64,
@@ -208,6 +219,17 @@ pub struct AppConfig {
     /// 快速输入转盘预设提示词是否启用（关闭后转盘不再展示预设词，已保存内容保留）。默认 true
     #[serde(default = "default_quick_input_snippets_enabled")]
     pub quick_input_snippets_enabled: bool,
+    /// 快速输入转盘的音效反馈是否启用（唤出 / 切扇区 / 确认 / 取消）。
+    /// 默认 false：转盘是高频操作，新增的声音不该在用户没同意前就出现在耳朵里。
+    #[serde(default = "default_quick_input_sound_enabled")]
+    pub quick_input_sound_enabled: bool,
+    /// 快速输入转盘音效风格："minimal" = 极简（只保留唤出与确认）、
+    /// "standard" = 标准（含切扇区刻度音）、"none" = 静音。默认 standard。
+    #[serde(default = "default_quick_input_sound_style")]
+    pub quick_input_sound_style: String,
+    /// 快速输入转盘音效音量，0-100（整数百分比）。默认 45。
+    #[serde(default = "default_quick_input_sound_volume")]
+    pub quick_input_sound_volume: u32,
     /// 便利贴工具是否启用（仅启用时 palette 卡片可激活）。默认 false，避免新增常驻窗口打扰现有用户。
     #[serde(default)]
     pub sticky_notes_enabled: bool,
@@ -256,6 +278,39 @@ fn default_quick_input_snippets_enabled() -> bool {
     true
 }
 
+/// 快速输入音效默认关闭：转盘会被高频唤起，声音必须由用户主动打开。
+fn default_quick_input_sound_enabled() -> bool {
+    false
+}
+
+fn default_quick_input_sound_style() -> String {
+    SOUND_STYLE_STANDARD.to_string()
+}
+
+fn default_quick_input_sound_volume() -> u32 {
+    45
+}
+
+/// 音效风格取值。音量上限统一为 100（百分比）。
+///
+/// 只有 `minimal` 与 `standard` 会出现在设置页的下拉框里。`none` 是**归一化兜底**，
+/// 不对外暴露：静音的正确表达是「关掉音效反馈开关」，否则会出现「开关是开的但我听不到」
+/// 这种自相矛盾的状态。保留它是因为对陈旧 / 手改过的配置文件不能直接当作非法值回退成
+/// standard —— 那会让一个本想静音的用户突然开始听到声音。
+pub const SOUND_STYLE_MINIMAL: &str = "minimal";
+pub const SOUND_STYLE_STANDARD: &str = "standard";
+pub const SOUND_STYLE_NONE: &str = "none";
+pub const SOUND_VOLUME_MAX: u32 = 100;
+
+/// 校验并归一化音效风格：非法值回退标准风格，避免持久化了脏值后转盘一声不响。
+pub fn normalize_sound_style(style: &str) -> &'static str {
+    match style.trim().to_lowercase().as_str() {
+        SOUND_STYLE_MINIMAL => SOUND_STYLE_MINIMAL,
+        SOUND_STYLE_NONE => SOUND_STYLE_NONE,
+        _ => SOUND_STYLE_STANDARD,
+    }
+}
+
 fn default_screenshot_enabled() -> bool {
     true
 }
@@ -278,6 +333,14 @@ fn default_text_toolbar_enabled() -> bool {
 
 fn default_system_monitor_enabled() -> bool {
     false
+}
+
+fn default_system_cleaner_enabled() -> bool {
+    false
+}
+
+fn default_system_cleaner_quarantine_days() -> u32 {
+    7
 }
 
 fn default_system_monitor_interval_ms() -> u64 {
@@ -333,6 +396,9 @@ impl Default for AppConfig {
             clear_options: Vec::new(),
             tts_config: String::new(),
             system_monitor_enabled: default_system_monitor_enabled(),
+            system_cleaner_enabled: default_system_cleaner_enabled(),
+            system_cleaner_quarantine_days: default_system_cleaner_quarantine_days(),
+            system_cleaner_watch: String::new(),
             system_monitor_interval_ms: default_system_monitor_interval_ms(),
             system_monitor_config: String::new(),
             pomodoro_config: String::new(),
@@ -361,6 +427,9 @@ impl Default for AppConfig {
             quick_input_history_enabled: default_quick_input_history_enabled(),
             quick_input_snippets: String::new(),
             quick_input_snippets_enabled: default_quick_input_snippets_enabled(),
+            quick_input_sound_enabled: default_quick_input_sound_enabled(),
+            quick_input_sound_style: default_quick_input_sound_style(),
+            quick_input_sound_volume: default_quick_input_sound_volume(),
             sticky_notes_enabled: false,
             utility_hub_enabled: default_utility_hub_enabled(),
         }
@@ -925,6 +994,107 @@ impl ConfigManager {
             .lock()
             .map_err(|e| format!("获取配置锁失败: {}", e))
             .map(|c| c.system_monitor_enabled)
+    }
+
+    /// 获取系统清理工具启用状态
+    pub fn get_system_cleaner_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.system_cleaner_enabled)
+    }
+
+    /// 更新系统清理工具启用状态并持久化
+    pub fn update_system_cleaner_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.system_cleaner_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    /// 获取看门狗设置。空串或解析失败一律回退到默认（**默认关闭**）——
+    /// 一个读不出来的设置绝不该让看门狗开始每天扫盘。
+    pub fn get_system_cleaner_watch(&self) -> Result<crate::disk_cleanup::watchdog::WatchSettings, String> {
+        let raw = self
+            .config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))?
+            .system_cleaner_watch
+            .clone();
+        if raw.trim().is_empty() {
+            return Ok(crate::disk_cleanup::watchdog::WatchSettings::default());
+        }
+        Ok(serde_json::from_str(&raw)
+            .map(|settings: crate::disk_cleanup::watchdog::WatchSettings| settings.normalized())
+            .unwrap_or_default())
+    }
+
+    /// 保存看门狗设置。
+    ///
+    /// `input` **没有监视目录字段**（`deny_unknown_fields`）—— 目录只能由后端通过
+    /// 目录对话框加入，前端提供路径这条通路根本不存在（I1）。
+    pub fn update_system_cleaner_watch(
+        &self,
+        input: &crate::disk_cleanup::watchdog::WatchSettingsInput,
+    ) -> Result<crate::disk_cleanup::watchdog::WatchSettings, String> {
+        let merged = self.get_system_cleaner_watch()?.apply(input);
+        let text = serde_json::to_string(&merged).map_err(|e| format!("序列化看门狗设置失败: {e}"))?;
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.system_cleaner_watch = text;
+        }
+        self.save_config()?;
+        Ok(merged)
+    }
+
+    /// 直接写入一份完整的看门狗设置（**只给后端自己调用**：加/删监视目录用）。
+    pub fn store_system_cleaner_watch(
+        &self,
+        settings: &crate::disk_cleanup::watchdog::WatchSettings,
+    ) -> Result<(), String> {
+        let text = serde_json::to_string(settings).map_err(|e| format!("序列化看门狗设置失败: {e}"))?;
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.system_cleaner_watch = text;
+        }
+        self.save_config()
+    }
+
+    /// 获取隔离区保留期（天）
+    pub fn get_system_cleaner_quarantine_days(&self) -> Result<u32, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.system_cleaner_quarantine_days)
+    }
+
+    /// 更新隔离区保留期。只接受 `0 | 7 | 14 | 30`：**拒绝任意值**，
+    /// 免得写出一个 3 天之类没人预期的保留期，而隔离区的语义就是"给足反悔时间"。
+    pub fn update_system_cleaner_quarantine_days(&self, days: u32) -> Result<(), String> {
+        if !crate::disk_cleanup::quarantine::RETENTION_CHOICES.contains(&days) {
+            return Err(format!(
+                "保留期只能是 {:?} 之一，收到 {days}",
+                crate::disk_cleanup::quarantine::RETENTION_CHOICES
+            ));
+        }
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.system_cleaner_quarantine_days = days;
+        }
+        self.save_config()
     }
 
     /// 更新系统监控工具启用状态并持久化
@@ -1496,6 +1666,67 @@ impl ConfigManager {
                 .lock()
                 .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.quick_input_snippets_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    /// 获取快速输入转盘音效开关
+    pub fn get_quick_input_sound_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_sound_enabled)
+    }
+
+    /// 更新快速输入转盘音效开关并持久化。
+    pub fn update_quick_input_sound_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_sound_enabled = enabled;
+        }
+        self.save_config()
+    }
+
+    /// 获取快速输入转盘音效风格（已归一化，非法值回退 standard）
+    pub fn get_quick_input_sound_style(&self) -> Result<String, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| normalize_sound_style(&c.quick_input_sound_style).to_string())
+    }
+
+    /// 更新快速输入转盘音效风格并持久化（写入前归一化）
+    pub fn update_quick_input_sound_style(&self, style: String) -> Result<(), String> {
+        let normalized = normalize_sound_style(&style).to_string();
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_sound_style = normalized;
+        }
+        self.save_config()
+    }
+
+    /// 获取快速输入转盘音效音量（0-100，越界会被夹取）
+    pub fn get_quick_input_sound_volume(&self) -> Result<u32, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.quick_input_sound_volume.min(SOUND_VOLUME_MAX))
+    }
+
+    /// 更新快速输入转盘音效音量并持久化（越界夹取到 0-100）
+    pub fn update_quick_input_sound_volume(&self, volume: u32) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.quick_input_sound_volume = volume.min(SOUND_VOLUME_MAX);
         }
         self.save_config()
     }
@@ -2293,6 +2524,143 @@ mod tests {
             loaded.window_positions.get("monitor-overlay"),
             Some(&WindowPosition { x: 10, y: 20 })
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 音效反馈：默认全部走「关 / 标准 / 45%」。
+    #[test]
+    fn test_quick_input_sound_defaults() {
+        let config = AppConfig::default();
+        assert!(
+            !config.quick_input_sound_enabled,
+            "音效默认必须是关的：转盘会被高频唤起，声音应由用户主动打开"
+        );
+        assert_eq!(config.quick_input_sound_style, SOUND_STYLE_STANDARD);
+        assert_eq!(config.quick_input_sound_volume, 45);
+    }
+
+    /// 旧配置（没有这三个字段）加载时回落默认值，而不是报错或缺字段。
+    #[test]
+    fn test_quick_input_sound_missing_fields_use_defaults() {
+        let json = r#"{"ai":{"api_key":"","base_url":"","model":"","api_type":"anthropic"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.quick_input_sound_enabled);
+        assert_eq!(config.quick_input_sound_style, SOUND_STYLE_STANDARD);
+        assert_eq!(config.quick_input_sound_volume, 45);
+    }
+
+    /// 风格归一化：非法串一律回退 standard。
+    ///
+    /// 这条很关键 —— 脏值一旦落库，`set_sound_config` 会把它当成 standard，
+    /// 用户就再也关不掉刻度音；回退 standard 至少是「有声音且可预期」的状态。
+    #[test]
+    fn test_normalize_sound_style_falls_back_to_standard() {
+        // 两个合法值原样返回
+        assert_eq!(normalize_sound_style("minimal"), SOUND_STYLE_MINIMAL);
+        assert_eq!(normalize_sound_style("standard"), SOUND_STYLE_STANDARD);
+        // none 是内部哨兵，也必须能被识别（陈旧配置里可能有它）
+        assert_eq!(normalize_sound_style("none"), SOUND_STYLE_NONE);
+        // 大小写与空白容错
+        assert_eq!(normalize_sound_style("  MINIMAL  "), SOUND_STYLE_MINIMAL);
+        assert_eq!(normalize_sound_style("Standard"), SOUND_STYLE_STANDARD);
+        // 非法值回退，绝不原样返回
+        for bad in ["", "loud", "Nonee", "静音", "0"] {
+            assert_eq!(
+                normalize_sound_style(bad),
+                SOUND_STYLE_STANDARD,
+                "非法风格 {bad:?} 应回退 standard"
+            );
+        }
+    }
+
+    /// 风格落库时写的是归一化后的值：脏值不会被持久化。
+    #[test]
+    fn test_config_manager_sound_style_persists_normalized_value() {
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_qisound_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let config_path = tmp.join("config.json");
+
+        let manager = ConfigManager {
+            config: Mutex::new(AppConfig::default()),
+            config_path: config_path.clone(),
+        };
+
+        // 脏值不应被写入字段本身，落库的是 standard
+        manager
+            .update_quick_input_sound_style("LOUD!!".to_string())
+            .unwrap();
+        assert_eq!(
+            manager.get_quick_input_sound_style().unwrap(),
+            SOUND_STYLE_STANDARD
+        );
+
+        manager
+            .update_quick_input_sound_style("MINIMAL".to_string())
+            .unwrap();
+        assert_eq!(
+            manager.get_quick_input_sound_style().unwrap(),
+            SOUND_STYLE_MINIMAL
+        );
+
+        // 重新加载验证持久化的就是归一化值
+        let loaded = ConfigManager::load_config(&config_path);
+        assert_eq!(loaded.quick_input_sound_style, SOUND_STYLE_MINIMAL);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 音量越界必须夹取到 0-100，不能持久化出越界值。
+    #[test]
+    fn test_config_manager_sound_volume_clamps() {
+        let tmp = std::env::temp_dir().join(format!(
+            "levitaire_test_qisoundvol_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let config_path = tmp.join("config.json");
+
+        let manager = ConfigManager {
+            config: Mutex::new(AppConfig::default()),
+            config_path: config_path.clone(),
+        };
+
+        manager.update_quick_input_sound_volume(999).unwrap();
+        assert_eq!(manager.get_quick_input_sound_volume().unwrap(), 100);
+        manager.update_quick_input_sound_volume(0).unwrap();
+        assert_eq!(manager.get_quick_input_sound_volume().unwrap(), 0);
+        manager.update_quick_input_sound_volume(70).unwrap();
+        assert_eq!(manager.get_quick_input_sound_volume().unwrap(), 70);
+
+        let loaded = ConfigManager::load_config(&config_path);
+        assert_eq!(loaded.quick_input_sound_volume, 70);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 开关的 getter/setter 必须读写同一字段 —— 复制粘贴错字段会让开关「点不动」且不报错。
+    #[test]
+    fn test_config_manager_sound_enabled_roundtrip_is_isolated() {
+        let tmp = std::env::temp_dir().join(format!(
+            "levitaire_test_qisoundon_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let config_path = tmp.join("config.json");
+
+        let manager = ConfigManager {
+            config: Mutex::new(AppConfig::default()),
+            config_path: config_path.clone(),
+        };
+
+        assert!(!manager.get_quick_input_sound_enabled().unwrap());
+        manager.update_quick_input_sound_enabled(true).unwrap();
+        assert!(manager.get_quick_input_sound_enabled().unwrap());
+        // 不得串写到其它快速输入开关
+        manager.update_quick_input_sound_enabled(false).unwrap();
+        assert!(!manager.get_quick_input_sound_enabled().unwrap());
+        assert!(manager.get_quick_input_sound_style().is_ok());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

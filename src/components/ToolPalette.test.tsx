@@ -14,6 +14,7 @@ vi.mock("../utils/toolWindows", () => ({
   ensureTimerWindow: vi.fn(async () => ({})),
   ensureTodoWindow: vi.fn(async () => ({})),
   ensureUtilityHubWindow: vi.fn(async () => ({})),
+  ensureSystemCleanerWindow: vi.fn(async () => ({})),
   waitForNewMonitorWindowReady: vi.fn(async () => undefined),
 }));
 
@@ -30,6 +31,70 @@ async function flush() {
   // 「全部开启 / 全部关闭」是串行下发（逐项 await invoke），需要足够多的微任务轮次
   // 才能把整个批次跑完；轮次不够会让计数断言读到中间态。
   for (let i = 0; i < 200; i += 1) await Promise.resolve();
+}
+
+/** 感知色差（CIEDE2000），用来判「两张卡片是不是看着一个色」。
+ *
+ * ΔE 的量级：0 = 完全同色，1 上下是刚能辨出的差别，10 以上才算两个明确不同的颜色
+ * （通行解读）。面板的下限取 10，理由见 ToolPalette.tsx 的 TOOL_COLORS 注释。
+ * 公式与换算是标准实现，正确性由下面「色差实现与参考值一致」那条用例钉住——
+ * 否则公式被改坏时（比如恒返回大值）色差守卫会静默失效。 */
+function hexToLab(hex: string): [number, number, number] {
+  const [r, g, b] = [1, 3, 5].map((i) => {
+    const v = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  });
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  // sRGB → XYZ 用 IEC 61966-2-1 的精确矩阵（四位小数版本会把标准 Lab 值带偏 0.02）
+  const [fx, fy, fz] = [
+    (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047,
+    0.2126729 * r + 0.7151522 * g + 0.072175 * b,
+    (0.0193339 * r + 0.119192 * g + 0.9503041 * b) / 1.08883,
+  ].map(f);
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+
+function deltaE2000([L1, a1, b1]: number[], [L2, a2, b2]: number[]): number {
+  const [C1, C2] = [Math.hypot(a1, b1), Math.hypot(a2, b2)];
+  const Cb = (C1 + C2) / 2;
+  const G = 0.5 * (1 - Math.sqrt(Cb ** 7 / (Cb ** 7 + 25 ** 7)));
+  const [A1, A2] = [(1 + G) * a1, (1 + G) * a2];
+  const [c1, c2] = [Math.hypot(A1, b1), Math.hypot(A2, b2)];
+  // 色相角（度，0–360）；无彩度（a=b=0）时按 0 处理
+  const angle = (x: number, y: number) =>
+    x === 0 && y === 0 ? 0 : ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+  const [H1, H2] = [angle(A1, b1), angle(A2, b2)];
+  const dL = L2 - L1;
+  const dC = c2 - c1;
+  let dH = 0;
+  if (c1 * c2 !== 0) {
+    // 色相差取最短方向（±180° 内）
+    let dh = H2 - H1;
+    if (dh > 180) dh -= 360;
+    else if (dh < -180) dh += 360;
+    dH = 2 * Math.sqrt(c1 * c2) * Math.sin((dh * Math.PI) / 360);
+  }
+  const [Lb, Cp] = [(L1 + L2) / 2, (c1 + c2) / 2];
+  // 色相角均值要把跨 0/360 的两角绕到同一侧再平均
+  const Hp =
+    c1 * c2 === 0
+      ? H1 + H2
+      : (H1 + H2) / 2 + (Math.abs(H1 - H2) > 180 ? (H1 + H2 < 360 ? 180 : -180) : 0);
+  const rad = (deg: number) => (deg * Math.PI) / 180;
+  const T =
+    1 -
+    0.17 * Math.cos(rad(Hp - 30)) +
+    0.24 * Math.cos(rad(2 * Hp)) +
+    0.32 * Math.cos(rad(3 * Hp + 6)) -
+    0.2 * Math.cos(rad(4 * Hp - 63));
+  const Sl = 1 + (0.015 * (Lb - 50) ** 2) / Math.sqrt(20 + (Lb - 50) ** 2);
+  const Sc = 1 + 0.045 * Cp;
+  const Sh = 1 + 0.015 * Cp * T;
+  const Rc = 2 * Math.sqrt(Cp ** 7 / (Cp ** 7 + 25 ** 7));
+  // 蓝紫区（Hp≈275°）的旋转项
+  const dTheta = 30 * Math.exp(-(((Hp - 275) / 25) ** 2));
+  const Rt = -Math.sin(rad(2 * dTheta)) * Rc;
+  return Math.sqrt((dL / Sl) ** 2 + (dC / Sc) ** 2 + (dH / Sh) ** 2 + Rt * (dC / Sc) * (dH / Sh));
 }
 
 describe("ToolPalette", () => {
@@ -54,8 +119,8 @@ describe("ToolPalette", () => {
   it("从部分启用状态可一键全部关闭", async () => {
     const { container } = render(<ToolPalette />);
     await act(flush);
-    // 挂载后端同步后所有 getter 都为 true → 10/10 全启用
-    expect(container.querySelector(".palette-count")!.textContent).toContain("10/10");
+    // 挂载后端同步后所有 getter 都为 true → 11/11 全启用
+    expect(container.querySelector(".palette-count")!.textContent).toContain("11/11");
 
     const buttons = Array.from(
       container.querySelectorAll<HTMLButtonElement>(".palette-all-group button"),
@@ -67,7 +132,7 @@ describe("ToolPalette", () => {
     fireEvent.click(disableAllBtn);
     await act(flush);
 
-    expect(container.querySelector(".palette-count")!.textContent).toContain("0/10");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("0/11");
     expect(disableAllBtn).toBeDisabled();
     expect(enableAllBtn).not.toBeDisabled();
     expect(mockInvoke).toHaveBeenCalledWith("set_timer_enabled", { enabled: false });
@@ -89,12 +154,12 @@ describe("ToolPalette", () => {
 
     fireEvent.click(disableAllBtn);
     await act(flush);
-    expect(container.querySelector(".palette-count")!.textContent).toContain("0/10");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("0/11");
 
     fireEvent.click(enableAllBtn);
     await act(flush);
 
-    expect(container.querySelector(".palette-count")!.textContent).toContain("10/10");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("11/11");
     expect(mockInvoke).toHaveBeenCalledWith("set_timer_enabled", { enabled: true });
     expect(mockInvoke).toHaveBeenCalledWith("set_utility_hub_enabled", { enabled: true });
     expect(
@@ -147,11 +212,67 @@ describe("ToolPalette", () => {
     expect(setCallCount()).toBe(1);
 
     // 逐项放行，直到全部下发完
-    for (let i = 0; i < 20 && setCallCount() < 10; i += 1) {
+    for (let i = 0; i < 22 && setCallCount() < 11; i += 1) {
       while (pending.length) pending.shift()!(true);
       await act(flush);
     }
-    expect(setCallCount()).toBe(10);
+    expect(setCallCount()).toBe(11);
+  });
+
+  it("「全部关闭」部分失败时汇总提示失败项，失败项回滚为启用且不影响其余项", async () => {
+    // 逐项下发时某一条失败原来只回滚那一条并在控制台记一行日志，界面既不提示也不
+    // 指出是哪一项 —— 用户看到的是"点了全部关闭还有几个开着"。这里锁住「汇总提示」。
+    mockInvoke.mockImplementation(((cmd: string, args?: { enabled?: boolean }) => {
+      if (cmd === "set_screenshot_enabled" && args?.enabled === false) {
+        return Promise.reject(new Error("boom"));
+      }
+      return Promise.resolve(true);
+    }) as never);
+
+    const { container } = render(<ToolPalette />);
+    await act(flush);
+    expect(container.querySelector(".palette-count")!.textContent).toContain("11/11");
+
+    const disableAllBtn = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".palette-all-group button"),
+    ).find((b) => b.textContent === "全部关闭")!;
+    fireEvent.click(disableAllBtn);
+    await act(flush);
+
+    const banner = container.querySelector<HTMLButtonElement>(".palette-error")!;
+    expect(banner.textContent).toBe("全部关闭有 1 项未生效：屏幕截图");
+    // 失败项回滚为启用，其余项照常关闭（整批不因一项失败而中断）
+    expect(
+      container.querySelector('[data-tool-id="screenshot"]')!.classList.contains("is-enabled"),
+    ).toBe(true);
+    expect(
+      container.querySelector('[data-tool-id="timer"]')!.classList.contains("is-enabled"),
+    ).toBe(false);
+    expect(container.querySelector(".palette-count")!.textContent).toContain("1/11");
+
+    // 提示可点击消除；重试成功后不再出现
+    fireEvent.click(banner);
+    await act(flush);
+    expect(container.querySelector(".palette-error")).toBeNull();
+
+    mockInvoke.mockResolvedValue(true);
+    fireEvent.click(disableAllBtn);
+    await act(flush);
+    expect(container.querySelector(".palette-error")).toBeNull();
+    expect(container.querySelector(".palette-count")!.textContent).toContain("0/11");
+  });
+
+  it("「全部开启 / 全部关闭」全部成功时不显示任何提示", async () => {
+    const { container } = render(<ToolPalette />);
+    await act(flush);
+
+    const buttons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".palette-all-group button"),
+    );
+    fireEvent.click(buttons.find((b) => b.textContent === "全部关闭")!);
+    await act(flush);
+
+    expect(container.querySelector(".palette-error")).toBeNull();
   });
 
   it("按类别分组渲染，且不丢任何工具", async () => {
@@ -170,6 +291,61 @@ describe("ToolPalette", () => {
     const textSection = container.querySelector(".palette-section")!;
     expect(textSection.querySelector('[data-tool-id="text-toolbar"]')).not.toBeNull();
     expect(textSection.querySelector('[data-tool-id="screenshot"]')).toBeNull();
+  });
+
+  it("色差实现与参考值一致（下面那条色差守卫的前提）", () => {
+    // Sharma 等《The CIEDE2000 Color-Difference Formula》附录的参考数据，含色相跨 0°/360°
+    // 与近中性色这些最容易写错的算例。公式本身若被改坏（比如恒返回大值），色差守卫会静默
+    // 通过，所以这里单独把公式钉在参考数据上。
+    const refs: Array<[number[], number[], number]> = [
+      [[50, 2.6772, -79.7751], [50, 0, -82.7485], 2.0425],
+      [[50, 3.1571, -77.2803], [50, 0, -82.7485], 2.8615],
+      [[50, 2.8361, -74.02], [50, 0, -82.7485], 3.4412],
+      [[50, -1.1848, -84.8006], [50, 0, -82.7485], 1.0],
+      [[60.2574, -34.0099, 36.2677], [60.4626, -34.1751, 39.4387], 1.2644],
+      [[2.0776, 0.0795, -1.135], [0.9033, -0.0636, -0.5514], 0.9082],
+    ];
+    for (const [labA, labB, expected] of refs) {
+      expect(deltaE2000(labA, labB)).toBeCloseTo(expected, 3);
+    }
+
+    // hex → Lab 的换算按 sRGB/D65 下的公认 Lab 值核对
+    const red = hexToLab("#ff0000");
+    expect(red[0]).toBeCloseTo(53.2408, 3);
+    expect(red[1]).toBeCloseTo(80.0925, 3);
+    expect(red[2]).toBeCloseTo(67.2032, 3);
+    const gray = hexToLab("#808080");
+    expect(gray[0]).toBeCloseTo(53.585, 3);
+    expect(gray[1]).toBeCloseTo(0, 3);
+    expect(gray[2]).toBeCloseTo(0, 3);
+  });
+
+  it("每张卡片的强调色都各自登记、且两两色差大到能一眼分辨", async () => {
+    const { container } = render(<ToolPalette />);
+    await act(flush);
+
+    const cards = Array.from(container.querySelectorAll<HTMLElement>("[data-tool-id]"));
+    const colors = cards.map((card) => card.style.getPropertyValue("--tool-color").trim());
+    expect(colors).toHaveLength(FLOATING_TOOLS.length);
+
+    // 每个工具都要登记一个十六进制色值：漏登记的工具会拿到兜底的 var(--color-accent)
+    // （见 ToolPalette.tsx），既不是它自己的身份，也会让下面的色差算成 NaN 而被放过。
+    expect(colors.filter((color) => !/^#[0-9a-f]{6}$/i.test(color))).toEqual([]);
+
+    // 「十六进制不同」不等于「看着不同」：utility-hub(#2f9e78) 与 todo(#1d9e75) 就是两个
+    // 不同的色值，色差却只有 ΔE 1.2，面板上仍是同一个色。所以按感知色差判，下限取 10。
+    const MIN_DELTA_E = 10;
+    const tooClose: string[] = [];
+    for (let i = 0; i < colors.length; i += 1)
+      for (let j = i + 1; j < colors.length; j += 1) {
+        const delta = deltaE2000(hexToLab(colors[i]), hexToLab(colors[j]));
+        if (delta < MIN_DELTA_E) {
+          tooClose.push(
+            `${cards[i].dataset.toolId} × ${cards[j].dataset.toolId}：ΔE ${delta.toFixed(1)}`,
+          );
+        }
+      }
+    expect(tooClose).toEqual([]);
   });
 
   it("把 registry 中的 description 渲染为卡片提示", async () => {

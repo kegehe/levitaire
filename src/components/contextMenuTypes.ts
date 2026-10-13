@@ -27,7 +27,7 @@ const MENU_BORDER = 1;
  * ⚠️ 必须与 `ContextMenu.tsx` 的 `CONTEXT_MENUS` 结构一致 —— `ContextMenu.test.ts`
  * 会直接数那份结构来核对本表，改菜单时不同步就会报红。
  * 托盘菜单会**动态插入**一条更新项（`buildTrayUpdateItem`），它不在 `CONTEXT_MENUS` 里，
- * 所以这里是 5 项 / 2 个间隔。
+ * 所以这里是 6 项 / 2 个间隔。
  */
 export const CONTEXT_MENU_SHAPE: Record<
   ContextMenuSource,
@@ -37,8 +37,8 @@ export const CONTEXT_MENU_SHAPE: Record<
   pin: { items: 12, separators: 4 },
   // 3 + 1 = 4 项，2 个分组 → 1 个间隔
   orb: { items: 4, separators: 1 },
-  // 3 + 1（更新项）+ 1 = 5 项，3 个分组 → 2 个间隔
-  tray: { items: 5, separators: 2 },
+  // 3 + 1（更新项）+ 2 = 6 项，3 个分组 → 2 个间隔
+  tray: { items: 6, separators: 2 },
 };
 
 /**

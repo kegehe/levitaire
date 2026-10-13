@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -9,8 +10,9 @@ import {
 } from "react";
 import { buildCursorSkin, normalizeCursorColor } from "../../../utils/cursorSkin";
 import type { ActiveTool, Annotation, ToolKind } from "./types";
-import { DEFAULT_COLOR, fontSizeFor, strokeWidthFor } from "./types";
+import { DEFAULT_COLOR, fontSizeFor, numberFontSizeFor, numberRadiusFor } from "./types";
 import { normalizeRect, renderAll } from "./render";
+import { hitTestAnnotation, toleranceFor, type EditHit } from "./edit";
 import type { UseAnnotations } from "./useAnnotations";
 
 export interface AnnotationCanvasHandle {
@@ -25,6 +27,10 @@ export interface AnnotationCanvasHandle {
    * 失败（base64 损坏等）时 reject，调用方可忽略并退回常规的异步加载路径。
    */
   preload: (base64: string) => Promise<void>;
+  /** client 坐标 → 画布内部物理像素；canvas 未挂载或尺寸为 0 时返回 null */
+  toPhysical: (clientX: number, clientY: number) => { x: number; y: number } | null;
+  /** 命中测试已生效标注（最上层优先）：返回被命中的标注与其部位，未命中返回 null */
+  hitTest: (clientX: number, clientY: number) => EditHit | null;
 }
 
 interface Props {
@@ -33,8 +39,11 @@ interface Props {
   scale: number;
   tool: ActiveTool;
   color: string;
-  widthIndex: number;
+  /** 当前工具的线宽（物理像素，已由父组件钳制）；文字/序号的字号由它派生 */
+  strokeWidth: number;
   annotations: UseAnnotations;
+  /** 当前选中的标注 id（仅「移动」工具下由父组件传入）：用于绘制编辑手柄 */
+  selectedId?: string | null;
   /** 文字输入提交时回调，便于父组件同步 */
   onCommit?: () => void;
 }
@@ -74,7 +83,7 @@ function genId(): string {
 }
 
 const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function AnnotationCanvas(
-  { image, selection, scale, tool, color, widthIndex, annotations, onCommit },
+  { image, selection, scale, tool, color, strokeWidth, annotations, selectedId, onCommit },
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -100,7 +109,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
   // 画笔 draft 点累积用 ref，避免高频 setState 抖动；但 draft 仍经 annotations.setDraft 提交以触发重绘
   const draftPtsRef = useRef<{ x: number; y: number }[]>([]);
 
-  const { committed, draft, setDraft, commit } = annotations;
+  const { committed, draft, setDraft, commit, getCommitted } = annotations;
+  // 被选中的标注。编辑时 draft 与选中项同 id，故优先用 draft —— 手柄跟着拖动中的预览走。
+  const selectedAnn = useMemo(() => {
+    if (!selectedId) return null;
+    if (draft && draft.id === selectedId) return draft;
+    return committed.find((a) => a.id === selectedId) ?? null;
+  }, [selectedId, draft, committed]);
   // 移动工具不画图，用系统标准移动光标而不是「十字 + 徽章」皮肤（那套皮肤是落笔点提示，
   // 对不落笔的工具是误导）；四个方向的缩放光标由选区手柄自身的 CSS 负责。
   const cursor = useMemo(
@@ -150,8 +165,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    renderAll(ctx, baseImgForRender, committed, draft);
-  }, [committed, draft, baseImgForRender]);
+    renderAll(ctx, baseImgForRender, committed, draft, selectedAnn, scale);
+  }, [committed, draft, baseImgForRender, selectedAnn, scale]);
 
   // 文字输入框自动撑高：按内容 scrollHeight 调整，使多行（Shift+Enter / 自动换行）可见。
   // 先置 auto 重置历史高度，再按 scrollHeight 设定；限制最大高度避免超出选区过多。
@@ -170,7 +185,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    renderAll(ctx, baseImgForRender, annotations.getCommitted(), annotations.getDraft());
+    // 这是**导出**路径：selected 传 null，不把选中手柄画进结果图（手柄只是交互提示）。
+    // 只读 ref（getCommitted/getDraft），无需依赖 committed/draft。
+    renderAll(
+      ctx,
+      baseImgForRender,
+      annotations.getCommitted(),
+      annotations.getDraft(),
+      null,
+      scale,
+    );
   };
 
   // 提交正在编辑的文字（读 ref 防陈旧/防重入）
@@ -185,10 +209,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
         id: genId(),
         kind: "text",
         color,
-        strokeWidth: strokeWidthFor(widthIndex),
+        strokeWidth,
         x: te.x,
         y: te.y,
-        fontSize: fontSizeFor(widthIndex),
+        fontSize: fontSizeFor(strokeWidth),
         text: v,
       });
       onCommit?.();
@@ -196,6 +220,40 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     setTextEditing(null);
     composingRef.current = false;
   };
+
+  // 把指针 client 坐标换算为画布内部物理像素坐标。
+  // 用 canvas 实际 rect 与内部尺寸求比例（而不是拿 selection.left/scale 反推）：
+  // 底图内部宽高是 round(selection.width*scale)，反推会有亚像素偏差。
+  const toPhysical = useCallback((clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: (clientX - rect.left) * (canvas.width / rect.width),
+      y: (clientY - rect.top) * (canvas.height / rect.height),
+    };
+  }, []);
+
+  const toCanvas = (clientX: number, clientY: number) =>
+    toPhysical(clientX, clientY) ?? { x: 0, y: 0 };
+
+  // 命中测试已生效标注（最上层优先）。读 ref（getCommitted）避免闭包陈旧；
+  // 供父组件在「移动」工具下决定：命中标注则编辑它，否则调整选区。
+  const hitTest = useCallback(
+    (clientX: number, clientY: number): EditHit | null => {
+      const p = toPhysical(clientX, clientY);
+      if (!p) return null;
+      const tol = toleranceFor(scale);
+      const list = getCommitted();
+      for (let i = list.length - 1; i >= 0; i--) {
+        const zone = hitTestAnnotation(list[i], p.x, p.y, tol);
+        if (zone) return { annotation: list[i], zone };
+      }
+      return null;
+    },
+    [toPhysical, scale, getCommitted],
+  );
 
   useImperativeHandle(
     ref,
@@ -220,30 +278,20 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
           img.onerror = () => reject(new Error("底图预解码失败"));
           img.src = `data:image/png;base64,${base64}`;
         }),
+      toPhysical,
+      hitTest,
     }),
     // flushBase64 通过 getCommitted/getDraft/textEditingRef 读最新值，无需依赖 committed/draft；
-    // 仅底图/color/widthIndex 变化时重建（影响 syncRender/finishText 闭包）
-    [baseImgForRender, color, widthIndex],
+    // syncRender 的闭包只用 baseImgForRender/scale，连同 color/strokeWidth（finishText）一并保留。
+    [baseImgForRender, color, strokeWidth, scale, toPhysical, hitTest],
   );
-
-  // 把指针 client 坐标换算为画布内部物理像素坐标
-  const toCanvas = (clientX: number, clientY: number) => {
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const sx = canvas.width / rect.width;
-    const sy = canvas.height / rect.height;
-    return {
-      x: (clientX - rect.left) * sx,
-      y: (clientY - rect.top) * sy,
-    };
-  };
 
   const onPointerDown = (e: ReactPointerEvent) => {
     if (tool === "move") return; // 移动工具的事件由选区调整层接管（canvas 本身也 pointer-events:none）
     // 若有正在编辑的文字，先提交，再处理新操作
     if (textEditingRef.current) finishText();
     const p = toCanvas(e.clientX, e.clientY);
-    const sw = strokeWidthFor(widthIndex);
+    const sw = strokeWidth;
 
     if (tool === "text") {
       // 文字 CSS 坐标 = 物理 / scale + selection.left/top
@@ -269,8 +317,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
         strokeWidth: sw,
         x: p.x,
         y: p.y,
-        radius: Math.max(sw * 2.5, 12),
-        fontSize: Math.max(sw * 3, 14),
+        radius: numberRadiusFor(sw),
+        fontSize: numberFontSizeFor(sw),
         n,
       });
       onCommit?.();
@@ -359,7 +407,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     startRef.current = null;
     e.currentTarget.releasePointerCapture?.(e.pointerId);
     const p = toCanvas(e.clientX, e.clientY);
-    const sw = strokeWidthFor(widthIndex);
+    const sw = strokeWidth;
     // 直接构造最终 annotation 提交，不依赖 commitDraft 读 draft ref（避免 React 批处理下 ref 陈旧）
     let ann: Annotation | null = null;
     if (tool === "rect" || tool === "mosaic") {
@@ -437,7 +485,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     ? {
         left: selection.left + textEditing.x / scale,
         top: selection.top + textEditing.y / scale,
-        fontSize: `${fontSizeFor(widthIndex) / scale}px`,
+        fontSize: `${fontSizeFor(strokeWidth) / scale}px`,
         color,
       }
     : null;

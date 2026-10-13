@@ -50,6 +50,14 @@ struct HookState {
     mouse_down_on_toolbar: AtomicBool,
     // 上次检测选区的时间戳（毫秒），冷却机制
     last_check_ms: AtomicU64,
+    /// 「用户又按下鼠标」的单调序号，`MouseDown` 时自增。
+    ///
+    /// 选区检测是**异步**的（可能跑几百毫秒），期间用户若已经点向别处，那次检测的结果就过期了
+    /// —— 显示工具栏前比对序号，不一致就丢弃。不加这道：旧实现是同步跑在消费线程上的，
+    /// 用户那次按下会被排在队列里、等工具栏显示之后才处理，于是「点外部即关闭」的语义
+    /// 顺手生效；改成异步后那个按下会立刻被处理（工具栏此时还没显示，关不掉），
+    /// 随后工具栏又冒出来 —— 表现为「点了外面它还在」。
+    interaction_seq: AtomicU64,
     // 钩子线程 ID（用于发送 WM_QUIT 退出消息循环）
     hook_thread_id: AtomicU64,
     // 转盘模式：emit 鼠标移动时的上次时间戳（毫秒），用于节流
@@ -105,6 +113,7 @@ static STATE: HookState = HookState {
     mouse_down_on_orb_circle: AtomicBool::new(false),
     mouse_down_on_toolbar: AtomicBool::new(false),
     last_check_ms: AtomicU64::new(0),
+    interaction_seq: AtomicU64::new(0),
     hook_thread_id: AtomicU64::new(0),
     quick_input_last_emit_ms: AtomicU64::new(0),
     smart_screenshot_last_emit_ms: AtomicU64::new(0),
@@ -819,49 +828,23 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
 
                     crate::utils::logger::log("mouse", "Drag detected, checking selection");
 
-                    // 记录拖选坐标供 OCR 使用
-                    crate::automation::ocr_selection::set_last_drag_rect(
-                        down_x, down_y, cur.x, cur.y,
+                    // ⚠️ 检测本体**必须离开这条消费线程**（见 `spawn_selection_check`）：
+                    // 它是一条四级降级链 —— UIA → Win32 → 模拟 Ctrl+C（内部 50+150+30+100ms
+                    // 休眠）→ **截屏 + OCR**，最坏数百毫秒到秒级。留在消费线程上，这段时间里
+                    // 滚轮转发、鼠标抬起、悬浮球穿透上报全部堵在队列里，表现为「点击丢失 /
+                    // 穿透迟钝 / 长截图丢滚动 / 时好时坏」。
+                    //
+                    // 拖选矩形与交互序号**随请求一起交给检测线程**：矩形是 `ocr_selection` 的
+                    // 全局值，而 OCR 那一级要到检测线程里才读 —— 若仍由消费线程在派发前写，
+                    // 第二次拖拽会在第一次检测跑到 OCR 之前把它覆盖掉（拿别人的区域去 OCR）；
+                    // 序号则让检测线程能判断自己是否已被更新的操作顶掉。
+                    spawn_selection_check(
+                        app.clone(),
+                        SelectionCheckRequest {
+                            drag: (down_x, down_y, cur.x, cur.y),
+                            interaction_seq: STATE.interaction_seq.load(Ordering::SeqCst),
+                        },
                     );
-
-                    match crate::automation::get_current_selection() {
-                        Ok(Some(info)) if !info.text.is_empty() || info.has_image => {
-                            crate::utils::logger::log(
-                                "mouse",
-                                &format!("Selection found: {} chars", info.text.len()),
-                            );
-                            let _ = app.emit("selection-found", &info);
-                            if let Some(win) = app.get_webview_window("toolbar") {
-                                // 窗口四周有投影留白（见 TextToolbar.tsx 的
-                                // TOOLBAR_SHADOW_MARGIN）：容器左上角比窗口左上角
-                                // 内缩一个留白，所以窗口位置要相应左移，工具栏才会
-                                // 落在选区下方原位；y 不用补偿（留白只在左右和底部）。
-                                let toolbar_margin = (TOOLBAR_SHADOW_MARGIN
-                                    * win.scale_factor().unwrap_or(1.0))
-                                .round() as i32;
-                                let x = info.rect.x - toolbar_margin;
-                                let y = if info.rect.height > 0 {
-                                    info.rect.y + info.rect.height + 5
-                                } else {
-                                    info.rect.y + 20
-                                };
-                                let _ = win.set_position(tauri::Position::Physical(
-                                    tauri::PhysicalPosition::new(x, y),
-                                ));
-                                let _ = win.show();
-                                STATE.toolbar_visible.store(true, Ordering::SeqCst);
-                                if let Ok(hwnd) = win.hwnd() {
-                                    STATE.toolbar_hwnd.store(hwnd.0, Ordering::SeqCst);
-                                }
-                                crate::utils::logger::log("mouse", "Toolbar window shown");
-                            }
-                        }
-                        Ok(Some(_)) => crate::utils::logger::log("mouse", "Selection empty"),
-                        Ok(None) => crate::utils::logger::log("mouse", "No selection"),
-                        Err(e) => {
-                            crate::utils::logger::log("mouse", &format!("Selection error: {}", e))
-                        }
-                    }
                 }
                 HookEvent::ColorPicked { x, y } => {
                     // Keep the picker armed after every sample. It is only
@@ -926,6 +909,9 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     STATE.mouse_down_x.store(x, Ordering::SeqCst);
                     STATE.mouse_down_y.store(y, Ordering::SeqCst);
                     STATE.mouse_down_valid.store(true, Ordering::SeqCst);
+                    // 记一次「用户又按下了鼠标」：选区检测在别的线程跑，收尾时靠这个序号
+                    // 判断自己是不是已经被更新的操作顶掉（详见 `interaction_seq` 字段说明）。
+                    STATE.interaction_seq.fetch_add(1, Ordering::SeqCst);
 
                     // 滚动目标按「点击落点所在的顶层窗口」记录，不读前台窗口：
                     // 钩子里 GetForegroundWindow 返回的还是点击前那个窗口。
@@ -1078,6 +1064,236 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                 eprintln!("Failed to set mouse hook: {:?}", e);
             }
         }
+    }
+}
+
+/// 选区检测的**在飞占有**守卫。
+///
+/// 用 `Drop` 复位而不是在末尾手写复位：检测线程里跑的是跨进程 UIA / `SendMessageW` /
+/// 剪贴板 / OCR，一旦 panic 就再也不会执行到末尾，占有会**永久**为真 ——
+/// 拖拽弹文字工具栏从此静默失效，只能重启，而 release 是 GUI 子系统、连一行日志都没有。
+///
+/// ★ `Drop` 只在**仍持有**时复位。正常收尾已经在「判空 + 释放占有」那个临界区里把占有交出去了
+/// （见 [`spawn_selection_check`]），这里若无条件再清一次，抹掉的就是**后来者**的占有 ——
+/// 那正是"两条链并发"的入口，而两条并发会互相踩剪贴板（链里会模拟 Ctrl+C 读回滚剪贴板）。
+/// 编号（而不是 `bool`）就是为了让守卫能认出"占有还是不是我的"。
+struct SelectionCheckGuard(u64);
+
+impl Drop for SelectionCheckGuard {
+    fn drop(&mut self) {
+        selection_queue().release(self.0);
+    }
+}
+
+/// 一次选区检测请求：把「这次检测属于哪次拖拽」和「当时用户操作的序号」绑在一起传给检测线程。
+///
+/// 两个字段都不能从全局现读：拖选矩形是全局值（会被下一次拖拽覆盖），序号是「我是否已被顶掉」
+/// 的判据 —— 都必须随请求冻结下来。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectionCheckRequest {
+    /// 拖选矩形的两个对角点（物理像素），供 OCR 兜底那一级截屏用。
+    drag: (i32, i32, i32, i32),
+    /// 派发那一刻的 `interaction_seq`，用于丢弃已被用户新操作顶掉的结果。
+    interaction_seq: u64,
+}
+
+/// 选区检测的派发状态：**在飞占有与挂起请求共用同一把锁**。
+///
+/// # 为什么必须是同一把锁
+///
+/// 派发侧要判「现在有没有链在跑」，收尾侧要判「还有没有人在等我补跑」—— 这是**同一个决定的
+/// 两半**。拆成两把锁（原来是一个原子标志位 + 一个 `pending` 互斥量），就必然留下这个交错：
+///
+/// ```text
+/// C: take() → None          ← 判定「没活了」，准备退出
+/// P: 抢标志位失败（此刻仍为 true）
+/// P: *pending = Some(req)   ← 挂起请求落盘，指望 C 来取
+/// C: 守卫析构 → 标志位 = false
+/// ```
+///
+/// 此后标志位为 false、`pending` 里躺着没人认领的请求。它**不会自愈**：派发侧只在争抢失败时
+/// 才写 pending，下一次拖拽会抢到标志位、自己起线程 ⇒ 用户看到「拖一次没反应」。
+///
+/// （曾经用第三个标志位 `RETIRE_COMPLETED` 打补丁：投递方落盘后复查"收尾是否已跨过最后一步"，
+/// 是则自己接手派发。那只把窗口收窄，两件事仍分属两把锁；而且接手分支压根没有"再抢一次
+/// 在飞标志位"的动作，一旦走进去，**整条新链都在无人占有的状态下跑** —— 后续任何一次拖拽
+/// 都能再起一条链，与下面「检测不并发」直接冲突。所以改成单锁。）
+///
+/// 现在「判空 → 释放占有」与「判占有 → 落盘」都在这一把锁的临界区里，两者不可能交错：
+/// 收尾只有在确认没人落盘之后才会释放占有。
+struct SelectionCheckQueue {
+    /// 当前占有检测链的持有者编号（`None` = 没人跑）。用编号而不是 `bool`，
+    /// 是为了让守卫能认出"占有还是不是我的"（见 [`SelectionCheckGuard`]）。
+    owner: Option<u64>,
+    /// 在飞期间被顶掉的请求（只保留**最新**一次），由当前链收尾时补跑。
+    ///
+    /// 旧实现同步跑在消费线程上，队列天然保证「每次拖拽都会被检测、最新的最后生效」；
+    /// 改成异步 + 在飞互斥之后，若直接丢弃被顶掉的请求，用户「拖一次没反应 → 再拖一次」
+    /// 的第二次会被**静默吞掉**（而这恰恰是最需要它生效的场景）。
+    pending: Option<SelectionCheckRequest>,
+}
+
+static SELECTION_QUEUE: Mutex<SelectionCheckQueue> = Mutex::new(SelectionCheckQueue {
+    owner: None,
+    pending: None,
+});
+
+impl SelectionCheckQueue {
+    /// 派发侧的一次决策。`true` = **本次调用自己起链**（占有已认领）；
+    /// `false` = 已有链在跑，请求已挂进 `pending` 等它收尾补跑。
+    ///
+    /// 判占有与落盘是**一步**：分成"先看再写"就又能被收尾的"判空、释放"插进来。
+    fn claim_or_park(&mut self, claim: u64, request: SelectionCheckRequest) -> bool {
+        if self.owner.is_some() {
+            self.pending = Some(request);
+            return false;
+        }
+        self.owner = Some(claim);
+        true
+    }
+
+    /// 收尾侧的一次决策。`None` = 没活了 —— 并且**占有已经在同一次调用里释放**。
+    ///
+    /// ★「取空」与「释放占有」必须同在这一步里：拆开就又留下「判完之后还有人落盘」的交错，
+    /// 那份请求没人认领（症状：拖一次没反应）。
+    fn take_next_or_release(&mut self) -> Option<SelectionCheckRequest> {
+        match self.pending.take() {
+            Some(next) => Some(next),
+            None => {
+                self.owner = None;
+                None
+            }
+        }
+    }
+
+    /// 守卫析构时复位占有。**只在仍持有（编号一致）时**才清。
+    ///
+    /// 无条件清会抹掉**后来者**的占有 —— 那正是"两条链并发"的入口，而链里会模拟 Ctrl+C
+    /// 读回滚剪贴板，两条并发会互相踩。
+    fn release(&mut self, claim: u64) {
+        if self.owner == Some(claim) {
+            self.owner = None;
+        }
+    }
+}
+
+/// 占有编号的来源（只需要"互不相同"）。
+static SELECTION_CLAIM_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn selection_queue() -> std::sync::MutexGuard<'static, SelectionCheckQueue> {
+    SELECTION_QUEUE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 把选区检测派发到独立线程执行。
+///
+/// # 为什么不能就地跑在钩子事件的消费线程上
+///
+/// `HookEvent` 只有**一个**消费线程（`start_hook` 里的 `while let Ok(event) = rx.recv()`），
+/// 而选区检测是一条**四级降级链**：UIA → Win32 → 模拟 Ctrl+C（`clipboard_selection.rs` 内
+/// 50+150+30+100ms 四处休眠）→ **截屏 + OCR**（`ocr_selection.rs` 里 `.join()` 等它跑完，
+/// 首次还要加载 OCR 模型）。最坏数百毫秒到秒级。
+///
+/// 而这条链的触发门槛很低：只要「拖拽位移 > 2px」，且落点不在自有窗口上 ——
+/// **桌面拖拽、拖窗口标题栏、在资源管理器里框选文件都会命中**（`COOLDOWN_MS` 只有 300ms）。
+/// 就地跑，这段期间里滚轮转发、鼠标抬起、悬浮球穿透上报、置顶/取色的落点全都堵在同一个
+/// 队列里，用户看到的就是「点击丢失 / 穿透迟钝 / 长截图丢滚动 / 时好时坏」。
+///
+/// 连发拖拽时检测**不并发**（同一时刻最多一条链在跑）：链里会模拟 Ctrl+C 并读回滚剪贴板，
+/// 两条并发会互相踩。被顶掉的那次记进 [`SelectionCheckQueue::pending`]，由当前这次收尾时补跑。
+fn spawn_selection_check(app: tauri::AppHandle, request: SelectionCheckRequest) {
+    let claim = SELECTION_CLAIM_SEQ.fetch_add(1, Ordering::SeqCst);
+    // 认领：抢到就自己起线程，抢不到就挂进 pending 等收尾带走。
+    // ★「判占有 → 落盘」与收尾的「判空 → 释放占有」在同一把锁下（见 SelectionCheckQueue），
+    //   两者不可能交错。锁在这里用完即放（临时量），别绑成变量带到下面去。
+    if !selection_queue().claim_or_park(claim, request) {
+        crate::utils::logger::log("mouse", "Selection check in flight, queued the latest drag");
+        return;
+    }
+    // 守卫在**本线程**就构造好再移进闭包：`thread::spawn` 自身失败（线程资源耗尽）时会
+    // panic，若守卫是在线程内部才构造，占有就永远卡住了。放在外面，spawn 失败时守卫随
+    // 函数作用域结束复位。
+    let guard = SelectionCheckGuard(claim);
+    let spawned = std::thread::Builder::new()
+        .name("selection-check".to_string())
+        .spawn(move || {
+            // 守卫全程持有占有：补跑循环也在这把「互斥」之下，不会出现两条链并发。
+            let _guard = guard;
+            run_selection_check(&app, request);
+            // 补跑期间被顶掉的请求（最新的赢）。取到 None（= 占有已释放）才退出。
+            loop {
+                // 锁在这一行用完即放：`run_selection_check` 可能跑秒级，绝不能锁着它跑 ——
+                // 派发侧跑在钩子事件的消费线程上，锁一被占住它就堵在那里。
+                let next = selection_queue().take_next_or_release();
+                let Some(next) = next else { break };
+                run_selection_check(&app, next);
+            }
+        });
+    if spawned.is_err() {
+        crate::utils::logger::log("mouse", "Failed to spawn selection check thread");
+    }
+}
+
+/// 跑一次检测：先把本次拖选矩形落进 `ocr_selection` 的全局值（OCR 那一级要从它读），
+/// 再走检测本体。
+///
+/// 矩形必须由**检测线程自己**写：它由本线程随后读取，而同一条链是串行的，
+/// 所以不会被别的拖拽覆盖（这正是它不能留在消费线程里写的原因）。
+fn run_selection_check(app: &tauri::AppHandle, request: SelectionCheckRequest) {
+    let (x1, y1, x2, y2) = request.drag;
+    crate::automation::ocr_selection::set_last_drag_rect(x1, y1, x2, y2);
+    check_selection_and_show_toolbar(app, request.interaction_seq);
+}
+
+/// 选区检测本体：拿到选区就把文字工具栏摆到选区下方。
+/// 由 `run_selection_check` 在独立线程调用，**不得**直接放进钩子事件的消费线程。
+fn check_selection_and_show_toolbar(app: &tauri::AppHandle, interaction_seq: u64) {
+    match crate::automation::get_current_selection() {
+        Ok(Some(info)) if !info.text.is_empty() || info.has_image => {
+            // 这次链可能跑了几百毫秒，期间用户若已按下鼠标（点向别处），结果就过期了。
+            // 旧实现同步跑在消费线程上：那次按下会被排在队列里、等工具栏显示之后才处理，
+            // 「点外部即关闭」的语义顺手生效；改成异步后那个按下会立刻被处理（工具栏此时
+            // 还没显示，关不掉），随后工具栏又冒出来 —— 表现为「点了外面它还在」。
+            // 用序号把这份耦合显式化，而不是继续依赖时序。
+            if STATE.interaction_seq.load(Ordering::SeqCst) != interaction_seq {
+                crate::utils::logger::log(
+                    "mouse",
+                    "Selection check superseded by a newer click, not showing toolbar",
+                );
+                return;
+            }
+            crate::utils::logger::log(
+                "mouse",
+                &format!("Selection found: {} chars", info.text.len()),
+            );
+            let _ = app.emit("selection-found", &info);
+            if let Some(win) = app.get_webview_window("toolbar") {
+                // 窗口四周有投影留白（见 TextToolbar.tsx 的 TOOLBAR_SHADOW_MARGIN）：
+                // 容器左上角比窗口左上角内缩一个留白，所以窗口位置要相应左移，工具栏才会
+                // 落在选区下方原位；y 不用补偿（留白只在左右和底部）。
+                let toolbar_margin =
+                    (TOOLBAR_SHADOW_MARGIN * win.scale_factor().unwrap_or(1.0)).round() as i32;
+                let x = info.rect.x - toolbar_margin;
+                let y = if info.rect.height > 0 {
+                    info.rect.y + info.rect.height + 5
+                } else {
+                    info.rect.y + 20
+                };
+                let _ = win.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition::new(x, y),
+                ));
+                let _ = win.show();
+                STATE.toolbar_visible.store(true, Ordering::SeqCst);
+                if let Ok(hwnd) = win.hwnd() {
+                    STATE.toolbar_hwnd.store(hwnd.0, Ordering::SeqCst);
+                }
+                crate::utils::logger::log("mouse", "Toolbar window shown");
+            }
+        }
+        Ok(Some(_)) => crate::utils::logger::log("mouse", "Selection empty"),
+        Ok(None) => crate::utils::logger::log("mouse", "No selection"),
+        Err(e) => crate::utils::logger::log("mouse", &format!("Selection error: {}", e)),
     }
 }
 
@@ -1245,9 +1461,12 @@ pub fn start_color_pick() -> Result<(), String> {
 }
 
 pub fn stop_color_pick() {
-    let Ok(_cursor_lock) = PICK_CURSOR_LOCK.lock() else {
-        return;
-    };
+    // ⚠️ 锁中毒时**绝不能早退**：`SetSystemCursor` 改的是**系统级**箭头（不是窗口内光标），
+    // 一旦在这里 return，整个 Windows 的指针就会停在取色笔上、直到重启（或别的程序重置
+    // 系统光标）—— 因为还原用的句柄是本进程 `CopyIcon` 出来的副本，进程一死就没人能还了。
+    // 毒化只说明上一次临界区没走完；恢复动作本身幂等（`system_cursor_backup` 用 swap 取走），
+    // 照做是对的。
+    let _cursor_lock = PICK_CURSOR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // 只在「确实是自己装的光标」时恢复：外部清理路径（关闭面板、退出应用）会无条件
     // 调本函数，若此时是窗口置顶点选在跑，盲目恢复会把它的准星也一并撤掉。
     if !STATE.color_picker_active.swap(false, Ordering::SeqCst) {
@@ -1263,9 +1482,7 @@ pub fn stop_color_pick() {
 pub fn start_window_pin() -> Result<(), String> {
     stop_color_pick();
 
-    let _cursor_lock = PICK_CURSOR_LOCK
-        .lock()
-        .map_err(|_| "光标状态锁已损坏".to_string())?;
+    let _cursor_lock = PICK_CURSOR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     STATE.mouse_down_valid.store(false, Ordering::SeqCst);
     if STATE.window_pin_active.load(Ordering::SeqCst) {
         return Ok(());
@@ -1277,9 +1494,8 @@ pub fn start_window_pin() -> Result<(), String> {
 }
 
 pub fn stop_window_pin() {
-    let Ok(_cursor_lock) = PICK_CURSOR_LOCK.lock() else {
-        return;
-    };
+    // 同 `stop_color_pick`：锁中毒也必须把系统光标还原，早退 = 整机指针停在准星上。
+    let _cursor_lock = PICK_CURSOR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !STATE.window_pin_active.swap(false, Ordering::SeqCst) {
         return;
     }
@@ -1827,6 +2043,288 @@ mod tests {
         set_toolbar_visible(true);
         assert!(is_toolbar_visible());
         set_toolbar_visible(original);
+    }
+
+    /// 契约：选区检测（四级降级链：UIA → Win32 → 模拟 Ctrl+C → 截屏 OCR，最坏秒级）
+    /// **不得**跑在钩子事件的单消费线程上。
+    ///
+    /// 就地跑会把滚轮转发、鼠标抬起、悬浮球穿透上报全堵在同一个队列里 ——
+    /// 而「拖拽 > 2px 且不在自有窗口上」就触发，桌面拖拽 / 拖窗口标题栏 / 框选文件全都命中。
+    /// 症状是「点击丢失 / 穿透迟钝 / 时好时坏」，且只在目标应用变慢时才显形，极难归因。
+    #[test]
+    fn selection_check_never_runs_on_the_hook_event_consumer_thread() {
+        let source = include_str!("mouse.rs");
+        // 拼出标识符，避免本用例自己的字面量被算进下面的出现次数
+        let needle = concat!("get_current", "_selection");
+        let hook_body = fn_body(source, "start_hook").expect("start_hook 不见了");
+        let hook_code = strip_line_comments(hook_body);
+        assert!(
+            !hook_code.contains(needle),
+            "选区检测又被搬回钩子事件的消费线程了：它最坏要跑秒级（含截屏 OCR），\
+             会把滚轮/抬起/穿透上报全堵住。请走 `spawn_selection_check`。"
+        );
+        assert!(
+            hook_code.contains("spawn_selection_check("),
+            "start_hook 应当通过 `spawn_selection_check` 派发选区检测（异步、带在飞互斥）"
+        );
+
+        // 本体必须存在，且只在派发线程里被调用一次 —— 否则上面那条断言可以靠"干脆不检测"骗过
+        let worker_body =
+            fn_body(source, "check_selection_and_show_toolbar").expect("选区检测本体不见了");
+        assert!(
+            strip_line_comments(worker_body).contains(needle),
+            "check_selection_and_show_toolbar 没有真的做选区检测"
+        );
+        assert_eq!(
+            source.matches(needle).count(),
+            1,
+            "选区检测只应有一个调用点（在派发线程内）"
+        );
+    }
+
+    /// 契约：在飞占有必须由 `Drop` 复位。
+    ///
+    /// 检测线程里跑的是跨进程 UIA / 剪贴板 / OCR，panic 后不会再执行到函数末尾；
+    /// 手写复位会让占有永久为真 ⇒ 拖拽弹工具栏从此静默失效，只能重启，
+    /// 而 release 是 GUI 子系统，panic 连日志都没有。
+    #[test]
+    fn selection_check_flag_is_released_by_a_drop_guard() {
+        let source = include_str!("mouse.rs");
+        let dispatch = fn_body(source, "spawn_selection_check").expect("spawn_selection_check 不见了");
+        let code = strip_line_comments(dispatch);
+        assert!(
+            code.contains("SelectionCheckGuard"),
+            "spawn_selection_check 应当用 SelectionCheckGuard 管理在飞占有"
+        );
+        // 守卫必须在 spawn **之前**构造：thread::spawn 自身失败会 panic，
+        // 守卫若在线程内部才构造，占有就永远卡住了。
+        let guard_at = code.find("SelectionCheckGuard(").expect("守卫构造不见了");
+        let spawn_at = code.find(".spawn(").expect("派发线程不见了");
+        assert!(
+            guard_at < spawn_at,
+            "守卫必须在 .spawn( 之前构造，否则 spawn 失败时占有永久卡死"
+        );
+        let guard_impl = source
+            .find("impl Drop for SelectionCheckGuard")
+            .expect("SelectionCheckGuard 的 Drop 实现不见了：占有必须靠 Drop 复位");
+        let inflight = source
+            .find("struct SelectionCheckGuard")
+            .expect("SelectionCheckGuard 定义不见了");
+        assert!(inflight < guard_impl, "Drop 实现应在结构体定义之后");
+    }
+
+    /// 契约：拖选矩形必须由**检测线程自己**写。
+    ///
+    /// `ocr_selection` 的拖选矩形是全局值，而 OCR 那一级要到检测线程里才读它。
+    /// 若改由消费线程在派发前写，第二次拖拽会在第一次检测跑到 OCR 之前把它覆盖掉
+    /// ⇒ 拿别人的区域去 OCR（工具栏内容与选区对不上）。随请求传参 + 检测线程内写才安全。
+    #[test]
+    fn drag_rect_is_written_by_the_check_thread_not_the_consumer() {
+        let source = include_str!("mouse.rs");
+        // 拼出标识符，避免本用例自己的字面量干扰
+        let token = concat!("set_last_drag", "_rect");
+        let hook_code =
+            strip_line_comments(fn_body(source, "start_hook").expect("start_hook 不见了"));
+        assert!(
+            !hook_code.contains(token),
+            "拖选矩形又被消费线程抢先写了：OCR 那一级在检测线程里才读它，\
+             第二次拖拽会覆盖第一次的矩形（拿别人的区域去 OCR）。请随请求传参。"
+        );
+        let runner = strip_line_comments(
+            fn_body(source, "run_selection_check").expect("run_selection_check 不见了"),
+        );
+        assert!(
+            runner.contains(token),
+            "run_selection_check 应当把本次拖选矩形写进去"
+        );
+    }
+
+    /// 契约：检出结果一旦被用户的**新操作**顶掉，就不许再弹工具栏。
+    ///
+    /// 链是异步的（最坏秒级），期间用户可能已经点向别处。旧实现同步跑在消费线程上，
+    /// 那次按下会排在队列里、等工具栏显示之后才处理，「点外部即关闭」顺手生效；
+    /// 异步之后必须先比对交互序号，否则表现为「点了外面它还在」。
+    #[test]
+    fn stale_selection_result_is_dropped_before_showing_the_toolbar() {
+        let source = include_str!("mouse.rs");
+        let body = strip_line_comments(
+            fn_body(source, "check_selection_and_show_toolbar").expect("选区检测本体不见了"),
+        );
+        let guard_at = body
+            .find("interaction_seq")
+            .expect("检测本体没有比对交互序号：过期结果会照样弹工具栏");
+        let show_at = body.find(".show()").expect("检测本体应当会显示工具栏");
+        assert!(
+            guard_at < show_at,
+            "序号比对必须在显示工具栏**之前**，否则过期结果仍会弹出来"
+        );
+        // 序号必须来自本次请求（形参）：现读全局永远等于自己，等于没判。
+        let sig_start = source
+            .find("fn check_selection_and_show_toolbar")
+            .expect("检测本体不见了");
+        let sig_end = source[sig_start..].find('{').expect("函数签名不见了") + sig_start;
+        assert!(
+            source[sig_start..sig_end].contains("interaction_seq: u64"),
+            "interaction_seq 必须随请求冻结构成形参，不能现读全局"
+        );
+    }
+
+    /// 派发/收尾的**状态机**：两次决策各是一步，且交接不留缝。
+    ///
+    /// 「判空」与「释放占有」必须同在一次调用里（见 `take_next_or_release`）：拆开就又回到
+    /// 上面那个交错 —— 收尾刚判完空、派发侧才落盘，那份请求从此没人认领。
+    #[test]
+    fn the_selection_queue_hands_the_baton_without_stranding() {
+        let mut queue = SelectionCheckQueue {
+            owner: None,
+            pending: None,
+        };
+
+        // 空闲时认领：自己起链，pending 不被写
+        assert!(queue.claim_or_park(1, request(1)), "空闲时应当认领");
+        assert_eq!(queue.owner, Some(1));
+        assert!(queue.pending.is_none());
+
+        // 在飞期间：挂起，且**只保留最新一次**（旧的被顶掉是设计，结果由序号兜住）
+        assert!(!queue.claim_or_park(2, request(2)), "在飞期间不该再起一条链");
+        assert!(!queue.claim_or_park(3, request(3)), "在飞期间不该再起一条链");
+        assert_eq!(queue.pending, Some(request(3)), "只保留最新一次");
+
+        // 收尾取走它继续跑，且**不释放占有**（还有活要干）
+        assert_eq!(queue.take_next_or_release(), Some(request(3)));
+        assert_eq!(queue.owner, Some(1), "还有活要干，占有没有释放");
+
+        // ★ 取空 = 没活了：**同一次调用里**连占有一起释放 —— 派发侧要等到这一刻才可能
+        //   起新链。若把释放挪到别处，就留出「判完之后还有人落盘」的窗口。
+        assert_eq!(queue.take_next_or_release(), None);
+        assert_eq!(
+            queue.owner, None,
+            "判空必须连占有一起释放，否则派发侧永远起不来新链（拖拽从此不弹工具栏）"
+        );
+        assert!(queue.claim_or_park(4, request(4)), "释放后应当能再认领");
+    }
+
+    /// 守卫析构只在**仍持有**时复位占有。
+    ///
+    /// 无条件复位会把后来者的占有抹掉 —— 那正是「两条链并发」的入口，
+    /// 而链里会模拟 Ctrl+C 读回滚剪贴板，两条并发会互相踩。
+    #[test]
+    fn a_stale_guard_never_releases_someone_elses_claim() {
+        let mut queue = SelectionCheckQueue {
+            owner: Some(7),
+            pending: None,
+        };
+        // 上一轮的守卫迟到析构
+        queue.release(6);
+        assert_eq!(queue.owner, Some(7), "迟到的守卫不许抹掉后来者的占有");
+        queue.release(7);
+        assert_eq!(queue.owner, None, "持有它的那一轮才该复位");
+    }
+
+    /// 契约：挂起请求必须能被认领，不许卡死。
+    ///
+    /// ★ 结构性约束：**在飞占有与挂起请求必须是同一把锁**。
+    ///
+    /// 曾经是两把锁（一个原子标志位 + 一个 `pending` 互斥量）：派发侧「先抢标志位、抢不到
+    /// 才写 pending」，收尾侧「先 take 到 None、再释放标志位」。两组操作的顺序**交叉**，
+    /// 于是存在这个交错 ——
+    /// ```text
+    /// C: take() → None          ← 判定「没活了」，准备退出
+    /// P: CAS 失败（标志位此刻仍为 true）
+    /// P: *pending = Some(req)   ← 挂起请求落盘，指望 C 来取
+    /// C: 守卫析构 → 标志位 = false
+    /// ```
+    /// 之后标志位为 false、pending 里躺着没人认领的请求，而它**不会自愈**：派发侧只在
+    /// 争抢失败时才写 pending，下一次拖拽会 CAS 成功、自己起线程 ⇒ 用户看到「拖一次没反应」。
+    ///
+    /// 曾经用第三个标志位 `RETIRE_COMPLETED` 打补丁，但它有两个洞：其一，收尾「判空」与
+    /// 释放标志位仍分属两把锁，窗口只是被收窄；其二，接手分支没有真正抢回在飞标志位，
+    /// 走进它之后**整条新链都在无人占有的状态下跑**，后续任意一次拖拽都能再起一条链 ——
+    /// 与「检测不并发」直接冲突（链里会模拟 Ctrl+C 读回滚剪贴板，两条并发互相踩）。
+    ///
+    /// 所以这里钉两件行为用例覆盖不到的事：**决策各只有一处**、**锁不许被带到检测链上去**。
+    #[test]
+    fn queued_selection_check_is_never_stranded() {
+        let source = include_str!("mouse.rs");
+        let production = strip_line_comments(
+            source.split("#[cfg(test)]").next().expect("应有生产代码段"),
+        );
+        let dispatch = fn_body(&production, "spawn_selection_check").expect("派发函数不见了");
+
+        // 「释放占有」只允许两处：判空时的释放、守卫按编号复位。多一处就可能把
+        // 后来者的占有抹掉（= 两条链并发）。
+        assert_eq!(
+            production.matches("owner = None").count(),
+            2,
+            "释放占有的路径只该有两条（take_next_or_release 判空释放、release 按编号复位）：\
+             多出来的那条很可能无条件清掉别人的占有"
+        );
+
+        // 收尾循环里 `selection_queue()` 只能当临时量用（用完即放）。绑成变量再跑检测，
+        // 锁就会被占住整条链（秒级），而派发侧跑在钩子事件的消费线程上 —— 那正是这个模块
+        // 一直在躲的"消费线程被堵住"。
+        let spawn_at = dispatch.find(".spawn(").expect("派发线程不见了");
+        let retire = strip_whitespace(&dispatch[spawn_at..]);
+        assert!(
+            !retire.contains("letmutqueue") && !retire.contains("letqueue"),
+            "收尾循环不许把 `selection_queue()` 绑成变量：锁会一直持有到检测链跑完\
+             （可能秒级），派发侧全堵在钩子事件的消费线程上"
+        );
+
+        // 老的两把锁方案不许回来
+        assert!(
+            !production.contains("RETIRE_COMPLETED")
+                && !production.contains("PENDING_SELECTION_CHECK")
+                && !production.contains("selection_check_inflight"),
+            "派发状态只能有一把锁（SELECTION_QUEUE）与一个占有编号：两把锁就必然留下\
+             「判空之后还有人落盘」的交错，三个标志位互相握手也补不掉。"
+        );
+    }
+
+    /// 造一条检测请求（只用到序号，几何值无关紧要）。
+    fn request(interaction_seq: u64) -> SelectionCheckRequest {
+        SelectionCheckRequest {
+            drag: (0, 0, 0, 0),
+            interaction_seq,
+        }
+    }
+
+    /// 去掉所有空白（含换行/缩进）：契约断言往往要跨行比对一小段代码，
+    /// 直接被换行与缩进隔断会让守卫失准。
+    fn strip_whitespace(code: &str) -> String {
+        code.chars().filter(|ch| !ch.is_whitespace()).collect()
+    }
+
+    /// 取出 `fn <name>` 的函数体（按大括号配平），供上面的源码级契约测试使用。
+    fn fn_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+        let start = source.find(&format!("fn {name}"))?;
+        let open = source[start..].find('{')? + start;
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[open..open + offset]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// 剥掉整行注释：把守卫钉的调用**注释掉**（而不是删掉）在文本层面看起来「还在」，
+    /// 不剥的话源码级守卫形同虚设。
+    fn strip_line_comments(code: &str) -> String {
+        code.lines()
+            .map(|line| match line.find("//") {
+                Some(index) => &line[..index],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// 下面几个用例都直接读写全局 `STATE`，而 `mouse_down_valid` 是它们共用的字段：

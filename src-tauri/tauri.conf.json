@@ -83,11 +83,23 @@
     "publisher": "Levitaire",
     "windows": {
       "nsis": {
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ]
+      },
+      "wix": {
+        "language": {
+          "zh-CN": {
+            "localePath": "./wix/locales/zh-CN.wxl"
+          }
+        }
       }
     },
     "resources": {
-      "resources/ocr/*": "ocr/"
+      "resources/ocr/*": "ocr/",
+      "resources/rules/*": "rules/"
     },
     "icon": [
       "icons/32x32.png",

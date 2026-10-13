@@ -134,6 +134,17 @@ export const FLOATING_TOOLS: FloatingTool[] = [
     loader: () => import("./sticky-note/StickyNoteManager"),
     activation: "immediate",
   },
+  {
+    id: "system-cleaner",
+    name: "系统清理",
+    icon: "Broom",
+    description:
+      "扫描并清理 C 盘垃圾：临时文件、开发缓存、缩略图等；每一项都写明后果，删不掉的绝不硬删",
+    category: "system",
+    defaultEnabled: false,
+    loader: () => import("./system-cleaner/SystemCleanerTool"),
+    activation: "immediate",
+  },
 ];
 
 /** 类别显示名 */
@@ -179,6 +190,11 @@ export const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string; setter: 
     setter: "set_sticky_notes_enabled",
   },
   { id: "utility-hub", getter: "get_utility_hub_enabled", setter: "set_utility_hub_enabled" },
+  {
+    id: "system-cleaner",
+    getter: "get_system_cleaner_enabled",
+    setter: "set_system_cleaner_enabled",
+  },
 ];
 
 /** 取某工具的后端启用开关命令；未登记（有守卫测试兜底）时返回 undefined。 */
