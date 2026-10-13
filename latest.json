@@ -1,11 +1,11 @@
 {
-  "version": "0.1.6",
-  "notes": "新增窗口置顶工具；番茄钟并入时间工具，时钟/倒计时/番茄钟/秒表/月历收拢为同一悬浮窗；系统监控新增多套布局与 Sparkline 曲线；全屏录制新增原生指示层，指示框不会被录进成片；在线更新重做为后台静默下载、就绪后点击即装，支持断网续用与静默安装；修复剪贴板回滚覆盖用户刚复制内容、悬浮球透明区吞点击、浮窗跑出屏幕、截图遮罩自激渲染等一批浮窗缺陷",
-  "pub_date": "2026-09-16T08:26:08.401Z",
+  "version": "0.1.7",
+  "notes": "新增系统清理工具与可恢复隔离区；托盘菜单新增「重启应用」；截图标注画后可调整；快速输入二级子转盘与音效；便利贴缩放与图片；安装包体积 92MB→37MB",
+  "pub_date": "2026-10-13T04:36:42.801Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDh4R01ZdjdzQ0s3Z1pZcE83MEJkdFA0eXNtSjl5K1BIWDM1MkhQdUJLTGdibjZvWnF1YnZmNFVoM0hLU25yWUtWUGxRWWxDdmVWTjVUK3JqakNHb1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTQ3MTY4CWZpbGU6TGV2aXRhaXJlXzAuMS42X3g2NC1zZXR1cC5leGUKUGxEOSs2ZXd2Uk5kRCt6ZG02Tlg4VzdmTVIrWFhOVGZzdVg1cjFlNWE4VWxpWmxDZlJZTGY1eVF5QlRrT0QzcVp6OXhrQ0JqZnNHNXBlS2g3VWlLQ2c9PQo=",
-      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.6/Levitaire_0.1.6_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDZZeHFNNWdaVnNxZGdSblVZNnc0SlVRZjBqMVdiY0JBNVlQTDlOUm9wM2ExdW9BL09KSmFZOUc0Mnk4QlpqTS9nMHdUS2tYRkk5Tk13QjQwOWtsSFE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODY2MjAyCWZpbGU6TGV2aXRhaXJlXzAuMS43X3g2NC1zZXR1cC5leGUKT3dsQ3ZYVWZ1QnZiV00rN1p6ZmRpOWFvbXE0d2NlcU5Yb3hMZ0M3NWtwU3NuaHNUcjZOUFlBMWJoaWlOTG4wK0Y4NWFRbXFtYjRQWGJrVlZrMjNqQnc9PQo=",
+      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.7/Levitaire_0.1.7_x64-setup.exe"
     }
   }
 }
