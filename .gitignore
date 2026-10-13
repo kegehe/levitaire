@@ -10,6 +10,9 @@
 .claude/
 .agents/
 
+# Trae IDE 生成的实施计划 / 文档（工具产物，非项目源码）
+.trae/
+
 # Build results
 [Dd]ebug/
 [Rr]elease/
