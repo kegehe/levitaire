@@ -710,12 +710,23 @@ impl TodoStore {
         let data = self.data.lock().map_err(|_| ())?;
         let mut earliest: Option<DateTime<Utc>> = None;
         for item in &data.items {
-            if item.deleted_at.is_some() || item.status != TodoStatus::Active || item.reminder_fired_at.is_some() {
+            if item.deleted_at.is_some()
+                || item.status != TodoStatus::Active
+                || item.reminder_fired_at.is_some()
+            {
                 continue;
             }
-            let Some(remind) = item.remind_at.as_deref().and_then(|value| DateTime::parse_from_rfc3339(value).ok()) else { continue };
+            let Some(remind) = item
+                .remind_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            else {
+                continue;
+            };
             let remind = remind.with_timezone(&Utc);
-            if remind > now && earliest.is_none_or(|next| remind < next) { earliest = Some(remind); }
+            if remind > now && earliest.is_none_or(|next| remind < next) {
+                earliest = Some(remind);
+            }
         }
         // to_std 对超出 std::time::Duration 范围的巨远期提醒返回 None，
         // 此时返回 None 让调度线程回退到空闲等待，避免 sleep(0) 造成忙轮询。
@@ -965,8 +976,8 @@ pub fn start_scheduler(app: AppHandle) {
                             // 通过启用检查即视为“已播报”：先推进 shown 再发送，
                             // 这样发送后若被禁用，中断只影响后续项，本条不会重复补发。
                             shown += 1;
-                            let _ =
-                                app.emit("todo-reminder", TodoReminderPayload { item: item.clone() });
+                            let _ = app
+                                .emit("todo-reminder", TodoReminderPayload { item: item.clone() });
                             let still_enabled = app
                                 .try_state::<crate::config::ConfigManager>()
                                 .map(|config| {
@@ -1082,7 +1093,10 @@ mod tests {
         fired.reminder_fired_at = Some(now.to_rfc3339());
         let (store, _path) = test_store(vec![future, fired]);
         let wait = store.next_reminder_in(now).unwrap().unwrap();
-        assert!(wait > Duration::from_secs(4 * 60), "wait should target the 5-min reminder");
+        assert!(
+            wait > Duration::from_secs(4 * 60),
+            "wait should target the 5-min reminder"
+        );
         assert!(wait <= Duration::from_secs(5 * 60));
     }
 
@@ -1261,7 +1275,11 @@ mod tests {
                 test_list(LEGACY_INBOX_LIST_ID, "Inbox"),
                 test_list("list-1", "工作"),
             ],
-            items: vec![test_item("inboxed", 1), test_item("listed", 2), test_item("dangling", 3)],
+            items: vec![
+                test_item("inboxed", 1),
+                test_item("listed", 2),
+                test_item("dangling", 3),
+            ],
         };
         file.items[0].list_id = LEGACY_INBOX_LIST_ID.to_string();
         file.items[1].list_id = "list-1".to_string();

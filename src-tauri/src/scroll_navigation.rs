@@ -40,8 +40,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_CONTROL, VK_END, VK_HOME, VK_NEXT, VK_PRIOR,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
-    IsWindow, PostMessageW, WindowFromPoint, GA_ROOT, WM_KEYDOWN, WM_KEYUP, WM_MOUSEWHEEL,
+    GetAncestor, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsWindow,
+    PostMessageW, WindowFromPoint, GA_ROOT, WM_KEYDOWN, WM_KEYUP, WM_MOUSEWHEEL,
 };
 
 const UIA_NO_SCROLL: f64 = -1.0;
@@ -499,8 +499,8 @@ fn set_percent_on(target: HWND, percent: f64) -> Result<ScrollNavigationState, S
 }
 
 fn nudge_percent_on(target: HWND, delta: f64) -> Result<ScrollNavigationState, String> {
-    let current = cached_probe(target)
-        .ok_or_else(|| "目标窗口未提供可精确控制的垂直滚动条".to_string())?;
+    let current =
+        cached_probe(target).ok_or_else(|| "目标窗口未提供可精确控制的垂直滚动条".to_string())?;
     set_percent_on(target, current + delta)
 }
 
@@ -705,7 +705,10 @@ mod tests {
         // 负坐标也要能装进去（副屏在主屏左侧 / 上方时）
         let negative = wheel_lparam(-1920, -1080);
         assert_eq!(negative.0 as u32 & 0xFFFF, (-1920i32 as u32) & 0xFFFF);
-        assert_eq!((negative.0 as u32 >> 16) & 0xFFFF, (-1080i32 as u32) & 0xFFFF);
+        assert_eq!(
+            (negative.0 as u32 >> 16) & 0xFFFF,
+            (-1080i32 as u32) & 0xFFFF
+        );
     }
 
     #[test]
@@ -725,13 +728,19 @@ mod tests {
         // UIA 百分比 0=顶部 / 滚轮增量 正=向上，两套约定方向相反 —— 这一条把
         // 「点向上翻页结果往下走」这类错误钉死。实测方向依据见
         // D:\tmp\scroll-nav-audit\edge_probe.py（正增量 800 格回到顶部基线）。
-        let ScrollPlan::Page { delta, direction, .. } = plan_for("page-up").unwrap() else {
+        let ScrollPlan::Page {
+            delta, direction, ..
+        } = plan_for("page-up").unwrap()
+        else {
             panic!("page-up 应当是翻页计划");
         };
         assert!(delta < 0.0, "向上翻页必须减小百分比");
         assert!(direction > 0, "向上翻页的滚轮必须是正（向上）方向");
 
-        let ScrollPlan::Page { delta, direction, .. } = plan_for("page-down").unwrap() else {
+        let ScrollPlan::Page {
+            delta, direction, ..
+        } = plan_for("page-down").unwrap()
+        else {
             panic!("page-down 应当是翻页计划");
         };
         assert!(delta > 0.0, "向下翻页必须增大百分比");

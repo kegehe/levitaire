@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Core::MediaSource;
-use windows::Media::Playback::{MediaPlayer, MediaPlaybackSession};
+use windows::Media::Playback::{MediaPlaybackSession, MediaPlayer};
 use windows::Media::SpeechSynthesis::{SpeechSynthesizer, VoiceGender};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
@@ -248,7 +248,10 @@ pub fn speak(
                         let is_latest_request =
                             state.latest_request.load(Ordering::SeqCst) == player_id;
                         let taken = state.player.lock().ok().and_then(|mut g| {
-                            if g.as_ref().map(|(id, _, _)| *id == player_id).unwrap_or(false) {
+                            if g.as_ref()
+                                .map(|(id, _, _)| *id == player_id)
+                                .unwrap_or(false)
+                            {
                                 g.take().map(|(_, p, t)| (p, t))
                             } else {
                                 None
@@ -302,38 +305,37 @@ pub fn speak(
             if let Ok(session) = player.PlaybackSession() {
                 // 克隆会话供回调读取进度（MediaPlaybackSession 为 COM 接口，可 clone）
                 let session_for_progress = session.clone();
-                let progress_handler =
-                    TypedEventHandler::<MediaPlaybackSession, windows::core::IInspectable>::new(
-                        move |_sender, _args| {
-                            if let Some(st) = app_for_progress.try_state::<TtsState>() {
-                                if st.latest_request.load(Ordering::SeqCst) != player_id {
-                                    return Ok(());
-                                }
-                            }
-                            if let (Ok(pos), Ok(dur)) = (
-                                session_for_progress.Position(),
-                                session_for_progress.NaturalDuration(),
-                            )
-                            {
-                                let pos_ms = pos.Duration as u64 / 10_000;
-                                // NaturalDuration 对未知时长返回无限（i64::MAX），以 0 表示"未知"，避免前端溢出
-                                let dur_ms = if dur.Duration < 0 || dur.Duration >= i64::MAX / 2 {
-                                    0
-                                } else {
-                                    dur.Duration as u64 / 10_000
-                                };
-                                let _ = app_for_progress.emit(
-                                    "tts-progress",
-                                    serde_json::json!({
-                                        "requestId": player_id,
-                                        "positionMs": pos_ms,
-                                        "durationMs": dur_ms,
-                                    }),
-                                );
-                            }
-                            Ok(())
-                        },
-                    );
+                let progress_handler = TypedEventHandler::<
+                    MediaPlaybackSession,
+                    windows::core::IInspectable,
+                >::new(move |_sender, _args| {
+                    if let Some(st) = app_for_progress.try_state::<TtsState>() {
+                        if st.latest_request.load(Ordering::SeqCst) != player_id {
+                            return Ok(());
+                        }
+                    }
+                    if let (Ok(pos), Ok(dur)) = (
+                        session_for_progress.Position(),
+                        session_for_progress.NaturalDuration(),
+                    ) {
+                        let pos_ms = pos.Duration as u64 / 10_000;
+                        // NaturalDuration 对未知时长返回无限（i64::MAX），以 0 表示"未知"，避免前端溢出
+                        let dur_ms = if dur.Duration < 0 || dur.Duration >= i64::MAX / 2 {
+                            0
+                        } else {
+                            dur.Duration as u64 / 10_000
+                        };
+                        let _ = app_for_progress.emit(
+                            "tts-progress",
+                            serde_json::json!({
+                                "requestId": player_id,
+                                "positionMs": pos_ms,
+                                "durationMs": dur_ms,
+                            }),
+                        );
+                    }
+                    Ok(())
+                });
                 // 注册失败则退回前端轮询（PositionChanged 一般总能注册成功，无需 fail-fast）
                 progress_token = session.PositionChanged(&progress_handler).ok();
             }
@@ -544,7 +546,12 @@ pub fn is_paused(state: &TtsState) -> bool {
 /// 前端据此只显示已播时长、隐藏进度条比例。
 /// COM 调用放 MTA 线程（同 pause/resume），避免命令线程未初始化 COM 导致调用失败。
 pub fn get_progress(state: &TtsState) -> Option<(u64, u64, bool)> {
-    let player = state.player.lock().ok()?.as_ref().map(|(_, p, _)| p.clone())?;
+    let player = state
+        .player
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|(_, p, _)| p.clone())?;
     let res = std::thread::spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

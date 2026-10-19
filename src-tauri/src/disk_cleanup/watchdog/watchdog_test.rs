@@ -31,7 +31,12 @@ fn settings() -> WatchSettings {
 #[test]
 fn an_alert_needs_both_size_and_growth() {
     let config = settings();
-    let big_and_growing = discovered("C:\\a", 10 * 1024 * 1024 * 1024, Some(5 * 1024 * 1024 * 1024), Some(7));
+    let big_and_growing = discovered(
+        "C:\\a",
+        10 * 1024 * 1024 * 1024,
+        Some(5 * 1024 * 1024 * 1024),
+        Some(7),
+    );
     let big_but_flat = discovered("C:\\b", 50 * 1024 * 1024 * 1024, Some(1024), Some(7));
     let growing_but_small = discovered("C:\\c", 100 * 1024 * 1024, Some(90 * 1024 * 1024), Some(7));
 
@@ -63,7 +68,12 @@ fn without_history_the_watchdog_stays_silent() {
 #[test]
 fn a_short_observation_window_is_not_enough() {
     let config = settings();
-    let quick = discovered("C:\\a", 10 * 1024 * 1024 * 1024, Some(5 * 1024 * 1024 * 1024), Some(1));
+    let quick = discovered(
+        "C:\\a",
+        10 * 1024 * 1024 * 1024,
+        Some(5 * 1024 * 1024 * 1024),
+        Some(1),
+    );
     assert!(
         evaluate(&[quick], &config).is_empty(),
         "只观察了 1 天（阈值 7 天）就报警，那是抖动"
@@ -73,7 +83,12 @@ fn a_short_observation_window_is_not_enough() {
 #[test]
 fn a_shrinking_directory_is_never_an_alert() {
     let config = settings();
-    let shrank = discovered("C:\\a", 10 * 1024 * 1024 * 1024, Some(-5 * 1024 * 1024 * 1024), Some(7));
+    let shrank = discovered(
+        "C:\\a",
+        10 * 1024 * 1024 * 1024,
+        Some(-5 * 1024 * 1024 * 1024),
+        Some(7),
+    );
     assert!(evaluate(&[shrank], &config).is_empty());
 }
 
@@ -123,7 +138,10 @@ fn the_notification_body_does_not_leak_the_full_path() {
     let body = summarize(&alerts);
     assert!(body.contains("DiagOutputDir"), "要说清是哪个目录：{body}");
     assert!(!body.contains(r"C:\"), "通知里不得出现完整路径：{body}");
-    assert!(!body.contains("AppData"), "通知里不得出现中间路径段：{body}");
+    assert!(
+        !body.contains("AppData"),
+        "通知里不得出现中间路径段：{body}"
+    );
     assert!(body.contains("7 天"), "要说清时间窗口：{body}");
     assert!(body.contains("5.0 GB"), "要说清长了多少：{body}");
 }
@@ -239,7 +257,10 @@ fn custom_targets_replace_the_default() {
         watched: vec![r"D:\Games".into(), r"D:\Models".into()],
         ..settings()
     };
-    assert_eq!(custom.targets(), vec![r"D:\Games".to_string(), r"D:\Models".to_string()]);
+    assert_eq!(
+        custom.targets(),
+        vec![r"D:\Games".to_string(), r"D:\Models".to_string()]
+    );
 }
 
 /// 设置默认**关闭**：一个只要装上就每天自动扫盘的工具有点越界。

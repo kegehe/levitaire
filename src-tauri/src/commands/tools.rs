@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// 显示滚动导航独立窗口。
 ///
 /// `async` + `spawn_blocking`：抓目标窗口要轮询前台窗口（最多 12×10ms）并访问 Win32，
@@ -35,7 +34,6 @@ pub async fn start_scroll_navigation(
     Ok(state)
 }
 
-
 #[tauri::command]
 pub fn hide_scroll_navigation(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("scroll-navigator-overlay") {
@@ -43,7 +41,6 @@ pub fn hide_scroll_navigation(app: tauri::AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 #[tauri::command]
 pub async fn start_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
@@ -104,7 +101,6 @@ pub async fn start_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
     window.set_focus().map_err(|error| error.to_string())
 }
 
-
 #[tauri::command]
 pub fn show_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
     let window = app
@@ -114,12 +110,10 @@ pub fn show_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
     window.set_focus().map_err(|error| error.to_string())
 }
 
-
 #[tauri::command]
 pub fn stop_utility_color_pick() {
     crate::hooks::mouse::stop_color_pick();
 }
-
 
 #[tauri::command]
 pub fn hide_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
@@ -134,13 +128,11 @@ pub fn hide_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 获取通用工具启用状态（供前端卡片开关与后端真值同步）
 #[tauri::command]
 pub fn get_utility_hub_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_utility_hub_enabled()
 }
-
 
 /// 设置通用工具启用状态并持久化。
 ///
@@ -170,7 +162,6 @@ pub async fn set_utility_hub_enabled(
     config_manager.update_utility_hub_enabled(enabled)
 }
 
-
 #[tauri::command]
 pub fn start_utility_color_pick(app: tauri::AppHandle) -> Result<(), String> {
     let window = app
@@ -183,7 +174,6 @@ pub fn start_utility_color_pick(app: tauri::AppHandle) -> Result<(), String> {
     crate::hooks::mouse::start_color_pick()
 }
 
-
 /// 读取滚动导航状态。
 ///
 /// 前端每 2s 轮询一次，命令内部会做一次带预算的跨进程 UIA 探测（最坏 ~120ms，
@@ -195,7 +185,6 @@ pub async fn get_scroll_navigation_state() -> crate::scroll_navigation::ScrollNa
         .unwrap_or_else(|_| crate::scroll_navigation::state_unavailable())
 }
 
-
 /// 设置滚动百分比（只有能精确控制的窗口才可用）。
 #[tauri::command]
 pub async fn set_scroll_navigation_percent(
@@ -205,7 +194,6 @@ pub async fn set_scroll_navigation_percent(
         .await
         .map_err(|error| format!("滚动操作被中断: {error}"))?
 }
-
 
 /// 重新绑定滚动目标窗口。
 ///
@@ -219,27 +207,29 @@ pub async fn recapture_scroll_target(
     // is_visible() 是「发消息给事件循环并等回执」的阻塞调用，必须待在阻塞线程里；
     // 只回显「本来就可见」的窗口，免得把历史遗留的隐藏浮窗一起弹出来。
     // 状态探测（跨进程 UIA，最坏 ~120ms）也一并留在这里，别放回 async 上下文。
-    let (restore, state): (Vec<&'static str>, crate::scroll_navigation::ScrollNavigationState) =
-        tokio::task::spawn_blocking(move || {
-            let restore: Vec<&'static str> = ["utility-hub-overlay", "scroll-navigator-overlay"]
-                .into_iter()
-                .filter(|label| {
-                    capture_app
-                        .get_webview_window(label)
-                        .is_some_and(|window| window.is_visible().unwrap_or(false))
-                })
-                .collect();
-            for label in &restore {
-                if let Some(window) = capture_app.get_webview_window(label) {
-                    let _ = window.hide();
-                }
+    let (restore, state): (
+        Vec<&'static str>,
+        crate::scroll_navigation::ScrollNavigationState,
+    ) = tokio::task::spawn_blocking(move || {
+        let restore: Vec<&'static str> = ["utility-hub-overlay", "scroll-navigator-overlay"]
+            .into_iter()
+            .filter(|label| {
+                capture_app
+                    .get_webview_window(label)
+                    .is_some_and(|window| window.is_visible().unwrap_or(false))
+            })
+            .collect();
+        for label in &restore {
+            if let Some(window) = capture_app.get_webview_window(label) {
+                let _ = window.hide();
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            crate::scroll_navigation::capture_current_target(&capture_app);
-            (restore, crate::scroll_navigation::state())
-        })
-        .await
-        .map_err(|error| format!("目标窗口捕获失败: {error}"))?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        crate::scroll_navigation::capture_current_target(&capture_app);
+        (restore, crate::scroll_navigation::state())
+    })
+    .await
+    .map_err(|error| format!("目标窗口捕获失败: {error}"))?;
 
     for label in restore {
         if let Some(window) = app.get_webview_window(label) {
@@ -249,7 +239,6 @@ pub async fn recapture_scroll_target(
     }
     Ok(state)
 }
-
 
 // ─── 窗口置顶（通用工具的子工具） ──────────────────────────────
 
@@ -272,7 +261,6 @@ pub fn start_window_pin_pick(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 退出窗口置顶点选模式（面板切到别的子工具、关闭或收起时调用）。
 #[tauri::command]
 pub fn stop_window_pin_pick(app: tauri::AppHandle) {
@@ -280,13 +268,11 @@ pub fn stop_window_pin_pick(app: tauri::AppHandle) {
     crate::window_pin::publish(&app, None);
 }
 
-
 /// 读取当前由本工具置顶的窗口清单。
 #[tauri::command]
 pub fn get_pinned_windows() -> Vec<crate::window_pin::PinnedWindowInfo> {
     crate::window_pin::list()
 }
-
 
 /// 取消指定窗口的置顶（面板清单里的单条操作）。
 ///
@@ -303,7 +289,6 @@ pub async fn unpin_window(app: tauri::AppHandle, hwnd: i64) -> Result<(), String
     Ok(())
 }
 
-
 /// 取消全部由本工具置顶的窗口。
 ///
 /// 只动清单内的窗口：用户自己、或别的程序把某扇窗口置顶，与 Levitaire 无关，
@@ -312,8 +297,7 @@ pub async fn unpin_window(app: tauri::AppHandle, hwnd: i64) -> Result<(), String
 #[tauri::command]
 pub async fn unpin_all_windows(app: tauri::AppHandle) {
     let worker = app.clone();
-    let outcome =
-        tokio::task::spawn_blocking(move || crate::window_pin::unpin_all(&worker)).await;
+    let outcome = tokio::task::spawn_blocking(move || crate::window_pin::unpin_all(&worker)).await;
 
     let (done, failed) = match outcome {
         Ok(counts) => counts,

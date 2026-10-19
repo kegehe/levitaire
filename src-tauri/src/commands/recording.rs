@@ -1,12 +1,10 @@
 use super::*;
 
-
 /// Tauri 命令包装：进入录屏选区模式
 #[tauri::command]
 pub fn start_recording_select(app: tauri::AppHandle) -> Result<(), String> {
     start_recording_select_inner(app)
 }
-
 
 /// 开始录制（区域+模式+fps 已确定）
 #[tauri::command]
@@ -66,7 +64,6 @@ pub fn start_recording(
     Ok(())
 }
 
-
 /// The control window is created asynchronously by the frontend. This command
 /// only makes the full-screen selection overlay click-through.
 #[tauri::command]
@@ -90,7 +87,6 @@ pub fn show_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
     let _ = app.emit("recording-controls-started", ());
     Ok(())
 }
-
 
 /// 显示全屏录制专用的原生指示层（屏幕边缘呼吸框 + 录制控制栏）。
 ///
@@ -122,7 +118,6 @@ pub fn show_recording_indicator(
     crate::recording::indicator::show(&app, region, dark)
 }
 
-
 /// 销毁录制控制栏并恢复主 overlay 的交互。
 ///
 /// 录制控制栏有两套：区域/窗口录制的 WebView2 控制窗（`recording-controls`）与
@@ -147,7 +142,6 @@ pub fn finish_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 暂停录制
 #[tauri::command]
 pub fn pause_recording(app: tauri::AppHandle) -> Result<(), String> {
@@ -156,7 +150,6 @@ pub fn pause_recording(app: tauri::AppHandle) -> Result<(), String> {
     let _ = app.emit("recording-paused", ());
     Ok(())
 }
-
 
 /// 恢复录制
 #[tauri::command]
@@ -167,7 +160,6 @@ pub fn resume_recording(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 停止录制并编码
 #[tauri::command]
 pub fn stop_recording(app: tauri::AppHandle) -> Result<(), String> {
@@ -177,7 +169,6 @@ pub fn stop_recording(app: tauri::AppHandle) -> Result<(), String> {
     finish_recording_controls(app)
 }
 
-
 /// 取消录制（丢弃）
 #[tauri::command]
 pub fn cancel_recording(app: tauri::AppHandle) -> Result<(), String> {
@@ -185,7 +176,6 @@ pub fn cancel_recording(app: tauri::AppHandle) -> Result<(), String> {
     state.cancel()?;
     finish_recording_controls(app)
 }
-
 
 /// Cancel an active recording and leave the selection overlay in one native
 /// operation. This is used by the control window, which is destroyed during
@@ -196,7 +186,6 @@ pub fn cancel_recording_and_select(app: tauri::AppHandle) -> Result<(), String> 
     state.cancel()?;
     cancel_recording_select(app)
 }
-
 
 /// 获取录制状态快照
 #[tauri::command]
@@ -214,14 +203,12 @@ pub fn get_recording_state(app: tauri::AppHandle) -> Result<serde_json::Value, S
     }))
 }
 
-
 /// 查询当前是否处于录制选区模式（前端 OverlaySwitcher 挂载时调用，
 /// 防止首次创建 overlay 窗口时 recording-select-switch 事件丢失导致模式不正确）
 #[tauri::command]
 pub fn is_recording_select_active() -> bool {
     crate::hooks::mouse::is_recording_mode()
 }
-
 
 /// 复制 GIF 到剪贴板
 /// 写入注册的 "GIF" 格式保留完整动画，同时写入 CF_DIB 位图（首帧）作为通用兼容回退
@@ -233,7 +220,6 @@ pub fn clipboard_set_gif(
     let bytes = decode_base64_media(&base64_data, "GIF")?;
     clipboard.copy_gif(&bytes).map_err(|e| e.to_string())
 }
-
 
 /// 保存 GIF 文件
 /// 如果配置了录屏保存路径，直接保存到该目录（自动生成带时间戳的文件名）；
@@ -253,15 +239,11 @@ pub async fn save_gif(
         let dir = std::path::Path::new(&save_path);
         if dir.is_dir() {
             // 生成带时间戳的文件名：recording_20260714_153020_123.gif
-            let now = chrono::Local::now();
-            let timestamp = now.format("%Y%m%d_%H%M%S");
-            let millis = now.timestamp_subsec_millis();
             let ext = std::path::Path::new(&filename)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("gif");
-            let auto_filename = format!("recording_{}_{}.{}", timestamp, millis, ext);
-            let full_path = dir.join(&auto_filename);
+            let full_path = super::media_filename::unique_path(dir, "recording", ext);
             tokio::task::spawn_blocking(move || {
                 std::fs::write(&full_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
                 Ok(true)
@@ -276,7 +258,6 @@ pub async fn save_gif(
         save_gif_with_dialog(&app, &bytes, &filename).await
     }
 }
-
 
 /// 保存已编码的临时视频文件，避免把大体积 MP4 通过 IPC/base64 往返传输。
 #[tauri::command]
@@ -305,15 +286,11 @@ pub async fn save_video_file(
     if !save_path.is_empty() {
         let dir = std::path::Path::new(&save_path);
         if dir.is_dir() {
-            let now = chrono::Local::now();
-            let timestamp = now.format("%Y%m%d_%H%M%S");
-            let millis = now.timestamp_subsec_millis();
             let ext = std::path::Path::new(&filename)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("mp4");
-            let auto_filename = format!("recording_{}_{}.{}", timestamp, millis, ext);
-            let target = dir.join(&auto_filename);
+            let target = super::media_filename::unique_path(dir, "recording", ext);
             tokio::task::spawn_blocking(move || {
                 std::fs::copy(&source, &target).map_err(|e| format!("写入文件失败: {}", e))?;
                 Ok(true)
@@ -327,7 +304,6 @@ pub async fn save_video_file(
         save_video_file_with_dialog(&app, &source, &filename).await
     }
 }
-
 
 /// 枚举可见窗口（窗口识别模式）
 /// 枚举可录制的窗口列表。
@@ -344,13 +320,11 @@ pub fn enumerate_windows(
     ))
 }
 
-
 /// 获取录屏工具启用状态
 #[tauri::command]
 pub fn get_recording_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_recording_enabled()
 }
-
 
 /// 设置录屏工具启用状态并持久化
 #[tauri::command]
@@ -372,13 +346,11 @@ pub fn set_recording_enabled(
     Ok(())
 }
 
-
 /// 获取录屏快捷键
 #[tauri::command]
 pub fn get_recording_hotkey(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
     config_manager.get_recording_hotkey()
 }
-
 
 /// 设置录屏快捷键
 #[tauri::command]
@@ -411,13 +383,11 @@ pub fn set_recording_hotkey(
     Ok(())
 }
 
-
 /// 获取录屏配置（JSON 字符串，空串表示未设置）
 #[tauri::command]
 pub fn get_recording_config(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
     config_manager.get_recording_config()
 }
-
 
 /// 更新录屏配置并持久化
 #[tauri::command]
@@ -428,13 +398,11 @@ pub fn set_recording_config(
     config_manager.update_recording_config(config)
 }
 
-
 /// 获取录屏文件保存路径（空串表示未设置，每次保存时弹出对话框）
 #[tauri::command]
 pub fn get_recording_save_path(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
     config_manager.get_recording_save_path()
 }
-
 
 /// 更新录屏文件保存路径并持久化
 #[tauri::command]
@@ -444,7 +412,6 @@ pub fn set_recording_save_path(
 ) -> Result<(), String> {
     config_manager.update_recording_save_path(path)
 }
-
 
 /// 退出录制选区模式（前端选区取消时调用）
 #[tauri::command]

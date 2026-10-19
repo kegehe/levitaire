@@ -34,7 +34,10 @@ fn snapshot(entries: Vec<DirEntryStat>) -> Snapshot {
 #[test]
 fn descendant_check_uses_component_boundaries() {
     assert!(is_descendant(r"C:\Users\me\AppData", r"C:\Users\me"));
-    assert!(is_descendant(r"C:\Users\me\AppData\Local\Temp", r"C:\Users"));
+    assert!(is_descendant(
+        r"C:\Users\me\AppData\Local\Temp",
+        r"C:\Users"
+    ));
     // 相等不是"后代"
     assert!(!is_descendant(r"C:\Users\me", r"C:\Users\me"));
     // 字符串前缀会把这些判成后代 —— 必须是组件边界
@@ -148,7 +151,8 @@ fn ranking_is_bounded_by_the_discovery_id_budget() {
 
 /// 造一棵装置：`root/a/b/c` 各层放文件，并在 `root/a` 里放一个指向别处的 junction。
 fn fixture(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("levitaire-discover-{tag}-{}", std::process::id()));
+    let root =
+        std::env::temp_dir().join(format!("levitaire-discover-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("a").join("b").join("c")).unwrap();
     fs::create_dir_all(root.join("sibling")).unwrap();
@@ -156,7 +160,11 @@ fn fixture(tag: &str) -> PathBuf {
     fs::write(root.join("a").join("x.bin"), vec![0u8; 2000]).unwrap();
     fs::write(root.join("a").join("b").join("y.bin"), vec![0u8; 4000]).unwrap();
     // 深层文件：只有"遍历到底"才会把它算进祖先
-    fs::write(root.join("a").join("b").join("c").join("z.bin"), vec![0u8; 8000]).unwrap();
+    fs::write(
+        root.join("a").join("b").join("c").join("z.bin"),
+        vec![0u8; 8000],
+    )
+    .unwrap();
     fs::write(root.join("sibling").join("s.bin"), vec![0u8; 500]).unwrap();
     root
 }
@@ -199,7 +207,10 @@ fn sizes_are_complete_even_when_the_report_depth_is_shallow() {
     let b = find(&snapshot, "b");
     assert_eq!(b.bytes, 12000);
     assert!(
-        !snapshot.entries.iter().any(|entry| entry.path.ends_with("c")),
+        !snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.path.ends_with("c")),
         "超过报告深度的目录不该出现在结果里"
     );
     let _ = fs::remove_dir_all(&root);
@@ -210,8 +221,14 @@ fn the_report_depth_controls_which_directories_are_listed() {
     let root = fixture("depth2");
     let shallow = scan(&root, 1);
     // 第 1 层只有 `a` 与 `sibling`
-    assert!(shallow.entries.iter().any(|entry| entry.path.ends_with("a")));
-    assert!(!shallow.entries.iter().any(|entry| entry.path.ends_with("b")));
+    assert!(shallow
+        .entries
+        .iter()
+        .any(|entry| entry.path.ends_with("a")));
+    assert!(!shallow
+        .entries
+        .iter()
+        .any(|entry| entry.path.ends_with("b")));
 
     let deeper = scan(&root, 3);
     assert!(deeper.entries.iter().any(|entry| entry.path.ends_with("c")));
@@ -222,10 +239,8 @@ fn the_report_depth_controls_which_directories_are_listed() {
 #[test]
 fn a_junction_contributes_nothing_to_its_parent() {
     let root = fixture("link");
-    let elsewhere = std::env::temp_dir().join(format!(
-        "levitaire-discover-target-{}",
-        std::process::id()
-    ));
+    let elsewhere =
+        std::env::temp_dir().join(format!("levitaire-discover-target-{}", std::process::id()));
     let _ = fs::remove_dir_all(&elsewhere);
     fs::create_dir_all(&elsewhere).unwrap();
     fs::write(elsewhere.join("huge.bin"), vec![0u8; 500_000]).unwrap();
@@ -263,10 +278,7 @@ fn a_pre_cancelled_scan_produces_no_snapshot() {
         &mut |_| {},
     )
     .unwrap();
-    assert!(
-        result.is_none(),
-        "半份快照不落盘：拿它算增量会得出错误结论"
-    );
+    assert!(result.is_none(), "半份快照不落盘：拿它算增量会得出错误结论");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -482,12 +494,12 @@ fn a_tie_is_broken_in_favour_of_the_deeper_directory() {
 fn the_fallback_baseline_is_the_oldest_snapshot_not_the_newest() {
     let now = chrono::Local::now();
     let stamp = |days_ago: i64| {
-        (now - chrono::Duration::days(days_ago))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+        (now - chrono::Duration::days(days_ago)).to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
     };
     // 从新到旧：3 小时前、1 天前、3 天前
     let three_hours = Snapshot {
-        taken_at: (now - chrono::Duration::hours(3)).to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        taken_at: (now - chrono::Duration::hours(3))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
         ..snapshot(vec![])
     };
     let one_day = Snapshot {
@@ -500,8 +512,12 @@ fn the_fallback_baseline_is_the_oldest_snapshot_not_the_newest() {
     };
 
     // 要求 7 天：谁都不够格 → 退到最老的（3 天），而不是最新的（3 小时）
-    let picked = pick_baseline(&[three_hours.clone(), one_day.clone(), three_days.clone()], now, 7)
-        .expect("应当退到最老的那份");
+    let picked = pick_baseline(
+        &[three_hours.clone(), one_day.clone(), three_days.clone()],
+        now,
+        7,
+    )
+    .expect("应当退到最老的那份");
     assert_eq!(
         picked.0.taken_at, three_days.taken_at,
         "回退必须是最老的一份，否则 min_age_days 形同虚设"

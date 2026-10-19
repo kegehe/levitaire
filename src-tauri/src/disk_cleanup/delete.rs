@@ -43,7 +43,8 @@ pub enum Action {
     Skipped,
     /// 只读属性，按决策记录跳过，**属性未被修改**
     #[serde(rename = "readonly-skipped")]
-    ReadOnlySkipped,    /// 失败（需要用户关注）
+    ReadOnlySkipped,
+    /// 失败（需要用户关注）
     Failed,
     /// 重解析点：**跳过了它的内容，删除了链接本身**
     ReparseSkipped,
@@ -66,11 +67,19 @@ pub enum Reason {
     DepthExceeded,
     /// 枚举到删除之间，它已经被别的进程删掉了
     AlreadyGone,
-    StatFailed { code: u32 },
-    EnumFailed { code: u32 },
+    StatFailed {
+        code: u32,
+    },
+    EnumFailed {
+        code: u32,
+    },
     AccessDenied,
-    RemoveFailed { code: u32 },
-    QuarantineFailed { message: String },
+    RemoveFailed {
+        code: u32,
+    },
+    QuarantineFailed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,7 +201,13 @@ impl DeleteCtx {
         }
     }
 
-    pub(crate) fn record(&mut self, action: Action, path: &Path, bytes: u64, reason: Option<Reason>) {
+    pub(crate) fn record(
+        &mut self,
+        action: Action,
+        path: &Path,
+        bytes: u64,
+        reason: Option<Reason>,
+    ) {
         self.records.push(DeleteRecord {
             action,
             path: path.display().to_string(),
@@ -218,6 +233,14 @@ impl DeleteCtx {
 /// 记进 [`DeleteCtx`]，不向上抛 —— 这是"容错继续"的关键：一个文件查不到属性，
 /// 不能让整棵子树停下来。
 pub fn purge_contents(root: &Path, ctx: &mut DeleteCtx) -> io::Result<()> {
+    // Keep a local guard because this function is also used by quarantine cleanup.
+    let root_stat = stat(root).map_err(|code| io::Error::from_raw_os_error(code as i32))?;
+    if !root_stat.is_dir() || root_stat.is_reparse_point() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "清理根目录不是普通目录，已拒绝遍历",
+        ));
+    }
     let entries = fs::read_dir(root)?;
     for entry in entries {
         if ctx.cancelled() {
@@ -493,4 +516,3 @@ fn io_code(e: &io::Error) -> u32 {
 /// 用例放在独立文件里，理由同 `safety.rs`（含文件名为什么必须是 `delete/delete_test.rs`）。
 #[cfg(test)]
 mod delete_test;
-

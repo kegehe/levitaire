@@ -150,7 +150,10 @@ fn purge_removes_the_content_and_the_manifest_entry() {
     let purged = purge(&entry.id).expect("彻底删除失败");
     assert_eq!(purged.id, entry.id);
     assert!(find_ok(&entry.id).is_none());
-    assert!(!quarantine_dir().join(&id).join(entry.seq.to_string()).exists());
+    assert!(!quarantine_dir()
+        .join(&id)
+        .join(entry.seq.to_string())
+        .exists());
 }
 
 /// 隔离区自身的空间账目要真实：搬进去多少字节就报多少。
@@ -169,7 +172,10 @@ fn summary_reports_real_bytes_and_flags_user_data() {
     store.finish().unwrap();
 
     let (total, user_data) = summary_ok();
-    assert!(total >= 400, "总量至少包含刚搬进来的 400 字节，实际 {total}");
+    assert!(
+        total >= 400,
+        "总量至少包含刚搬进来的 400 字节，实际 {total}"
+    );
     assert!(
         user_data >= 300,
         "用户数据那部分要单独统计得出来，实际 {user_data}"
@@ -246,7 +252,10 @@ fn moving_a_junction_moves_the_link_not_its_target() {
     // 恢复回去，链接应当又能用
     restore(&entry.id).unwrap();
     assert!(trap.join("link").exists());
-    assert_eq!(fs::read_to_string(real.join("keep.txt")).unwrap(), "keep me");
+    assert_eq!(
+        fs::read_to_string(real.join("keep.txt")).unwrap(),
+        "keep me"
+    );
 }
 
 // ── 保留期判定 ──────────────────────────────────────────────────────────
@@ -366,7 +375,10 @@ fn a_redirected_quarantine_root_is_refused() {
     let fake_job_dir = link.join(job("redirect"));
     fs::create_dir_all(&fake_job_dir).unwrap();
     let st = crate::disk_cleanup::safety::stat(&fake_job_dir).expect("stat 失败");
-    assert!(!st.is_reparse_point(), "这个用例要的是「中间层是链接、叶子不是」");
+    assert!(
+        !st.is_reparse_point(),
+        "这个用例要的是「中间层是链接、叶子不是」"
+    );
 
     // 逐层检查由闸一负责：把链接根本身交给闸一
     let profile = crate::disk_cleanup::safety::SafetyProfile::global().expect("派生失败");

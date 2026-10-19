@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Start a manual vertical scrolling capture after removing the selection UI.
 #[tauri::command]
 pub fn start_long_capture(
@@ -206,7 +205,6 @@ pub fn start_long_capture(
     Ok(summary)
 }
 
-
 #[tauri::command]
 pub fn stop_long_capture(
     app: tauri::AppHandle,
@@ -284,7 +282,6 @@ pub fn stop_long_capture(
     Ok(summary)
 }
 
-
 #[tauri::command]
 pub fn cancel_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<(), String> {
     let _session_lock = CAPTURE_SESSION_LOCK
@@ -299,7 +296,6 @@ pub fn cancel_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<(), 
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_long_capture_status(
     state: tauri::State<'_, crate::scroll_capture::LongCaptureState>,
@@ -307,7 +303,6 @@ pub fn get_long_capture_status(
 ) -> Result<crate::scroll_capture::LongCaptureSummary, String> {
     state.status(result_id)
 }
-
 
 /// 取长截图结果的预览图（PNG base64）。
 ///
@@ -324,11 +319,12 @@ pub async fn get_long_capture_preview(
     result_id: u64,
 ) -> Result<String, String> {
     let (pixels, width, height) = state.raw(result_id)?;
-    tokio::task::spawn_blocking(move || crate::screenshot::encode_png_base64(&pixels, width, height))
-        .await
-        .map_err(|error| format!("长截图预览编码任务失败: {}", error))?
+    tokio::task::spawn_blocking(move || {
+        crate::screenshot::encode_png_base64(&pixels, width, height)
+    })
+    .await
+    .map_err(|error| format!("长截图预览编码任务失败: {}", error))?
 }
-
 
 #[tauri::command]
 pub async fn save_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<bool, String> {
@@ -336,13 +332,11 @@ pub async fn save_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<
     let (bgra, width, height) = state.raw(result_id)?;
     let save_path = app.state::<ConfigManager>().get_screenshot_save_path()?;
     if !save_path.is_empty() && std::path::Path::new(&save_path).is_dir() {
-        let now = chrono::Local::now();
-        let filename = format!(
-            "long_screenshot_{}_{}.png",
-            now.format("%Y%m%d_%H%M%S"),
-            now.timestamp_subsec_millis()
+        let path = super::media_filename::unique_path(
+            std::path::Path::new(&save_path),
+            "long_screenshot",
+            "png",
         );
-        let path = std::path::Path::new(&save_path).join(filename);
         return tokio::task::spawn_blocking(move || {
             let bytes = crate::scroll_capture::encode_png_direct(&bgra, width, height)?;
             std::fs::write(path, bytes).map_err(|e| format!("写入长截图失败: {e}"))?;
@@ -355,8 +349,9 @@ pub async fn save_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<
     // 控制条**完全盖住**（实测：置顶窗压住无主对话框，SetForegroundWindow 也抬不上来）。
     // 守卫会取可见控制条作 owner 并临时取消自有置顶窗的置顶，Drop 时恢复。
     let guard = DialogTopmostGuard::suspend(&app, &["long-capture-controls"]);
+    let dialog_filename = super::media_filename::timestamped_filename("long_screenshot", "png");
     let mut dialog = rfd::FileDialog::new()
-        .set_file_name("long_screenshot.png")
+        .set_file_name(&dialog_filename)
         .add_filter("PNG 图片", &["png"]);
     if let Some(owner) = guard.owner() {
         dialog = dialog.set_parent(owner);
@@ -376,7 +371,6 @@ pub async fn save_long_capture(app: tauri::AppHandle, result_id: u64) -> Result<
     drop(guard); // 恢复被临时取消的置顶（成功/取消/panic 都要走到）
     result
 }
-
 
 #[tauri::command]
 pub async fn clipboard_set_long_capture(
@@ -401,7 +395,6 @@ pub async fn clipboard_set_long_capture(
     .await
     .map_err(|e| format!("复制任务失败: {e}"))?
 }
-
 
 #[tauri::command]
 pub fn discard_long_capture(

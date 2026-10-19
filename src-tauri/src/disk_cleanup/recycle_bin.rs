@@ -122,7 +122,10 @@ impl BinMeasure {
     }
 
     pub fn unreadable_sids(&self) -> u64 {
-        self.volumes.iter().map(|volume| volume.unreadable_sids).sum()
+        self.volumes
+            .iter()
+            .map(|volume| volume.unreadable_sids)
+            .sum()
     }
 
     /// 没数进去的子树总数（深度上限 + 读不到）。**非零就说明数字是下界**。
@@ -356,9 +359,7 @@ fn run_shell<T: Send + 'static>(
                 "回收站操作超过 {} 秒仍未返回（回收站条目可能非常多）",
                 limit.as_secs()
             )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("回收站工作线程异常退出".to_string())
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("回收站工作线程异常退出".to_string()),
         },
     }
 }
@@ -372,9 +373,8 @@ fn query_one(volume: &str) -> Result<RecycleBinInfo, String> {
             i64Size: 0,
             i64NumItems: 0,
         };
-        unsafe { SHQueryRecycleBinW(PCWSTR(owned.as_ptr()), &mut data) }.map_err(|e| {
-            format!("查询回收站失败（HRESULT 0x{:08X}）", e.code().0 as u32)
-        })?;
+        unsafe { SHQueryRecycleBinW(PCWSTR(owned.as_ptr()), &mut data) }
+            .map_err(|e| format!("查询回收站失败（HRESULT 0x{:08X}）", e.code().0 as u32))?;
         Ok(RecycleBinInfo {
             items: data.i64NumItems.max(0) as u64,
             bytes: data.i64Size.max(0) as u64,

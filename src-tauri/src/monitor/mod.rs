@@ -519,7 +519,9 @@ impl GpuSampler {
         let mut mem_limit = PDH_HCOUNTER::default();
         let ok = |path: &str, counter: &mut PDH_HCOUNTER| {
             let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-            unsafe { PdhAddEnglishCounterW(query, PCWSTR::from_raw(wide.as_ptr()), 0, counter) == 0 }
+            unsafe {
+                PdhAddEnglishCounterW(query, PCWSTR::from_raw(wide.as_ptr()), 0, counter) == 0
+            }
         };
         if !ok(r"\GPU Engine(*)\Utilization Percentage", &mut util)
             || !ok(r"\GPU Adapter Memory(*)\Dedicated Usage", &mut mem_usage)
@@ -974,7 +976,10 @@ mod tests {
             ("physical_1".to_string(), 2_000_000_000.0),
             ("pid_1234_phys_0".to_string(), 9_999.0),
         ];
-        assert_eq!(gpu_aggregate(&items, true, "physical_"), Some(10_000_000_000.0));
+        assert_eq!(
+            gpu_aggregate(&items, true, "physical_"),
+            Some(10_000_000_000.0)
+        );
     }
 
     #[cfg(target_os = "windows")]

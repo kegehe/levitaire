@@ -412,8 +412,7 @@ fn begin_wheel_inner(app: &tauri::AppHandle) {
     // 之后一直在隐藏状态下被搬到光标所在显示器，而 Windows 不给隐藏窗口补 WM_DPICHANGED，
     // 于是窗口物理尺寸永远停在旧屏的值，WebView2 的 DPR 却已跟到新屏 —— 视口变小、
     // 转盘溢出被裁（表现就是"圆盘变正方形"）。详见 scale_at_point 与 WINDOW_SIZE_LOGICAL。
-    let scale =
-        scale_at_point(pos.x, pos.y).unwrap_or_else(|| win.scale_factor().unwrap_or(1.0));
+    let scale = scale_at_point(pos.x, pos.y).unwrap_or_else(|| win.scale_factor().unwrap_or(1.0));
     let side = (WINDOW_SIZE_LOGICAL * scale).round().max(1.0) as i32;
     let half = side / 2;
     crate::utils::logger::log(
@@ -443,7 +442,10 @@ fn begin_wheel_inner(app: &tauri::AppHandle) {
     // set_size 用物理尺寸（不经过窗口自身 DPI 换算），窗口左上角不变，中心正好落在光标上。
     if let Err(e) = win.set_size(tauri::PhysicalSize::new(side as u32, side as u32)) {
         // 尺寸下发失败不终止流程：转盘仍按老尺寸出现（可能被裁），由下一次唤起重试。
-        crate::utils::logger::log("quick_input", &format!("begin_wheel: set size failed: {}", e));
+        crate::utils::logger::log(
+            "quick_input",
+            &format!("begin_wheel: set size failed: {}", e),
+        );
     }
     if let Err(e) = win.set_always_on_top(true).and_then(|_| win.show()) {
         crate::utils::logger::log("quick_input", &format!("begin_wheel: show failed: {}", e));
@@ -2011,10 +2013,7 @@ mod tests {
         assert!(should_tick_for_sector(1, 0), "1 → 0 是换扇区，应响");
         assert!(should_tick_for_sector(-2, 0), "会话首个扇区应响");
         assert!(!should_tick_for_sector(3, 3), "同一扇区不应重复响");
-        assert!(
-            !should_tick_for_sector(-1, -1),
-            "死区里持续上报 -1 不应响"
-        );
+        assert!(!should_tick_for_sector(-1, -1), "死区里持续上报 -1 不应响");
     }
 
     /// 回归：鼠标划进 / 划出中心死区（-1）不应产生刻度音。

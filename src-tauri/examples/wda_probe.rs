@@ -25,10 +25,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetWindowDisplayAffinity, GetWindowRect, LoadCursorW, PeekMessageW,
-    RegisterClassExW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos,
-    ShowWindow, TranslateMessage, WindowFromPoint, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW,
-    LWA_ALPHA, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
+    GetWindowDisplayAffinity, GetWindowRect, LoadCursorW, PeekMessageW, RegisterClassExW,
+    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
+    TranslateMessage, WindowFromPoint, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
+    MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
     WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -37,7 +37,12 @@ const CLASS_NAME: windows::core::PCWSTR = w!("LevitaireWdaProbe");
 /// 纯红（COLORREF 为 0x00BBGGRR）
 const PROBE_RED: u32 = 0x0000_00FF;
 
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_PAINT => {
             let mut ps = Default::default();
@@ -228,12 +233,20 @@ unsafe fn run_frame_mode() {
 
     // 边框上取一条横条，中间取一块 —— 采样坐标直接用窗口 rect，无需换算
     let sample = |left: i32, top: i32, sw: u32, sh: u32| -> usize {
-        capture_region(left, top, sw, sh).map(|p| count_red(&p)).unwrap_or(0)
+        capture_region(left, top, sw, sh)
+            .map(|p| count_red(&p))
+            .unwrap_or(0)
     };
     let edge_red = sample(x + 40, y + 2, 120, 3);
     let hole_red = sample(x + 200, y + 150, 160, 100);
-    println!("[1] 边框采样   : 红像素 {}（期望 >0，证明边框确实画出来了）", edge_red);
-    println!("[2] 中间镂空   : 红像素 {}（期望 0，证明中间真的是空的）", hole_red);
+    println!(
+        "[1] 边框采样   : 红像素 {}（期望 >0，证明边框确实画出来了）",
+        edge_red
+    );
+    println!(
+        "[2] 中间镂空   : 红像素 {}（期望 0，证明中间真的是空的）",
+        hole_red
+    );
 
     let set_result = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
     pump(Duration::from_millis(400));
@@ -242,18 +255,36 @@ unsafe fn run_frame_mode() {
         "[3] 加标记后   : 边框红像素 {}（Set={:?}）→ {}",
         edge_after,
         set_result.is_ok(),
-        if edge_after == 0 { "✅ 边框不进成片" } else { "❌ 仍被截到" }
+        if edge_after == 0 {
+            "✅ 边框不进成片"
+        } else {
+            "❌ 仍被截到"
+        }
     );
 
-    let on_border = WindowFromPoint(POINT { x: x + 2, y: y + h / 2 });
-    let in_hole = WindowFromPoint(POINT { x: x + w / 2, y: y + h / 2 });
+    let on_border = WindowFromPoint(POINT {
+        x: x + 2,
+        y: y + h / 2,
+    });
+    let in_hole = WindowFromPoint(POINT {
+        x: x + w / 2,
+        y: y + h / 2,
+    });
     println!(
         "[4] 命中边框   : {}（期望是本窗）",
-        if on_border == hwnd { "本窗 ✅" } else { "其它窗 ❌" }
+        if on_border == hwnd {
+            "本窗 ✅"
+        } else {
+            "其它窗 ❌"
+        }
     );
     println!(
         "[5] 命中镂空处 : {}（期望不是本窗 = 鼠标穿透、不挡下层应用）",
-        if in_hole == hwnd { "本窗 ❌ 会挡住交互" } else { "穿透 ✅" }
+        if in_hole == hwnd {
+            "本窗 ❌ 会挡住交互"
+        } else {
+            "穿透 ✅"
+        }
     );
 
     println!();
@@ -294,11 +325,7 @@ unsafe fn run_prehidden_mode() {
     // 建一扇与生产代码同构的空心框：不透明边框 + LAYERED + TRANSPARENT + TOPMOST
     let build = |with_affinity: bool| -> Option<HWND> {
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST
-                | WS_EX_TOOLWINDOW
-                | WS_EX_NOACTIVATE
-                | WS_EX_LAYERED
-                | WS_EX_TRANSPARENT,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
             CLASS_NAME,
             w!("WDA Probe Prehidden"),
             WS_POPUP,
@@ -369,7 +396,10 @@ unsafe fn run_prehidden_mode() {
 
     let target = build(true).expect("被测组建窗失败");
     let target_red = sample(x + 40, y + 2, 120, 3);
-    println!("[2] 被测组（隐藏时设标记，显示后）: 边框红像素 {}", target_red);
+    println!(
+        "[2] 被测组（隐藏时设标记，显示后）: 边框红像素 {}",
+        target_red
+    );
 
     println!();
     if control_red > 0 && target_red == 0 {
@@ -416,7 +446,11 @@ fn main() {
         }
         println!(
             "模式: {}",
-            if layered { "WS_EX_LAYERED 半透明（alpha=200）" } else { "不透明原生窗" }
+            if layered {
+                "WS_EX_LAYERED 半透明（alpha=200）"
+            } else {
+                "不透明原生窗"
+            }
         );
         let hwnd = match CreateWindowExW(
             ex_style,
@@ -448,7 +482,13 @@ fn main() {
 
         let mut rc = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rc);
-        println!("窗口 rect: ({}, {}) {}x{}", rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+        println!(
+            "窗口 rect: ({}, {}) {}x{}",
+            rc.left,
+            rc.top,
+            rc.right - rc.left,
+            rc.bottom - rc.top
+        );
 
         let (before_red, total) = probe(hwnd);
         println!(
@@ -510,7 +550,11 @@ fn main() {
         });
         println!(
             "[6] 命中测试   : WindowFromPoint → {} （期望等于窗口句柄 {:?}）",
-            if hit == hwnd { "该窗口 ✅" } else { "其它窗口 ❌" },
+            if hit == hwnd {
+                "该窗口 ✅"
+            } else {
+                "其它窗口 ❌"
+            },
             hwnd
         );
 

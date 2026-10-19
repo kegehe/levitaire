@@ -17,7 +17,6 @@ const CLEANER_WINDOW: &str = "system-cleaner-overlay";
 
 static CLEANER_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
-
 // ─── 窗口 ───────────────────────────────────────────────────────────────
 
 /// 显示清理面板。
@@ -54,8 +53,10 @@ pub fn show_system_cleaner_window(
             let inner = win.inner_size().unwrap_or_default();
             let (x, y) =
                 clamp_position_to_workarea(pos.x, pos.y, inner.width as i32, inner.height as i32);
-            win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
-                .map_err(|e| e.to_string())?;
+            win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, y,
+            )))
+            .map_err(|e| e.to_string())?;
         }
     }
     win.show().map_err(|e| e.to_string())?;
@@ -66,7 +67,6 @@ pub fn show_system_cleaner_window(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn hide_system_cleaner_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CLEANER_WINDOW) {
@@ -75,14 +75,14 @@ pub fn hide_system_cleaner_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 // ─── 工具级开关 ─────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn get_system_cleaner_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
+pub fn get_system_cleaner_enabled(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<bool, String> {
     config_manager.get_system_cleaner_enabled()
 }
-
 
 #[tauri::command]
 pub fn set_system_cleaner_enabled(
@@ -103,7 +103,6 @@ pub fn set_system_cleaner_enabled(
     config_manager.update_system_cleaner_enabled(enabled)
 }
 
-
 // ─── 规则与任务 ─────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
@@ -114,7 +113,6 @@ pub struct CleanerRulesView {
     pub rules_error: Option<String>,
 }
 
-
 #[tauri::command]
 pub fn disk_cleanup_rules(state: State<'_, CleanState>) -> CleanerRulesView {
     let status = state.snapshot();
@@ -124,12 +122,10 @@ pub fn disk_cleanup_rules(state: State<'_, CleanState>) -> CleanerRulesView {
     }
 }
 
-
 #[tauri::command]
 pub fn disk_cleanup_status(state: State<'_, CleanState>) -> CleanStatus {
     state.snapshot()
 }
-
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,7 +135,6 @@ pub struct VolumeView {
     pub free_bytes: u64,
     pub is_system: bool,
 }
-
 
 /// 卷标识归一：去掉尾部分隔符再大写。
 ///
@@ -196,7 +191,6 @@ pub fn disk_cleanup_volumes() -> Vec<VolumeView> {
     out
 }
 
-
 /// 扫描（dry-run）。只读，不删任何东西。
 ///
 /// 扫描**不需要**「不可恢复」确认：它一个文件都不动。
@@ -207,7 +201,6 @@ pub async fn disk_cleanup_scan(
 ) -> Result<CleanStatus, String> {
     crate::disk_cleanup::start(&app, &rule_ids, Mode::DryRun, false)
 }
-
 
 /// 执行清理。写审计日志（I8），删不掉的占用项一律跳过（I5）。
 ///
@@ -222,13 +215,11 @@ pub async fn disk_cleanup_start(
     crate::disk_cleanup::start(&app, &rule_ids, Mode::Execute, confirmed_unrecoverable)
 }
 
-
 /// 取消当前任务。返回是否确有任务在跑。
 #[tauri::command]
 pub fn disk_cleanup_cancel(app: tauri::AppHandle) -> bool {
     app.state::<CleanState>().request_cancel()
 }
-
 
 // ─── 发现目标（§8.5）────────────────────────────────────────────────────
 
@@ -284,7 +275,6 @@ pub async fn disk_cleanup_quarantine_discovery(
     crate::disk_cleanup::quarantine_discovery(&app, &discovery_id, confirm_user_data).await
 }
 
-
 /// 放弃**一个**发现目标（挑了目录又决定不处理它）。
 ///
 /// 用 id 而不是路径：前端从头到尾没有机会指定路径（I1）。
@@ -293,7 +283,6 @@ pub fn disk_cleanup_forget_discovery(discovery_id: String, app: tauri::AppHandle
     app.state::<CleanState>().drop_discovery(&discovery_id);
     publish(&app);
 }
-
 
 // ─── 隔离区（§10）───────────────────────────────────────────────────────
 
@@ -341,7 +330,6 @@ pub fn disk_cleanup_quarantine_list(
     crate::disk_cleanup::quarantine::list()
 }
 
-
 /// 隔离区占用：`(总量, 其中用户数据)`。空间账目要用它（§10.2）。
 ///
 /// **失败必须是错误，不能是 `(0, 0)`** —— 界面会把 0 显示成"隔离区是空的"，
@@ -350,7 +338,6 @@ pub fn disk_cleanup_quarantine_list(
 pub fn disk_cleanup_quarantine_summary() -> Result<(u64, u64), String> {
     crate::disk_cleanup::quarantine::summary()
 }
-
 
 #[tauri::command]
 pub async fn disk_cleanup_quarantine_restore(
@@ -363,7 +350,6 @@ pub async fn disk_cleanup_quarantine_restore(
     .await
 }
 
-
 #[tauri::command]
 pub async fn disk_cleanup_quarantine_purge(
     entry_id: String,
@@ -375,14 +361,10 @@ pub async fn disk_cleanup_quarantine_purge(
     .await
 }
 
-
 #[tauri::command]
-pub async fn disk_cleanup_quarantine_purge_all(
-    app: tauri::AppHandle,
-) -> Result<u64, String> {
+pub async fn disk_cleanup_quarantine_purge_all(app: tauri::AppHandle) -> Result<u64, String> {
     with_clean_gate(&app, crate::disk_cleanup::quarantine::purge_all).await
 }
-
 
 #[tauri::command]
 pub fn get_system_cleaner_quarantine_days(
@@ -391,7 +373,6 @@ pub fn get_system_cleaner_quarantine_days(
     config_manager.get_system_cleaner_quarantine_days()
 }
 
-
 #[tauri::command]
 pub fn set_system_cleaner_quarantine_days(
     days: u32,
@@ -399,7 +380,6 @@ pub fn set_system_cleaner_quarantine_days(
 ) -> Result<(), String> {
     config_manager.update_system_cleaner_quarantine_days(days)
 }
-
 
 // ─── 占用发现（P4 / §8）─────────────────────────────────────────────────
 
@@ -416,13 +396,11 @@ pub async fn disk_cleanup_discover_start(
     crate::disk_cleanup::start_discovery(&app, volume, report_depth)
 }
 
-
 /// 取消当前的发现或清理任务。
 #[tauri::command]
 pub fn disk_cleanup_discover_cancel(app: tauri::AppHandle) -> bool {
     crate::disk_cleanup::cancel_all(&app)
 }
-
 
 #[tauri::command]
 pub fn disk_cleanup_discover_status(
@@ -430,7 +408,6 @@ pub fn disk_cleanup_discover_status(
 ) -> crate::disk_cleanup::DiscoveryStatus {
     state.discovery_snapshot()
 }
-
 
 // ─── 看门狗（P5 / §11）──────────────────────────────────────────────────
 
@@ -440,7 +417,6 @@ pub fn disk_cleanup_watch_status(
 ) -> crate::disk_cleanup::watchdog::WatchStatus {
     state.watch_snapshot()
 }
-
 
 /// 保存看门狗设置。
 ///
@@ -461,14 +437,14 @@ pub fn disk_cleanup_watch_update(
     Ok(state.watch_snapshot())
 }
 
-
 /// 加入一个监视目录。路径来自**系统目录对话框**，不经过 WebView。
 #[tauri::command]
 pub async fn disk_cleanup_watch_add_directory(
     app: tauri::AppHandle,
 ) -> Result<Option<crate::disk_cleanup::watchdog::WatchStatus>, String> {
     let guard = DialogTopmostGuard::suspend(&app, &[CLEANER_WINDOW]);
-    let mut dialog = rfd::FileDialog::new().set_title("选择要长期监视的目录（它只被统计，不会被删）");
+    let mut dialog =
+        rfd::FileDialog::new().set_title("选择要长期监视的目录（它只被统计，不会被删）");
     if let Some(owner) = guard.owner() {
         dialog = dialog.set_parent(owner);
     }
@@ -484,7 +460,6 @@ pub async fn disk_cleanup_watch_add_directory(
     Ok(Some(app.state::<CleanState>().watch_snapshot()))
 }
 
-
 /// 移除第 `index` 个监视目录（用下标而不是路径 —— 前端不该提供路径）。
 #[tauri::command]
 pub fn disk_cleanup_watch_remove_directory(
@@ -495,7 +470,6 @@ pub fn disk_cleanup_watch_remove_directory(
     Ok(app.state::<CleanState>().watch_snapshot())
 }
 
-
 /// 「立即检查」一次（不必等周期到）。跑完由 `disk-cleanup-watchdog` 事件推状态。
 ///
 /// 返回**有没有真的开始** —— 有别的长任务占着闸门时返回 `false`，
@@ -505,7 +479,6 @@ pub fn disk_cleanup_watch_run_now(app: tauri::AppHandle) -> bool {
     crate::disk_cleanup::watchdog::run_now(&app)
 }
 
-
 // ─── 审计日志（I8 / §12）────────────────────────────────────────────────
 
 #[tauri::command]
@@ -513,19 +486,16 @@ pub fn disk_cleanup_audit_list() -> Vec<audit::AuditJobInfo> {
     audit::list_jobs()
 }
 
-
 #[tauri::command]
 pub fn disk_cleanup_audit_read(job_id: String) -> Result<Vec<audit::AuditLine>, String> {
     audit::read_job(&job_id)
 }
-
 
 /// 一键清空。设置页与本面板都可见（§12.3）。
 #[tauri::command]
 pub fn disk_cleanup_audit_clear() -> Result<u64, String> {
     audit::clear_all()
 }
-
 
 /// 导出某次任务的明细。
 ///

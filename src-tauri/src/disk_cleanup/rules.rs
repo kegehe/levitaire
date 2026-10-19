@@ -170,10 +170,7 @@ impl std::fmt::Display for RuleError {
             Empty => write!(f, "规则表为空，拒绝加载"),
             Parse(message) => write!(f, "规则表解析失败：{message}"),
             Safety(source) => write!(f, "无法派生安全档案：{source}"),
-            BadId { id } => write!(
-                f,
-                "规则 id `{id}` 非法：只允许小写字母、数字与连字符"
-            ),
+            BadId { id } => write!(f, "规则 id `{id}` 非法：只允许小写字母、数字与连字符"),
             DuplicateId { id } => write!(f, "规则 id `{id}` 重复"),
             MissingConsequence { id } => write!(
                 f,
@@ -383,7 +380,10 @@ fn validate_one<'a>(
     }
 
     // 白名单：必须在允许清理的根之内
-    if !purge_roots.iter().any(|root| starts_with_ci(&resolved, root)) {
+    if !purge_roots
+        .iter()
+        .any(|root| starts_with_ci(&resolved, root))
+    {
         return Err(RuleError::OutsidePurgeRoots {
             id: id(),
             path: resolved.display().to_string(),
@@ -400,7 +400,10 @@ pub fn builtin_json() -> &'static str {
     include_str!("../../resources/rules/disk-cleanup.json")
 }
 
-pub fn parse_and_validate(text: &str, profile: &SafetyProfile) -> Result<Vec<CleanRule>, RuleError> {
+pub fn parse_and_validate(
+    text: &str,
+    profile: &SafetyProfile,
+) -> Result<Vec<CleanRule>, RuleError> {
     let set: RuleSet = serde_json::from_str(text).map_err(|e| RuleError::Parse(e.to_string()))?;
     validate(&set, profile)
 }
@@ -423,9 +426,7 @@ pub fn load_effective(resource_dir: Option<&Path>) -> Result<Vec<CleanRule>, Rul
                 Err(e) => {
                     crate::utils::logger::log(
                         "disk-cleanup",
-                        &format!(
-                            "外部规则表未通过校验，回退到内置表：{e}"
-                        ),
+                        &format!("外部规则表未通过校验，回退到内置表：{e}"),
                     );
                 }
             }

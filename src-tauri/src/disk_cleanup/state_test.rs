@@ -39,10 +39,7 @@ fn a_rejected_acquire_never_releases_someone_elses_gate() {
     assert!(state.is_busy(), "持有期间闸门必须是关着的");
 
     // 失败的那一次抢闸
-    assert!(
-        BusyGuard::acquire(&state).is_none(),
-        "第二个必须被拒绝"
-    );
+    assert!(BusyGuard::acquire(&state).is_none(), "第二个必须被拒绝");
     assert!(
         state.is_busy(),
         "★ 被拒绝的抢闸把闸门放开了 —— 第二个删除任务现在可以和第一个并发跑"
@@ -172,10 +169,7 @@ fn audit_job_ids_cannot_traverse_out_of_the_log_directory() {
         "",
         "12345678901234567890123",
     ] {
-        assert!(
-            audit::job_path(bad).is_err(),
-            "任务 id `{bad}` 必须被拒绝"
-        );
+        assert!(audit::job_path(bad).is_err(), "任务 id `{bad}` 必须被拒绝");
         assert!(audit::read_job(bad).is_err(), "任务 id `{bad}` 必须被拒绝");
     }
     // 合法的纯数字 id 正常
@@ -186,8 +180,8 @@ fn audit_job_ids_cannot_traverse_out_of_the_log_directory() {
 fn audit_round_trips_entries_and_summaries() {
     let job_id = format!("9{}", audit::new_job_id());
     {
-        let mut writer = audit::AuditWriter::begin(&job_id, &["temp-user".to_string()])
-            .expect("建审计日志失败");
+        let mut writer =
+            audit::AuditWriter::begin(&job_id, &["temp-user".to_string()]).expect("建审计日志失败");
         let report = scan::RuleReport {
             rule_id: "temp-user".into(),
             rule_name: "用户临时文件".into(),
@@ -280,7 +274,11 @@ fn a_discovery_is_addressed_by_id_only() {
     std::fs::write(dir.join("a.bin"), vec![0u8; 64]).unwrap();
 
     let entry = state.issue_discovery(&dir).expect("签发失败");
-    assert!(entry.id.starts_with("d-"), "id 形状应当一眼可辨：{}", entry.id);
+    assert!(
+        entry.id.starts_with("d-"),
+        "id 形状应当一眼可辨：{}",
+        entry.id
+    );
     assert_eq!(entry.files, 1);
     assert!(entry.bytes >= 64);
     assert!(!entry.is_user_data);
@@ -394,6 +392,14 @@ fn the_unrecoverable_confirmation_is_enforced_by_the_backend() {
     assert!(check_unrecoverable(std::slice::from_ref(&temp), Mode::Execute, false).is_ok());
 }
 
+#[test]
+fn duplicate_rule_ids_are_rejected_before_starting_a_job() {
+    let duplicate = vec!["temp-user".to_string(), "temp-user".to_string()];
+    assert!(validate_rule_ids(&duplicate).is_err());
+    let distinct = vec!["temp-user".to_string(), "npm-cache".to_string()];
+    assert!(validate_rule_ids(&distinct).is_ok());
+}
+
 // ── 不建议清理（§13.2 / §17 验收第 13 条）──────────────────────────────
 
 #[test]
@@ -459,7 +465,9 @@ fn the_volume_overview_marks_exactly_the_system_volume() {
     let expected = std::env::var("SystemDrive").expect("SystemDrive");
     let expected = expected.trim_end_matches(['\\', '/']);
     assert!(
-        system[0].trim_end_matches(['\\', '/']).eq_ignore_ascii_case(expected),
+        system[0]
+            .trim_end_matches(['\\', '/'])
+            .eq_ignore_ascii_case(expected),
         "标成系统盘的是 {}，而 %SystemDrive% 是 {expected}",
         system[0]
     );
@@ -469,7 +477,11 @@ fn the_volume_overview_marks_exactly_the_system_volume() {
 
     // 容量数字必须是真实的，不是占位
     for volume in &volumes {
-        assert!(volume.total_bytes > 0, "{} 的总容量为 0", volume.mount_point);
+        assert!(
+            volume.total_bytes > 0,
+            "{} 的总容量为 0",
+            volume.mount_point
+        );
         assert!(
             volume.free_bytes <= volume.total_bytes,
             "{} 的可用空间大于总容量",

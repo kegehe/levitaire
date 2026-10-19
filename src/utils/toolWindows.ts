@@ -1014,12 +1014,9 @@ export async function preloadEnabledToolWindows(): Promise<void> {
   const enabledIds = new Set(enabledResults.filter(({ enabled }) => enabled).map(({ id }) => id));
   const tasks: Array<{ label: string; promise: Promise<unknown> }> = [];
 
-  // Screenshot and recording share the selection overlay; their hotkeys must be
-  // able to show it immediately. The long-capture and contextual-menu WebViews
-  // are only needed after a selection exists, so they are ensured on demand.
-  if (enabledIds.has("screenshot") || enabledIds.has("recording")) {
-    tasks.push({ label: "screenshot overlay", promise: ensureScreenshotWindow() });
-  }
+  // The screenshot overlay is created by the hotkey path immediately before
+  // capture. Keeping this WebView resident at startup wastes memory and makes
+  // WebView2/GPU failures more likely when the machine is under pressure.
   if (enabledIds.has("sketch")) {
     // 草稿由全局热键唤起全屏画板，需即时可用。
     tasks.push({ label: "sketch overlay", promise: ensureSketchWindow() });

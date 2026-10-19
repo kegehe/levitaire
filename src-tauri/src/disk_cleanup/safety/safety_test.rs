@@ -415,7 +415,9 @@ fn the_profile_exposes_exactly_one_exception_and_a_nonempty_critical_list() {
         "系统级例外只应有 %SystemRoot%\\Temp 一条，实际：{allow:?}"
     );
     assert!(
-        allow[0].file_name().is_some_and(|name| name.eq_ignore_ascii_case("Temp")),
+        allow[0]
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("Temp")),
         "例外应当是 Temp 目录，实际：{}",
         allow[0].display()
     );
@@ -637,13 +639,7 @@ fn boundary_matching_is_not_string_prefix_matching() {
 
 #[test]
 fn relative_subpaths_cannot_escape_upwards() {
-    for bad in [
-        r"..\..\Windows",
-        r"\absolute",
-        r"Q:\other",
-        "..",
-        r"a\..\b",
-    ] {
+    for bad in [r"..\..\Windows", r"\absolute", r"Q:\other", "..", r"a\..\b"] {
         let target = Target::KnownFolder {
             folder: KnownFolderId::LocalAppData,
             relative: Some(bad.into()),

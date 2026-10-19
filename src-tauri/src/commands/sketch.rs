@@ -1,11 +1,9 @@
 use super::*;
 
-
 #[tauri::command]
 pub fn get_sketch_hotkey(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
     config_manager.get_sketch_hotkey()
 }
-
 
 #[tauri::command]
 pub fn set_sketch_hotkey(
@@ -36,7 +34,6 @@ pub fn set_sketch_hotkey(
     }
     Ok(())
 }
-
 
 #[tauri::command]
 pub fn show_sketch_window(app: tauri::AppHandle) -> Result<(), String> {
@@ -71,7 +68,6 @@ pub fn show_sketch_window(app: tauri::AppHandle) -> Result<(), String> {
     window.set_focus().map_err(|e| e.to_string())
 }
 
-
 #[tauri::command]
 pub fn hide_sketch_window(app: tauri::AppHandle) -> Result<(), String> {
     SKETCH_VISIBLE_BEFORE_SESSION.store(false, Ordering::SeqCst);
@@ -82,12 +78,10 @@ pub fn hide_sketch_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_sketch_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_sketch_enabled()
 }
-
 
 #[tauri::command]
 pub fn set_sketch_enabled(
@@ -110,7 +104,6 @@ pub fn set_sketch_enabled(
     }
     Ok(())
 }
-
 
 /// 捕获描稿背景：临时隐藏描稿窗后抓取整个显示器，返回 PNG base64。
 ///

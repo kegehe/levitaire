@@ -284,7 +284,10 @@ impl CleanState {
 
     /// 按 id 取回路径。**查不到就拒绝**，绝不回退成把 id 当路径用。
     pub fn resolve_discovery(&self, id: &str) -> Result<(PathBuf, DiscoveryEntry), String> {
-        let g = self.inner.lock().map_err(|_| "清理状态不可用".to_string())?;
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| "清理状态不可用".to_string())?;
         let target = g
             .discoveries
             .get(id)
@@ -408,7 +411,10 @@ impl CleanState {
     }
 
     pub fn snapshot(&self) -> CleanStatus {
-        self.inner.lock().map(|g| g.status.clone()).unwrap_or_default()
+        self.inner
+            .lock()
+            .map(|g| g.status.clone())
+            .unwrap_or_default()
     }
 
     pub fn rules(&self) -> Vec<CleanRule> {
@@ -624,6 +630,7 @@ pub fn start(
     if selected.is_empty() {
         return Err("没有选择任何清理项".into());
     }
+    validate_rule_ids(rule_ids)?;
     // 提权项在 P6 交付。现在就把话说清楚，而不是让用户点完什么也没发生。
     let needs_admin: Vec<&str> = selected
         .iter()
@@ -681,7 +688,11 @@ pub fn start(
     state.update(|s| {
         *s = CleanStatus {
             job_id: Some(job_id.clone()),
-            phase: if dry_run { Phase::Scanning } else { Phase::Cleaning },
+            phase: if dry_run {
+                Phase::Scanning
+            } else {
+                Phase::Cleaning
+            },
             dry_run,
             current_rule: None,
             progress: Some(Progress { done: 0, total }),
@@ -742,7 +753,9 @@ fn run_job(
                 // 写不了审计日志就不执行删除 —— 没有取证依据的删除不做（I8）
                 state.update(|s| {
                     s.phase = Phase::Failed;
-                    s.error = Some(format!("无法写入审计日志，已中止（不执行无记录的删除）：{e}"));
+                    s.error = Some(format!(
+                        "无法写入审计日志，已中止（不执行无记录的删除）：{e}"
+                    ));
                 });
                 publish(&app);
                 return;
@@ -765,7 +778,9 @@ fn run_job(
             Err(e) => {
                 state.update(|s| {
                     s.phase = Phase::Failed;
-                    s.error = Some(format!("隔离区不可用，已中止（不做没有隔离区的可恢复删除）：{e}"));
+                    s.error = Some(format!(
+                        "隔离区不可用，已中止（不做没有隔离区的可恢复删除）：{e}"
+                    ));
                 });
                 publish(&app);
                 return;
@@ -828,7 +843,11 @@ fn run_job(
         final_status.phase = Phase::Ready;
         final_status.error = Some("已取消：已处理的条目保持现状，未处理的目录树完好无损".into());
     } else {
-        final_status.phase = if mode.is_dry_run() { Phase::Ready } else { Phase::Done };
+        final_status.phase = if mode.is_dry_run() {
+            Phase::Ready
+        } else {
+            Phase::Done
+        };
     }
     final_status.current_rule = None;
     final_status.progress = Some(Progress { done: total, total });
@@ -854,9 +873,9 @@ fn run_job(
         .reports
         .iter()
         .filter(|report| {
-            rules
-                .iter()
-                .any(|rule| rule.id == report.rule_id && rule.has_guard(rules::Guard::ConfirmUnrecoverable))
+            rules.iter().any(|rule| {
+                rule.id == report.rule_id && rule.has_guard(rules::Guard::ConfirmUnrecoverable)
+            })
         })
         .map(|report| report.bytes_deleted + report.bytes_quarantined)
         .sum();
@@ -927,8 +946,8 @@ pub async fn quarantine_discovery(
     let ledger_handle = app.clone();
     let source_label = "manual".to_string();
     let is_user_data = entry.is_user_data;
-    let result = tokio::task::spawn_blocking(
-        move || -> Result<quarantine::QuarantineEntry, String> {
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<quarantine::QuarantineEntry, String> {
             // 先跑搬运本体，**成败都要**往下走到账目重算（失败路径同样可能已经改动了磁盘）。
             let outcome = (|| -> Result<quarantine::QuarantineEntry, String> {
                 let profile = SafetyProfile::global().map_err(|e| e.to_string())?;
@@ -947,12 +966,13 @@ pub async fn quarantine_discovery(
             // ★ 重算同样要遍历整棵隔离区目录树，所以必须留在**这个阻塞线程**上：
             //   与 `commands/disk_cleanup.rs::with_clean_gate` 同一口径（那边的理由：
             //   几十 GB / 几十万文件的条目会让整个应用的窗口一起卡死）。
-            ledger_handle.state::<CleanState>().refresh_quarantine_ledger();
+            ledger_handle
+                .state::<CleanState>()
+                .refresh_quarantine_ledger();
             outcome
-        },
-    )
-    .await
-    .map_err(|e| format!("隔离任务失败：{e}"))?;
+        })
+        .await
+        .map_err(|e| format!("隔离任务失败：{e}"))?;
 
     gate.release();
     publish(&handle);
@@ -961,12 +981,7 @@ pub async fn quarantine_discovery(
 
 fn write_manual_audit(job_id: &str, moved: &quarantine::QuarantineEntry) -> Result<(), String> {
     let mut writer = audit::AuditWriter::begin(job_id, &["manual".to_string()])?;
-    let report = scan::RuleReport::manual(
-        &moved.original_path,
-        "manual",
-        moved.size,
-        moved.is_dir,
-    );
+    let report = scan::RuleReport::manual(&moved.original_path, "manual", moved.size, moved.is_dir);
     let record = delete::DeleteRecord {
         action: delete::Action::Quarantined,
         path: moved.original_path.clone(),
@@ -1009,6 +1024,14 @@ pub(crate) fn check_unrecoverable(
         "以下清理项的内容不可恢复，需要你确认：{}",
         unconfirmed.join("、")
     ))
+}
+
+fn validate_rule_ids(rule_ids: &[String]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::with_capacity(rule_ids.len());
+    if let Some(duplicate) = rule_ids.iter().find(|id| !seen.insert(id.as_str())) {
+        return Err(format!("清理项重复选择：{duplicate}"));
+    }
+    Ok(())
 }
 
 /// 隔离区保留期。设置项缺失时用默认值 —— **不因为读不到设置就退化成 0**：
@@ -1075,15 +1098,15 @@ fn measure_tree(root: &Path, depth: usize) -> Option<(u64, u64)> {
 /// 少问一句可能删掉别人的论文。
 pub(crate) fn is_user_data_path(path: &Path) -> bool {
     let mut unresolved = false;
-    let hit = target::USER_DATA_FOLDERS.iter().any(|folder| {
-        match target::known_folder(*folder) {
+    let hit = target::USER_DATA_FOLDERS
+        .iter()
+        .any(|folder| match target::known_folder(*folder) {
             Ok(root) => safety::starts_with_ci(path, &root),
             Err(_) => {
                 unresolved = true;
                 false
             }
-        }
-    });
+        });
     if hit {
         return true;
     }
@@ -1153,7 +1176,10 @@ pub fn start_discovery(
     // ★ 卷必须是**运行时派生出来的固定卷**，不能是前端随手给的路径。
     //   否则这个只读接口就成了"枚举任意目录"的入口（I1 的同一条纪律）。
     let allowed = safety::fixed_volume_roots();
-    if !allowed.iter().any(|root| root.eq_ignore_ascii_case(&volume)) {
+    if !allowed
+        .iter()
+        .any(|root| root.eq_ignore_ascii_case(&volume))
+    {
         return Err(format!(
             "{volume} 不是可扫描的固定卷。可选：{}",
             allowed.join("、")
@@ -1291,16 +1317,12 @@ fn run_discovery(app: AppHandle, job_id: String, volume: String, report_depth: u
         });
     }
     // 没有历史可比的第一次扫描，要明说 —— 不然"没看到增长"会被读成"没问题"
-    let needs_history_note = state
-        .discovery_snapshot()
-        .baseline_at
-        .is_none();
+    let needs_history_note = state.discovery_snapshot().baseline_at.is_none();
     if needs_history_note {
         state.update_discovery(|d| {
             if d.error.is_none() {
-                d.error = Some(
-                    "这是该卷的第一份快照，还看不出增长。过一天再扫一次就能对比了。".into(),
-                );
+                d.error =
+                    Some("这是该卷的第一份快照，还看不出增长。过一天再扫一次就能对比了。".into());
             }
         });
     }
@@ -1342,7 +1364,11 @@ fn system_volume_free_bytes() -> Option<u64> {
     disks
         .list()
         .iter()
-        .find(|disk| disk.mount_point().to_string_lossy().eq_ignore_ascii_case(&drive))
+        .find(|disk| {
+            disk.mount_point()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&drive)
+        })
         .map(|disk| disk.available_space())
 }
 

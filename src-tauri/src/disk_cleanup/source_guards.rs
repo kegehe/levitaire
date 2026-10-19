@@ -70,7 +70,10 @@ fn all_rust_sources() -> Vec<(String, String)> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-                panic!("读不出 {}：{e}（静默跳过等于对那个文件失明）", path.display())
+                panic!(
+                    "读不出 {}：{e}（静默跳过等于对那个文件失明）",
+                    path.display()
+                )
             });
             (relative, text)
         })
@@ -151,7 +154,10 @@ fn the_delete_path_never_spawns_a_process_or_uses_std_recursive_delete() {
         ("disk_cleanup/safety.rs", include_str!("safety.rs")),
         ("disk_cleanup/scan.rs", include_str!("scan.rs")),
         ("disk_cleanup/quarantine.rs", include_str!("quarantine.rs")),
-        ("disk_cleanup/recycle_bin.rs", include_str!("recycle_bin.rs")),
+        (
+            "disk_cleanup/recycle_bin.rs",
+            include_str!("recycle_bin.rs"),
+        ),
     ];
     let forbidden = [
         "Command::new(",
@@ -189,7 +195,13 @@ fn the_delete_path_never_spawns_a_process_or_uses_std_recursive_delete() {
 #[test]
 fn delete_commands_never_accept_a_path() {
     let src = strip_line_comments(include_str!("../commands/disk_cleanup.rs"));
-    for token in ["PathBuf", "Path ", "&Path", "path: String", "target: String"] {
+    for token in [
+        "PathBuf",
+        "Path ",
+        "&Path",
+        "path: String",
+        "target: String",
+    ] {
         assert!(
             !src.contains(token),
             "commands/disk_cleanup.rs 里出现了路径参数 `{token}`：前端只允许传 rule_id，\
@@ -231,7 +243,10 @@ fn frontend_holds_no_cleanup_paths() {
     let mut scanned = 0usize;
     for (name, raw) in FILES {
         let src = strip_line_comments(raw);
-        assert!(src.contains("export"), "{name} 扫到的内容不像 TS 源码，守卫会假绿");
+        assert!(
+            src.contains("export"),
+            "{name} 扫到的内容不像 TS 源码，守卫会假绿"
+        );
 
         for literal in string_literals(&src) {
             let mut chars = literal.chars();
@@ -257,7 +272,11 @@ fn frontend_holds_no_cleanup_paths() {
         }
         scanned += 1;
     }
-    assert_eq!(scanned, FILES.len(), "文件清单与扫描数不一致，守卫的扫描面已失效");
+    assert_eq!(
+        scanned,
+        FILES.len(),
+        "文件清单与扫描数不一致，守卫的扫描面已失效"
+    );
 }
 
 /// 回收站的清空只能出现在**非 dry-run 分支之后**。
@@ -312,7 +331,9 @@ fn the_recycle_bin_is_only_emptied_after_the_dry_run_branch() {
         .filter(|(name, _)| name.ends_with("_test.rs"))
         .filter(|(_, text)| {
             let src = strip_line_comments(text);
-            src.contains("empty_all(") || src.contains("empty_volumes(") || src.contains("empty_one(")
+            src.contains("empty_all(")
+                || src.contains("empty_volumes(")
+                || src.contains("empty_one(")
         })
         .map(|(name, _)| name)
         .collect();
@@ -329,21 +350,24 @@ fn the_recycle_bin_is_only_emptied_after_the_dry_run_branch() {
 /// 与 `commands/monitor.rs` 的 `monitor_layout_sizes_match_frontend` 同一路数。
 #[test]
 fn quarantine_retention_options_match_the_backend() {
-    let ts = strip_line_comments(include_str!(
-        "../../../src/constants/diskCleanupConfig.ts"
-    ));
+    let ts = strip_line_comments(include_str!("../../../src/constants/diskCleanupConfig.ts"));
     let start = ts
         .find("QUARANTINE_RETENTION_OPTIONS")
         .expect("前端找不到 QUARANTINE_RETENTION_OPTIONS（改名时请同步本守卫）");
     let rest = &ts[start..];
-    let end = rest.find("] as const").expect("选项表没有以 `] as const` 结束");
+    let end = rest
+        .find("] as const")
+        .expect("选项表没有以 `] as const` 结束");
     let block = &rest[..end];
 
     let mut found: Vec<u32> = Vec::new();
     let mut cursor = 0usize;
     while let Some(at) = block[cursor..].find("value: ") {
         let from = cursor + at + "value: ".len();
-        let digits: String = block[from..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = block[from..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         cursor = from;
         if digits.is_empty() {
             break;
@@ -365,18 +389,13 @@ fn quarantine_retention_options_match_the_backend() {
 /// 后端对不认识的值会**静默退回默认深度** —— 前端多写一个档位，症状是"选了没反应"。
 #[test]
 fn discovery_depth_options_match_the_backend() {
-    let ts = strip_line_comments(include_str!(
-        "../../../src/constants/diskCleanupConfig.ts"
-    ));
+    let ts = strip_line_comments(include_str!("../../../src/constants/diskCleanupConfig.ts"));
     let start = ts
         .find("DISCOVERY_DEPTH_OPTIONS")
         .expect("前端找不到 DISCOVERY_DEPTH_OPTIONS（改名时请同步本守卫）");
     let rest = &ts[start..];
     let open = rest.find('[').expect("档位表应当是数组");
-    let close = rest[open..]
-        .find(']')
-        .expect("档位表没有以 `]` 结束")
-        + open;
+    let close = rest[open..].find(']').expect("档位表没有以 `]` 结束") + open;
     let block = &rest[open + 1..close];
 
     let mut found: Vec<usize> = block
@@ -436,9 +455,7 @@ fn the_watchdog_never_touches_deletion_or_quarantine() {
 /// 症状就是"选了 1 分钟、实际还是 1 小时"这种谁也说不清的错位。
 #[test]
 fn watchdog_interval_choices_match_the_backend() {
-    let ts = strip_line_comments(include_str!(
-        "../../../src/constants/diskCleanupConfig.ts"
-    ));
+    let ts = strip_line_comments(include_str!("../../../src/constants/diskCleanupConfig.ts"));
     let start = ts
         .find("WATCHDOG_INTERVAL_OPTIONS")
         .expect("前端找不到 WATCHDOG_INTERVAL_OPTIONS（改名时请同步本守卫）");
@@ -455,7 +472,10 @@ fn watchdog_interval_choices_match_the_backend() {
 
     let mut expected: Vec<u64> = super::watchdog::INTERVAL_CHOICES.to_vec();
     expected.sort_unstable();
-    assert_eq!(found, expected, "前端的看门狗间隔档位与后端 INTERVAL_CHOICES 不一致");
+    assert_eq!(
+        found, expected,
+        "前端的看门狗间隔档位与后端 INTERVAL_CHOICES 不一致"
+    );
     assert!(
         expected.contains(&super::watchdog::DEFAULT_INTERVAL_HOURS),
         "默认间隔不在档位表里"
@@ -538,7 +558,8 @@ fn every_backend_command_has_a_frontend_caller() {
             .or_else(|| trimmed.strip_prefix("pub fn "));
         if let Some(rest) = rest {
             let name = rest.split('(').next().unwrap_or("").trim();
-            if name.starts_with("disk_cleanup_") || name.starts_with("get_system_cleaner_")
+            if name.starts_with("disk_cleanup_")
+                || name.starts_with("get_system_cleaner_")
                 || name.starts_with("set_system_cleaner_")
             {
                 names.push(name);
@@ -631,7 +652,11 @@ fn builtin_table_passes_the_same_validator() {
 
     // 能解析出来不等于每条都合理，把关键约束再钉一遍
     for rule in &rules {
-        assert!(!rule.consequence.trim().is_empty(), "{} 缺后果文案", rule.id);
+        assert!(
+            !rule.consequence.trim().is_empty(),
+            "{} 缺后果文案",
+            rule.id
+        );
         assert!(
             rule.requires_admin == (rule.tier != super::rules::Tier::L1),
             "{} 的级别与授权不一致",
@@ -756,5 +781,8 @@ fn whole_tree_walks_never_run_on_an_async_thread() {
             }
         }
     }
-    assert!(checked >= 3, "没扫到预期的调用点，守卫已失明（checked={checked}）");
+    assert!(
+        checked >= 3,
+        "没扫到预期的调用点，守卫已失明（checked={checked}）"
+    );
 }

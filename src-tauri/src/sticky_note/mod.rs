@@ -376,7 +376,10 @@ static NOTE_WINDOW_INIT_LOCK: Mutex<()> = Mutex::new(());
 /// 导致整个应用死锁冻结。所有最终会走到这里的命令（commands/sticky.rs 的
 /// `create_sticky_note` / `show_sticky_note` / `restore_pinned_notes`）都必须保持 `async`。
 /// 参见 https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html
-pub fn ensure_note_window(app: &tauri::AppHandle, id: &str) -> Result<tauri::WebviewWindow, String> {
+pub fn ensure_note_window(
+    app: &tauri::AppHandle,
+    id: &str,
+) -> Result<tauri::WebviewWindow, String> {
     let label = note_window_label(id);
     // 存在性检查必须与创建同处锁内，否则并发调用会重复创建同名窗口
     let _init_guard = NOTE_WINDOW_INIT_LOCK
@@ -425,11 +428,7 @@ pub fn ensure_note_window(app: &tauri::AppHandle, id: &str) -> Result<tauri::Web
                 // 先让前端把防抖中的正文冲盘（前端监听后立刻 flushSave），再落状态并隐藏。
                 // 必须**定向**发（`emit_to`）：`Emitter::emit` 是全局广播，会让每一张
                 // 便签窗都收到并各自多冲一次盘（多余 IPC + 写盘 + 管理窗列表抖动）。
-                let _ = close_app.emit_to(
-                    close_label.as_str(),
-                    "sticky-note-close-requested",
-                    (),
-                );
+                let _ = close_app.emit_to(close_label.as_str(), "sticky-note-close-requested", ());
                 if let Some(store) = close_app.try_state::<NoteStore>() {
                     if let Err(error) = store.set_visible(&close_id, false) {
                         crate::utils::logger::log(
@@ -488,12 +487,15 @@ pub fn show_note_window(
             }
         }
         let (x, y) = crate::commands::clamp_position_to_workarea(note.x, note.y, w_px, h_px);
-        win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
-            .map_err(|e| format!("设置便利贴位置失败: {e}"))?;
+        win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )))
+        .map_err(|e| format!("设置便利贴位置失败: {e}"))?;
     }
     win.show().map_err(|e| format!("显示便利贴失败: {e}"))?;
     if focus {
-        win.set_focus().map_err(|e| format!("聚焦便利贴失败: {e}"))?;
+        win.set_focus()
+            .map_err(|e| format!("聚焦便利贴失败: {e}"))?;
     }
     Ok(())
 }
@@ -586,7 +588,10 @@ pub fn save_image(app: &tauri::AppHandle, note_id: &str, bytes: &[u8]) -> Result
         return Err("图片内容为空".into());
     }
     if bytes.len() > IMAGE_MAX_BYTES {
-        return Err(format!("图片不能超过 {}MB", IMAGE_MAX_BYTES / (1024 * 1024)));
+        return Err(format!(
+            "图片不能超过 {}MB",
+            IMAGE_MAX_BYTES / (1024 * 1024)
+        ));
     }
     let data = ensure_png(bytes)?;
 
@@ -617,7 +622,10 @@ pub fn import_image_file(
     }
     let meta = fs::metadata(path).map_err(|e| format!("读取图片失败: {e}"))?;
     if meta.len() > IMAGE_MAX_BYTES as u64 {
-        return Err(format!("图片不能超过 {}MB", IMAGE_MAX_BYTES / (1024 * 1024)));
+        return Err(format!(
+            "图片不能超过 {}MB",
+            IMAGE_MAX_BYTES / (1024 * 1024)
+        ));
     }
     let bytes = fs::read(path).map_err(|e| format!("读取图片失败: {e}"))?;
     save_image(app, note_id, &bytes)
@@ -635,7 +643,8 @@ pub fn resolve_image_path(
     note_id: &str,
     rel: &str,
 ) -> Result<PathBuf, String> {
-    let (dir, file) = validated_image_rel(note_id, rel).ok_or_else(|| "图片路径无效".to_string())?;
+    let (dir, file) =
+        validated_image_rel(note_id, rel).ok_or_else(|| "图片路径无效".to_string())?;
     Ok(images_dir(app)?.join(dir).join(file))
 }
 
@@ -947,24 +956,27 @@ mod tests {
         let rel = "note-1750000000000-1/img_1750000000000_0.png";
         assert_eq!(
             validated_image_rel(note_id, rel),
-            Some(("note-1750000000000-1".to_string(), "img_1750000000000_0.png".to_string()))
+            Some((
+                "note-1750000000000-1".to_string(),
+                "img_1750000000000_0.png".to_string()
+            ))
         );
         // 历史 / 转码前的其它白名单扩展名同样可解析（目录里可能还留着旧文件）
         assert!(validated_image_rel(note_id, "note-1750000000000-1/img_1_2.jpg").is_some());
 
         for evil in [
-            "../evil/img_1_2.png",                              // 目录段上跳
-            "note-1750000000000-1/../img_1_2.png",              // 文件名上跳
-            "note-1750000000000-1/sub/img_1_2.png",             // 多余层级
-            "note-1750000000000-1/img_1_2",                     // 无扩展名
-            "note-1750000000000-1/img_1_2.exe",                 // 非图片扩展名
-            "note-1750000000000-1/notes.json",                  // 其它文件
-            "note-1750000000000-1/img_a_b.png",                 // 非数字序号
-            "note-1750000000000-1/img_1_2_3.png",               // 段数不符
-            "note-1750000000000-2/img_1_2.png",                 // 别人的目录
-            "img_1_2.png",                                      // 没有目录段
-            "note-1750000000000-1\\img_1_2.png",                // 反斜杠（split_once('/') 落空）
-            "note-1750000000000-1/img_1_2.PNG.exe",             // 双扩展名
+            "../evil/img_1_2.png",                  // 目录段上跳
+            "note-1750000000000-1/../img_1_2.png",  // 文件名上跳
+            "note-1750000000000-1/sub/img_1_2.png", // 多余层级
+            "note-1750000000000-1/img_1_2",         // 无扩展名
+            "note-1750000000000-1/img_1_2.exe",     // 非图片扩展名
+            "note-1750000000000-1/notes.json",      // 其它文件
+            "note-1750000000000-1/img_a_b.png",     // 非数字序号
+            "note-1750000000000-1/img_1_2_3.png",   // 段数不符
+            "note-1750000000000-2/img_1_2.png",     // 别人的目录
+            "img_1_2.png",                          // 没有目录段
+            "note-1750000000000-1\\img_1_2.png",    // 反斜杠（split_once('/') 落空）
+            "note-1750000000000-1/img_1_2.PNG.exe", // 双扩展名
         ] {
             assert!(
                 validated_image_rel(note_id, evil).is_none(),

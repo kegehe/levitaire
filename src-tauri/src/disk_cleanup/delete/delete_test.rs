@@ -239,11 +239,7 @@ fn in_use_files_are_skipped_not_forced() {
     purge_contents(&base, &mut ctx).unwrap();
 
     assert!(locked.exists(), "占用中的文件绝不能被强删");
-    assert_eq!(
-        fs::read_to_string(&locked).unwrap(),
-        "data",
-        "内容必须完好"
-    );
+    assert_eq!(fs::read_to_string(&locked).unwrap(), "data", "内容必须完好");
     assert_eq!(ctx.stats.files_skipped_in_use, 1);
     assert_eq!(ctx.stats.failures, 0, "占用是「跳过」，不是「失败」");
     assert!(ctx
@@ -405,7 +401,10 @@ fn purge_never_removes_the_root_itself() {
     let mut ctx = DeleteCtx::new();
     purge_contents(&base, &mut ctx).unwrap();
 
-    assert!(base.exists(), "根目录必须保留：删掉它等于破坏 %TEMP% 默认路径（§6.3）");
+    assert!(
+        base.exists(),
+        "根目录必须保留：删掉它等于破坏 %TEMP% 默认路径（§6.3）"
+    );
     assert!(!sub.exists(), "根下的空目录应当被清掉");
     assert!(!base.join("a.txt").exists());
     assert_eq!(ctx.stats.dirs_deleted, 1);
@@ -441,4 +440,3 @@ fn a_missing_root_is_an_error_not_a_silent_success() {
     );
     let _ = fs::remove_dir_all(&base);
 }
-

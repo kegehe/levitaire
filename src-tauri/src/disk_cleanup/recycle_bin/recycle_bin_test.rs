@@ -190,10 +190,7 @@ fn measure_all_fixed_volumes_on_this_machine() {
     for volume in &measured.volumes {
         eprintln!(
             "  {}  {:>12} 字节  {:>7} 个文件  读不到的 SID {} 个",
-            volume.volume,
-            volume.bytes,
-            volume.files,
-            volume.unreadable_sids
+            volume.volume, volume.bytes, volume.files, volume.unreadable_sids
         );
     }
     for volume in &measured.unreadable_volumes {

@@ -224,7 +224,14 @@ pub fn run_rule(
             Ok(target) => {
                 report.target_display = target.display().to_string();
                 match directory_precheck(&target, rule, &mut report) {
-                    Ok(()) => run_purge(rule, mode, &target, &mut ctx, quarantine),
+                    Ok(()) => {
+                        if let Err(error) = profile.verify(&target) {
+                            report.status = RuleStatus::Blocked;
+                            report.error = Some(error.to_string());
+                            return no_records(&report);
+                        }
+                        run_purge(rule, mode, &target, &mut ctx, quarantine)
+                    }
                     Err(()) => return no_records(&report),
                 }
             }
@@ -323,7 +330,10 @@ fn directory_precheck(target: &Path, rule: &CleanRule, report: &mut RuleReport) 
                 report.status = RuleStatus::NoTarget;
             } else {
                 report.status = RuleStatus::Failed;
-                report.error = Some(format!("无法读取 {}（Win32 错误 {code}）", target.display()));
+                report.error = Some(format!(
+                    "无法读取 {}（Win32 错误 {code}）",
+                    target.display()
+                ));
             }
             Err(())
         }
@@ -468,8 +478,8 @@ fn run_recycle_bin(
     // 兜底：连一个 `$Recycle.Bin` 都列不出来时才去问 Shell（慢且无界）。
     // 只在"完全读不到"时用 —— 部分读不到是有意义的信息（其它用户的），不该被 shell
     // 那个更慢也更不可靠的数字盖掉。
-    let measured_nothing = measured.volumes.iter().all(|volume| volume.files == 0)
-        && measured.unreadable_sids() == 0;
+    let measured_nothing =
+        measured.volumes.iter().all(|volume| volume.files == 0) && measured.unreadable_sids() == 0;
     let fallback = if measured_nothing && !measured.unreadable_volumes.is_empty() {
         let report = recycle_bin::query_all();
         Some(report)

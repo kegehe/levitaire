@@ -112,6 +112,11 @@
 
 .long-capture-preview-header {
   gap: 8px;
+  cursor: grab;
+}
+
+.long-capture-preview-header:active {
+  cursor: grabbing;
 }
 
 .long-capture-preview-title {

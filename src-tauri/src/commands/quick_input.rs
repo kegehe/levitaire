@@ -1,6 +1,5 @@
 use super::*;
 
-
 // ─── 快速输入转盘工具 ────────────────────────────────────────────
 
 #[tauri::command]
@@ -8,12 +7,10 @@ pub fn get_quick_input_enabled(config: State<'_, ConfigManager>) -> Result<bool,
     config.get_quick_input_enabled()
 }
 
-
 #[tauri::command]
 pub fn get_quick_input_state() -> crate::quick_input::QuickInputState {
     crate::quick_input::state()
 }
-
 
 /// 启用/禁用快速输入转盘。
 ///
@@ -51,7 +48,6 @@ pub async fn set_quick_input_enabled(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_quick_input_trigger_key(config: State<'_, ConfigManager>) -> Result<String, String> {
     let key = config.get_quick_input_trigger_key()?;
@@ -61,7 +57,6 @@ pub fn get_quick_input_trigger_key(config: State<'_, ConfigManager>) -> Result<S
         Ok(key)
     }
 }
-
 
 #[tauri::command]
 pub fn set_quick_input_trigger_key(
@@ -82,7 +77,6 @@ pub fn set_quick_input_trigger_key(
     Ok(())
 }
 
-
 /// 获取快速输入转盘触发模式（"click" 单击切换 | "hold" 按住唤起）
 #[tauri::command]
 pub fn get_quick_input_mode(config: State<'_, ConfigManager>) -> Result<String, String> {
@@ -93,7 +87,6 @@ pub fn get_quick_input_mode(config: State<'_, ConfigManager>) -> Result<String, 
         Ok(mode)
     }
 }
-
 
 /// 设置快速输入转盘触发模式（"click" 单击切换 | "hold" 按住唤起）
 #[tauri::command]
@@ -107,14 +100,12 @@ pub fn set_quick_input_mode(mode: String, config: State<'_, ConfigManager>) -> R
     Ok(())
 }
 
-
 /// 获取快速输入剪贴板历史保留条数。
 #[tauri::command]
 pub fn get_quick_input_history_limit(config: State<'_, ConfigManager>) -> Result<usize, String> {
     let limit = config.get_quick_input_history_limit()?;
     Ok(limit.min(crate::quick_input::HISTORY_MAX))
 }
-
 
 /// 设置快速输入剪贴板历史保留条数，0 表示不记录历史。
 #[tauri::command]
@@ -133,13 +124,11 @@ pub fn set_quick_input_history_limit(
     Ok(())
 }
 
-
 /// 获取快速输入是否记录剪贴板历史（历史区开关）。
 #[tauri::command]
 pub fn get_quick_input_history_enabled(config: State<'_, ConfigManager>) -> Result<bool, String> {
     config.get_quick_input_history_enabled()
 }
-
 
 #[tauri::command]
 pub fn set_quick_input_history_enabled(
@@ -151,13 +140,11 @@ pub fn set_quick_input_history_enabled(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn set_quick_input_highlight(index: i32) -> Result<(), String> {
     crate::quick_input::set_highlight(index);
     Ok(())
 }
-
 
 /// 提交「按住唤起」模式在松开触发键瞬间结算出的扇区。
 /// generation 用于拒绝滞后事件，避免旧会话的确认影响下一次唤起。
@@ -170,7 +157,9 @@ pub fn confirm_quick_input_hold(
     app: tauri::AppHandle,
 ) -> Result<bool, String> {
     Ok(crate::quick_input::confirm_hold_wheel(
-        &app, generation, selected_index,
+        &app,
+        generation,
+        selected_index,
     ))
 }
 
@@ -188,12 +177,10 @@ pub fn back_quick_input_wheel(generation: u64) -> Result<bool, String> {
     Ok(crate::quick_input::back_wheel(generation))
 }
 
-
 #[tauri::command]
 pub fn get_quick_input_snippets(config: State<'_, ConfigManager>) -> Result<String, String> {
     config.get_quick_input_snippets()
 }
-
 
 #[tauri::command]
 pub fn set_quick_input_snippets(
@@ -203,12 +190,10 @@ pub fn set_quick_input_snippets(
     config.update_quick_input_snippets(snippets)
 }
 
-
 #[tauri::command]
 pub fn get_quick_input_snippets_enabled(config: State<'_, ConfigManager>) -> Result<bool, String> {
     config.get_quick_input_snippets_enabled()
 }
-
 
 #[tauri::command]
 pub fn set_quick_input_snippets_enabled(
@@ -218,13 +203,11 @@ pub fn set_quick_input_snippets_enabled(
     config.update_quick_input_snippets_enabled(enabled)
 }
 
-
 /// 获取快速输入转盘的音效反馈开关。
 #[tauri::command]
 pub fn get_quick_input_sound_enabled(config: State<'_, ConfigManager>) -> Result<bool, String> {
     config.get_quick_input_sound_enabled()
 }
-
 
 #[tauri::command]
 pub fn set_quick_input_sound_enabled(
@@ -236,13 +219,11 @@ pub fn set_quick_input_sound_enabled(
     Ok(())
 }
 
-
 /// 获取音效风格："minimal"（只保留唤出与确认）| "standard"（含切扇区刻度音）| "none"（静音）
 #[tauri::command]
 pub fn get_quick_input_sound_style(config: State<'_, ConfigManager>) -> Result<String, String> {
     config.get_quick_input_sound_style()
 }
-
 
 #[tauri::command]
 pub fn set_quick_input_sound_style(
@@ -255,13 +236,11 @@ pub fn set_quick_input_sound_style(
     Ok(())
 }
 
-
 /// 获取音效音量（0-100 百分比）
 #[tauri::command]
 pub fn get_quick_input_sound_volume(config: State<'_, ConfigManager>) -> Result<u32, String> {
     config.get_quick_input_sound_volume()
 }
-
 
 #[tauri::command]
 pub fn set_quick_input_sound_volume(
@@ -272,7 +251,6 @@ pub fn set_quick_input_sound_volume(
     sync_quick_input_sound(&config);
     Ok(())
 }
-
 
 /// 试听音效：按当前音量配置播放指定音效（cue: open/tick/confirm/cancel）。
 ///
@@ -301,19 +279,16 @@ pub fn preview_quick_input_sound(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_quick_input_history() -> Result<Vec<crate::quick_input::ClipboardHistoryItem>, String> {
     Ok(crate::quick_input::get_history())
 }
-
 
 #[tauri::command]
 pub fn clear_quick_input_history() -> Result<(), String> {
     crate::quick_input::clear_history();
     Ok(())
 }
-
 
 /// 删除单条剪贴板历史记录（按文本精确匹配；同文本的重复/收藏记录一并清除）。
 /// 供设置页「快速输入 → 剪贴板历史」单条删除使用，弥补只能整批清空的不足。
@@ -323,7 +298,6 @@ pub fn remove_quick_input_history_item(text: String) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 收藏 / 取消收藏某条历史记录：收藏项固定在转盘历史区最前，且不会被滚动保留条数裁掉。
 #[tauri::command]
 pub fn set_quick_input_history_favorite(text: String, favorite: bool) -> Result<(), String> {
@@ -331,14 +305,12 @@ pub fn set_quick_input_history_favorite(text: String, favorite: bool) -> Result<
     Ok(())
 }
 
-
 /// 选中某项后输入文本到当前焦点输入框（写剪贴板 + 模拟 Ctrl+V + 恢复原内容）
 #[tauri::command]
 pub fn quick_input_paste(text: String) -> Result<(), String> {
     crate::quick_input::type_text_async(text);
     Ok(())
 }
-
 
 /// 点击切换快速输入转盘：当前已激活则关闭（取消），否则打开并定位到鼠标处。
 /// 供前端（悬浮工具面板点击「快速输入」卡片）唤起转盘，语义与触发键单击一致。
@@ -355,7 +327,6 @@ pub async fn toggle_quick_input_wheel(app: tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
-
 /// 幂等取消快速输入转盘，供前端定位失败等异常路径复位后端会话。
 #[tauri::command]
 pub fn cancel_quick_input_wheel(
@@ -365,7 +336,6 @@ pub fn cancel_quick_input_wheel(
     crate::quick_input::cancel_wheel_if_generation(&app, generation);
     Ok(())
 }
-
 
 /// 预创建快速输入转盘窗口（隐藏）。工具启用时由前端调用一次；
 /// 应用启动时也会在 main.rs 的 setup 中调用（quick_input::ensure_window），

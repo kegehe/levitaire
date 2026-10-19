@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[tauri::command]
 pub fn show_timer_window(
     app: tauri::AppHandle,
@@ -29,16 +28,18 @@ pub fn show_timer_window(
     if !win.is_visible().unwrap_or(true) {
         if let Ok(Some(pos)) = config_manager.get_window_position("time-overlay") {
             let inner = win.inner_size().unwrap_or_default();
-            let (x, y) = clamp_position_to_workarea(pos.x, pos.y, inner.width as i32, inner.height as i32);
-            win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
-                .map_err(|e| e.to_string())?;
+            let (x, y) =
+                clamp_position_to_workarea(pos.x, pos.y, inner.width as i32, inner.height as i32);
+            win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, y,
+            )))
+            .map_err(|e| e.to_string())?;
         }
     }
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
-
 
 #[tauri::command]
 pub fn hide_timer_window(app: tauri::AppHandle) -> Result<(), String> {
@@ -48,15 +49,17 @@ pub fn hide_timer_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_timer_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_timer_enabled()
 }
 
-
 #[tauri::command]
-pub fn set_timer_enabled(enabled: bool, app: tauri::AppHandle, config_manager: State<'_, ConfigManager>) -> Result<(), String> {
+pub fn set_timer_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
     if !enabled {
         if let Some(state) = app.try_state::<crate::timer::TimerState>() {
             let payload = state.pause_all();
@@ -68,41 +71,47 @@ pub fn set_timer_enabled(enabled: bool, app: tauri::AppHandle, config_manager: S
             pomodoro.stop();
             let _ = app.emit("pomodoro-tick", pomodoro.payload());
         }
-        if let Some(window) = app.get_webview_window("time-overlay") { let _ = window.hide(); }
+        if let Some(window) = app.get_webview_window("time-overlay") {
+            let _ = window.hide();
+        }
     }
     config_manager.update_timer_enabled(enabled)
 }
 
-
 #[tauri::command]
-pub fn get_timer_reminders_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
+pub fn get_timer_reminders_enabled(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<bool, String> {
     config_manager.get_timer_reminders_enabled()
 }
 
-
 #[tauri::command]
-pub fn set_timer_reminders_enabled(enabled: bool, config_manager: State<'_, ConfigManager>) -> Result<(), String> {
+pub fn set_timer_reminders_enabled(
+    enabled: bool,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
     config_manager.update_timer_reminders_enabled(enabled)
 }
 
-
 #[tauri::command]
-pub fn get_timer_reminder_sound(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
+pub fn get_timer_reminder_sound(
+    config_manager: State<'_, ConfigManager>,
+) -> Result<String, String> {
     config_manager.get_timer_reminder_sound()
 }
 
-
 #[tauri::command]
-pub fn set_timer_reminder_sound(sound: String, config_manager: State<'_, ConfigManager>) -> Result<(), String> {
+pub fn set_timer_reminder_sound(
+    sound: String,
+    config_manager: State<'_, ConfigManager>,
+) -> Result<(), String> {
     config_manager.update_timer_reminder_sound(sound)
 }
-
 
 #[tauri::command]
 pub fn get_timer_lunar_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_timer_lunar_enabled()
 }
-
 
 #[tauri::command]
 pub fn set_timer_lunar_enabled(
@@ -115,7 +124,6 @@ pub fn set_timer_lunar_enabled(
     Ok(())
 }
 
-
 // ─── 时钟与计时 ───────────────────────────────────────────────
 
 #[tauri::command]
@@ -124,7 +132,6 @@ pub fn get_timers(
 ) -> Result<crate::timer::TimersPayload, String> {
     Ok(state.payload())
 }
-
 
 #[tauri::command]
 pub fn create_timer(
@@ -137,7 +144,6 @@ pub fn create_timer(
     Ok(payload)
 }
 
-
 #[tauri::command]
 pub fn delete_timer(
     id: String,
@@ -148,7 +154,6 @@ pub fn delete_timer(
     let _ = app.emit("timers-changed", &payload);
     Ok(payload)
 }
-
 
 #[tauri::command]
 pub fn set_timer_duration(
@@ -162,49 +167,69 @@ pub fn set_timer_duration(
     Ok(payload)
 }
 
-
 #[tauri::command]
-pub fn rename_timer(id: String, label: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+pub fn rename_timer(
+    id: String,
+    label: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
     let payload = state.rename(&id, label)?;
     let _ = app.emit("timers-changed", &payload);
     Ok(payload)
 }
 
-
 #[tauri::command]
-pub fn add_timer_lap(id: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+pub fn add_timer_lap(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
     let payload = state.add_lap(&id)?;
     let _ = app.emit("timers-changed", &payload);
     Ok(payload)
 }
 
-
 #[tauri::command]
-pub fn start_timer(id: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+pub fn start_timer(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
     let payload = state.start(&id)?;
     let _ = app.emit("timers-changed", &payload);
     Ok(payload)
 }
 
-
 #[tauri::command]
-pub fn pause_timer(id: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+pub fn pause_timer(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
     let payload = state.pause(&id)?;
     let _ = app.emit("timers-changed", &payload);
     Ok(payload)
 }
 
-
 #[tauri::command]
-pub fn reset_timer(id: String, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+pub fn reset_timer(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
     let payload = state.reset(&id)?;
     let _ = app.emit("timers-changed", &payload);
     Ok(payload)
 }
 
-
 #[tauri::command]
-pub fn add_timer_seconds(id: String, seconds: u64, app: tauri::AppHandle, state: State<'_, crate::timer::TimerState>) -> Result<crate::timer::TimersPayload, String> {
+pub fn add_timer_seconds(
+    id: String,
+    seconds: u64,
+    app: tauri::AppHandle,
+    state: State<'_, crate::timer::TimerState>,
+) -> Result<crate::timer::TimersPayload, String> {
     let payload = state.add_seconds(&id, seconds)?;
     let _ = app.emit("timers-changed", &payload);
     Ok(payload)

@@ -13,9 +13,9 @@ use windows::core::GUID;
 use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Shell::{
-    SHGetKnownFolderPath, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads,
-    FOLDERID_LocalAppData, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Profile,
-    FOLDERID_ProgramData, FOLDERID_RoamingAppData, FOLDERID_Videos, FOLDERID_Windows,
+    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData,
+    FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Profile, FOLDERID_ProgramData,
+    FOLDERID_RoamingAppData, FOLDERID_Videos, FOLDERID_Windows, SHGetKnownFolderPath,
     KF_FLAG_DEFAULT,
 };
 
@@ -167,14 +167,18 @@ fn join_relative(base: PathBuf, relative: Option<&str>) -> Result<PathBuf, Safet
     reject_env_expansion(rel)?;
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
-        return Err(SafetyError::RelativeNotAllowed { relative: rel.to_string() });
+        return Err(SafetyError::RelativeNotAllowed {
+            relative: rel.to_string(),
+        });
     }
     for comp in rel_path.components() {
         match comp {
             Component::Normal(_) => {}
             // `..` / `.` / 盘符 / 根 / UNC —— 一律拒绝，不给"看起来无害"的中间态留口子
             _ => {
-                return Err(SafetyError::RelativeNotAllowed { relative: rel.to_string() });
+                return Err(SafetyError::RelativeNotAllowed {
+                    relative: rel.to_string(),
+                });
             }
         }
     }
@@ -185,7 +189,9 @@ fn join_relative(base: PathBuf, relative: Option<&str>) -> Result<PathBuf, Safet
 /// `%VAR%`，放行只会让规则作者以为它生效了。fail-closed。
 fn reject_env_expansion(text: &str) -> Result<(), SafetyError> {
     if text.contains('%') {
-        return Err(SafetyError::EnvExpansionNotSupported { text: text.to_string() });
+        return Err(SafetyError::EnvExpansionNotSupported {
+            text: text.to_string(),
+        });
     }
     Ok(())
 }

@@ -248,9 +248,15 @@ fn default_todo_reminders_enabled() -> bool {
     true
 }
 
-fn default_timer_reminders_enabled() -> bool { true }
-fn default_timer_reminder_sound() -> String { "tone".to_string() }
-fn default_timer_lunar_enabled() -> bool { true }
+fn default_timer_reminders_enabled() -> bool {
+    true
+}
+fn default_timer_reminder_sound() -> String {
+    "tone".to_string()
+}
+fn default_timer_lunar_enabled() -> bool {
+    true
+}
 fn default_todo_reminder_sound() -> String {
     "tone".to_string()
 }
@@ -1018,7 +1024,9 @@ impl ConfigManager {
 
     /// 获取看门狗设置。空串或解析失败一律回退到默认（**默认关闭**）——
     /// 一个读不出来的设置绝不该让看门狗开始每天扫盘。
-    pub fn get_system_cleaner_watch(&self) -> Result<crate::disk_cleanup::watchdog::WatchSettings, String> {
+    pub fn get_system_cleaner_watch(
+        &self,
+    ) -> Result<crate::disk_cleanup::watchdog::WatchSettings, String> {
         let raw = self
             .config
             .lock()
@@ -1042,7 +1050,8 @@ impl ConfigManager {
         input: &crate::disk_cleanup::watchdog::WatchSettingsInput,
     ) -> Result<crate::disk_cleanup::watchdog::WatchSettings, String> {
         let merged = self.get_system_cleaner_watch()?.apply(input);
-        let text = serde_json::to_string(&merged).map_err(|e| format!("序列化看门狗设置失败: {e}"))?;
+        let text =
+            serde_json::to_string(&merged).map_err(|e| format!("序列化看门狗设置失败: {e}"))?;
         {
             let mut config = self
                 .config
@@ -1059,7 +1068,8 @@ impl ConfigManager {
         &self,
         settings: &crate::disk_cleanup::watchdog::WatchSettings,
     ) -> Result<(), String> {
-        let text = serde_json::to_string(settings).map_err(|e| format!("序列化看门狗设置失败: {e}"))?;
+        let text =
+            serde_json::to_string(settings).map_err(|e| format!("序列化看门狗设置失败: {e}"))?;
         {
             let mut config = self
                 .config
@@ -1150,49 +1160,77 @@ impl ConfigManager {
     }
 
     pub fn get_timer_enabled(&self) -> Result<bool, String> {
-        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_enabled)
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.timer_enabled)
     }
 
     pub fn update_timer_enabled(&self, enabled: bool) -> Result<(), String> {
         {
-            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.timer_enabled = enabled;
         }
         self.save_config()
     }
 
     pub fn get_timer_reminders_enabled(&self) -> Result<bool, String> {
-        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_reminders_enabled)
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.timer_reminders_enabled)
     }
 
     pub fn update_timer_reminders_enabled(&self, enabled: bool) -> Result<(), String> {
         {
-            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.timer_reminders_enabled = enabled;
         }
         self.save_config()
     }
 
     pub fn get_timer_reminder_sound(&self) -> Result<String, String> {
-        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_reminder_sound.clone())
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.timer_reminder_sound.clone())
     }
 
     pub fn update_timer_reminder_sound(&self, sound: String) -> Result<(), String> {
-        let sound = if sound == "none" { "none".to_string() } else { "tone".to_string() };
+        let sound = if sound == "none" {
+            "none".to_string()
+        } else {
+            "tone".to_string()
+        };
         {
-            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.timer_reminder_sound = sound;
         }
         self.save_config()
     }
 
     pub fn get_timer_lunar_enabled(&self) -> Result<bool, String> {
-        self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e)).map(|c| c.timer_lunar_enabled)
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.timer_lunar_enabled)
     }
 
     pub fn update_timer_lunar_enabled(&self, enabled: bool) -> Result<(), String> {
         {
-            let mut config = self.config.lock().map_err(|e| format!("获取配置锁失败: {}", e))?;
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
             config.timer_lunar_enabled = enabled;
         }
         self.save_config()
@@ -2614,10 +2652,8 @@ mod tests {
     /// 音量越界必须夹取到 0-100，不能持久化出越界值。
     #[test]
     fn test_config_manager_sound_volume_clamps() {
-        let tmp = std::env::temp_dir().join(format!(
-            "levitaire_test_qisoundvol_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_qisoundvol_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 
@@ -2642,10 +2678,8 @@ mod tests {
     /// 开关的 getter/setter 必须读写同一字段 —— 复制粘贴错字段会让开关「点不动」且不报错。
     #[test]
     fn test_config_manager_sound_enabled_roundtrip_is_isolated() {
-        let tmp = std::env::temp_dir().join(format!(
-            "levitaire_test_qisoundon_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("levitaire_test_qisoundon_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let config_path = tmp.join("config.json");
 

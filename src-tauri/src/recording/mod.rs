@@ -240,11 +240,8 @@ impl RecordingState {
             self.running.store(false, Ordering::SeqCst);
             self.finishing.store(true, Ordering::SeqCst);
             if self.paused.swap(false, Ordering::SeqCst) {
-                if let Some(pause_start) = self
-                    .pause_start
-                    .lock()
-                    .map_err(|e| e.to_string())?
-                    .take()
+                if let Some(pause_start) =
+                    self.pause_start.lock().map_err(|e| e.to_string())?.take()
                 {
                     *self.paused_duration.lock().map_err(|e| e.to_string())? +=
                         pause_start.elapsed();
@@ -332,12 +329,7 @@ impl RecordingState {
         if current == gen {
             if self
                 .generation
-                .compare_exchange(
-                    gen,
-                    gen.wrapping_add(1),
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
+                .compare_exchange(gen, gen.wrapping_add(1), Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
             {
                 return false;
@@ -874,7 +866,8 @@ fn video_recording_loop(app: tauri::AppHandle, gen: u64) {
         state.cancel_requested() || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1)
     }) {
         let _ = std::fs::remove_file(&output_path);
-        if state.cancel_requested() || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1)
+        if state.cancel_requested()
+            || state.generation.load(Ordering::SeqCst) != gen.wrapping_add(1)
         {
             return;
         }

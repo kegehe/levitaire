@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -32,6 +33,9 @@ function LongCaptureControls() {
   const [zoom, setZoom] = useState(1);
   const viewRef = useRef<View | null>(null);
   const actionPending = useRef(false);
+  // Invalidates preview loads that finish after the capture was cancelled,
+  // closed, or replaced by a newer capture session.
+  const previewRequestRef = useRef(0);
   viewRef.current = view;
 
   // 主题接入：长截图控制条/预览是常驻窗口，必须在挂载时着色并订阅广播，
@@ -48,10 +52,13 @@ function LongCaptureControls() {
   }, []);
 
   const showPreview = useCallback(async (result: CaptureStatus) => {
+    const requestId = ++previewRequestRef.current;
     try {
       const preview = await invoke<string>("get_long_capture_preview", { resultId: result.resultId });
+      if (requestId !== previewRequestRef.current) return;
       setZoom(1);
       setView({ kind: "preview", result, preview: `data:image/png;base64,${preview}` });
+      if (requestId !== previewRequestRef.current) return;
       await win.setSize(new LogicalSize(760, 560));
       await win.center();
     } catch (error) {
@@ -62,6 +69,7 @@ function LongCaptureControls() {
   useEffect(() => {
     const unlisten = listen<CaptureStatus>("long-capture-started", ({ payload }) => {
       console.info("[long-capture] started", payload);
+      previewRequestRef.current++;
       setWarning(null);
       setView({ kind: "capturing", result: payload });
     });
@@ -75,6 +83,7 @@ function LongCaptureControls() {
       void showPreview(payload);
     });
     const unlistenCancel = listen("long-capture-cancelled", () => {
+      previewRequestRef.current++;
       setWarning(null);
       void win.hide();
     });
@@ -101,6 +110,7 @@ function LongCaptureControls() {
       if (!current || actionPending.current) return;
 
       actionPending.current = true;
+      previewRequestRef.current++;
       const command = current.kind === "capturing" ? "cancel_long_capture" : "discard_long_capture";
       void invoke(command, { resultId: current.result.resultId })
         .catch((error) => console.error("close long capture failed", error))
@@ -153,7 +163,12 @@ function LongCaptureControls() {
     if (!view || view.kind !== "preview" || actionPending.current) return;
     actionPending.current = true;
     try {
-      await invoke("save_long_capture", { resultId: view.result.resultId });
+      const saved = await invoke<boolean>("save_long_capture", { resultId: view.result.resultId });
+      // The native save dialog returns false when the user cancels. Keep the
+      // preview open in that case so the capture is still available.
+      if (saved) {
+        await close();
+      }
     } catch (error) {
       console.error("save long capture failed", error);
     } finally {
@@ -179,8 +194,15 @@ function LongCaptureControls() {
 
   const resetZoom = () => setZoom(1);
 
+  const startPreviewDrag = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+    event.preventDefault();
+    void win.startDragging().catch((error) => console.error("Failed to drag long capture preview:", error));
+  };
+
   const close = async () => {
     if (!view) return;
+    previewRequestRef.current++;
     await invoke("discard_long_capture", { resultId: view.result.resultId }).catch(() => {});
     await win.hide();
     setView(null);
@@ -215,7 +237,7 @@ function LongCaptureControls() {
   }
   return (
     <div className="long-capture-preview" role="dialog" aria-label="长截图预览">
-      <div className="long-capture-preview-header">
+      <div className="long-capture-preview-header" onMouseDown={startPreviewDrag}>
         <span className="long-capture-preview-title">{result.width} × {result.height}</span>
         <div className="long-capture-zoom-actions" aria-label="缩放控制">
           <button

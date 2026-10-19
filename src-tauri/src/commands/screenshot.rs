@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Called periodically by the screenshot overlay renderer. The native
 /// watchdog uses this to hide and clean up a crashed or reloading WebView.
 #[tauri::command]
@@ -11,7 +10,6 @@ pub fn mark_screenshot_overlay_heartbeat() {
     }
 }
 
-
 /// Show a native error when the screenshot overlay cannot be created or loaded
 /// and there is no screenshot frontend available to render an inline message.
 #[tauri::command]
@@ -19,13 +17,11 @@ pub fn show_screenshot_error(message: String) {
     show_screenshot_native_error(message);
 }
 
-
 /// 获取截图快捷键（空串表示未设置）
 #[tauri::command]
 pub fn get_screenshot_hotkey(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
     config_manager.get_screenshot_hotkey()
 }
-
 
 /// 设置截图快捷键：解析、注册全局热键（带冲突检测）、持久化。
 /// 传入空串则反注册并清除。
@@ -72,7 +68,6 @@ pub fn set_screenshot_hotkey(
     Ok(())
 }
 
-
 /// 设置截图工具启用状态（仅启用时热键才触发），同时持久化到配置
 #[tauri::command]
 pub fn set_screenshot_enabled(
@@ -95,13 +90,11 @@ pub fn set_screenshot_enabled(
     Ok(())
 }
 
-
 /// 获取截图工具启用状态（供前端卡片开关与后端真值同步）
 #[tauri::command]
 pub fn get_screenshot_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_screenshot_enabled()
 }
-
 
 #[tauri::command]
 pub async fn start_screenshot(app: tauri::AppHandle) -> Result<(), String> {
@@ -122,7 +115,6 @@ pub async fn start_screenshot(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-
 /// 获取虚拟桌面边界（多显示器并集，含负坐标原点），供截图遮罩前端换算绝对坐标
 #[tauri::command]
 pub fn get_virtual_desktop_bounds() -> Result<serde_json::Value, String> {
@@ -134,7 +126,6 @@ pub fn get_virtual_desktop_bounds() -> Result<serde_json::Value, String> {
         "height": b.height,
     }))
 }
-
 
 /// 获取截图控件应使用的显示器工作区。活跃会话优先使用启动截图时
 /// 捕获的显示器，避免前端加载期间鼠标移动造成控件跳到另一块屏幕。
@@ -170,14 +161,13 @@ pub fn get_screenshot_monitor_bounds() -> Result<serde_json::Value, String> {
     }))
 }
 
-
 /// 返回全屏缓存的 PNG base64（不带 data: 前缀），供前端放大镜铺底取像素。
 /// 缓存由 start_screenshot 在 overlay 显示前截取，为纯净桌面画面。
 /// 缓存未就绪时返回 Err，前端降级为仅显示十字线。
 ///
 /// # 必须保持 `async`，且编码走 `spawn_blocking`
 ///
-/// 这是整屏级别的 PNG 编码（缓存上限 `MAX_SCREENSHOT_PIXELS`，最坏约 128MB BGRA），
+/// 这是整屏级别的 PNG 编码（缓存上限 `MAX_SCREENSHOT_PIXELS`，最坏约 96MB BGRA），
 /// 同步命令会跑在主线程，编码期间阻塞窗口事件循环、冻结整个应用。
 /// 这里先在 async 线程上取出像素并立即释放缓存锁，再交给阻塞线程池编码——
 /// 主线程与缓存锁都不参与编码，与 `capture_from_cache`「锁内取数据、锁外处理」
@@ -196,7 +186,6 @@ pub async fn get_screen_cache_png(
         .map_err(|error| format!("截图缓存编码任务失败: {}", error))?
 }
 
-
 /// 退出截图模式：隐藏遮罩并恢复鼠标钩子
 #[tauri::command]
 pub fn cancel_screenshot(app: tauri::AppHandle) -> Result<(), String> {
@@ -204,7 +193,6 @@ pub fn cancel_screenshot(app: tauri::AppHandle) -> Result<(), String> {
     cleanup_screenshot_session(&app);
     Ok(())
 }
-
 
 /// 截取屏幕指定区域（物理坐标），返回 PNG base64 与尺寸。
 /// 优先从 start_screenshot 截取的全屏缓存裁剪选区（不含截图 UI，无需 hide/show overlay，不闪屏）；
@@ -239,7 +227,6 @@ pub async fn capture_region(
         "height": h,
     }))
 }
-
 
 /// Detect the element or top-level window under a physical cursor position.
 #[tauri::command]
@@ -283,7 +270,6 @@ pub fn detect_screenshot_target(
     Ok(target)
 }
 
-
 /// 智能（窗口）截图取图：与区域截图一致，从会话全屏缓存裁剪选区。
 /// 历史实现直接 hide/show 整个透明 overlay 再实时截屏，每次点击都会让整屏
 /// 明暗闪一次；改为缓存裁剪后与区域截图口径统一，且不会把 overlay 上的
@@ -311,7 +297,6 @@ pub async fn capture_region_live(
     Ok(serde_json::json!({ "pngBase64": b64, "width": w, "height": h }))
 }
 
-
 #[tauri::command]
 pub fn set_smart_screenshot_mode(app: tauri::AppHandle, active: bool) -> Result<(), String> {
     let _overlay_guard = SMART_SCREENSHOT_OVERLAY_LOCK
@@ -329,7 +314,6 @@ pub fn set_smart_screenshot_mode(app: tauri::AppHandle, active: bool) -> Result<
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn set_smart_screenshot_controls_bounds(
     left: i32,
@@ -341,7 +325,6 @@ pub fn set_smart_screenshot_controls_bounds(
     Ok(())
 }
 
-
 /// 将 base64 PNG 写入剪贴板
 #[tauri::command]
 pub fn clipboard_set_image(
@@ -351,7 +334,6 @@ pub fn clipboard_set_image(
     let bytes = decode_base64_media(&base64_data, "图片")?;
     clipboard.copy_image(&bytes).map_err(|e| e.to_string())
 }
-
 
 /// 对屏幕区域执行 OCR 识别，返回文本
 /// async：模型懒加载与识别在 spawn_blocking 阻塞池执行，避免首次使用时阻塞 UI 主线程
@@ -403,7 +385,6 @@ pub async fn ocr_region(
     .map_err(|e| format!("OCR 任务执行失败: {}", e))?
 }
 
-
 /// 将截图钉在桌面（创建贴图窗口），返回 pin id。
 /// async + spawn_blocking：base64/PNG 解码与建窗参数准备移出主线程，避免大图解码
 /// 阻塞窗口事件循环；窗口本身仍在独立线程创建并跑消息循环（见 pin::create_pin）。
@@ -445,19 +426,16 @@ pub async fn pin_image(
     Ok(id)
 }
 
-
 /// 关闭指定贴图
 #[tauri::command]
 pub fn close_pin(app: tauri::AppHandle, id: u32) -> Result<(), String> {
     crate::screenshot::pin::close_pin(&app, id)
 }
 
-
 #[tauri::command]
 pub fn pin_context_menu_action(id: u32, action: String) -> Result<(), String> {
     crate::screenshot::pin::context_menu_action(id, &action)
 }
-
 
 /// 弹出系统保存对话框，将 base64 编码的 PNG 数据保存为文件
 /// 如果配置了截图保存路径，直接保存到该目录（自动生成带时间戳的文件名）；
@@ -469,6 +447,7 @@ pub async fn save_image(
     filename: String,
 ) -> Result<bool, String> {
     let bytes = decode_base64_media(&base64_data, "图片")?;
+    let _ = filename;
 
     // 检查是否配置了截图保存路径
     let config_manager = app.state::<ConfigManager>();
@@ -476,15 +455,11 @@ pub async fn save_image(
     if !save_path.is_empty() {
         let dir = std::path::Path::new(&save_path);
         if dir.is_dir() {
-            let now = chrono::Local::now();
-            let timestamp = now.format("%Y%m%d_%H%M%S");
-            let millis = now.timestamp_subsec_millis();
-            let ext = std::path::Path::new(&filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("png");
-            let auto_filename = format!("screenshot_{}_{}.{}", timestamp, millis, ext);
-            let full_path = dir.join(&auto_filename);
+            let kind = std::path::Path::new(&filename)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("screenshot");
+            let full_path = super::media_filename::unique_path(dir, kind, "png");
             return tokio::task::spawn_blocking(move || {
                 std::fs::write(&full_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
                 Ok(true)
@@ -506,8 +481,10 @@ pub async fn save_image(
     // 只设 owner 挡不住「另一扇前台置顶窗」，实测过。
     let guard = DialogTopmostGuard::suspend(&app, &["screenshot-overlay", "sketch-overlay"]);
 
+    let dialog_filename =
+        super::media_filename::timestamped_filename_for_template(&filename, "screenshot", "png");
     let mut dialog = rfd::FileDialog::new()
-        .set_file_name(&filename)
+        .set_file_name(&dialog_filename)
         .add_filter("PNG 图片", &["png"]);
     if let Some(owner) = guard.owner() {
         dialog = dialog.set_parent(owner);
@@ -532,7 +509,6 @@ pub async fn save_image(
     result.map_err(|e| format!("任务执行失败: {}", e))?
 }
 
-
 /// 查询截图/录屏捕获会话是否激活。screenshot-overlay 渲染进程挂载时调用，
 /// 用于在 capture-session-active 事件可能早于监听器注册而丢失的情况下，
 /// 同步心跳定时器的启停初态（会话激活即需持续心跳，空闲则停发）。
@@ -541,7 +517,6 @@ pub fn is_capture_session_active() -> bool {
     CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
 }
 
-
 /// 获取截图文件保存路径（空串表示未设置，每次保存时弹出对话框）
 #[tauri::command]
 pub fn get_screenshot_save_path(
@@ -549,7 +524,6 @@ pub fn get_screenshot_save_path(
 ) -> Result<String, String> {
     config_manager.get_screenshot_save_path()
 }
-
 
 /// 更新截图文件保存路径并持久化
 #[tauri::command]
@@ -560,13 +534,11 @@ pub fn set_screenshot_save_path(
     config_manager.update_screenshot_save_path(path)
 }
 
-
 /// 获取贴图窗口边框颜色（#RRGGBB）
 #[tauri::command]
 pub fn get_pin_border_color(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
     config_manager.get_pin_border_color()
 }
-
 
 /// 更新贴图窗口边框颜色并持久化
 #[tauri::command]
@@ -577,13 +549,11 @@ pub fn set_pin_border_color(
     config_manager.update_pin_border_color(color)
 }
 
-
 /// 获取贴图窗口边框粗细（像素）
 #[tauri::command]
 pub fn get_pin_border_width(config_manager: State<'_, ConfigManager>) -> Result<u32, String> {
     config_manager.get_pin_border_width()
 }
-
 
 /// 更新贴图窗口边框粗细并持久化
 #[tauri::command]

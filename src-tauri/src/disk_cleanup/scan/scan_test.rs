@@ -125,7 +125,12 @@ fn dry_run_and_execute_agree_and_neither_follows_a_link() {
 
     // ① dry-run：报告齐全，磁盘一字未动
     let preview = run_rule(&rule, Mode::DryRun, &no_cancel(), profile, None);
-    assert_eq!(preview.report.status, RuleStatus::Ok, "{:?}", preview.report.error);
+    assert_eq!(
+        preview.report.status,
+        RuleStatus::Ok,
+        "{:?}",
+        preview.report.error
+    );
     assert_eq!(preview.report.files, 3, "三个普通文件");
     assert!(
         preview.report.sample_paths.len() >= 3,
@@ -138,13 +143,21 @@ fn dry_run_and_execute_agree_and_neither_follows_a_link() {
 
     // ② 执行：与预览的数一致（同一段代码，只差一个开关）
     let outcome = run_rule(&rule, Mode::Execute, &no_cancel(), profile, None);
-    assert_eq!(outcome.report.status, RuleStatus::Ok, "{:?}", outcome.report.error);
+    assert_eq!(
+        outcome.report.status,
+        RuleStatus::Ok,
+        "{:?}",
+        outcome.report.error
+    );
     assert_eq!(
         outcome.report.files, preview.report.files,
         "预览说删几个就必须删几个 —— 分叉会直接摧毁用户信任"
     );
     assert_eq!(outcome.report.bytes_deleted, preview.report.bytes_deleted);
-    assert_eq!(outcome.report.reparse_skipped, preview.report.reparse_skipped);
+    assert_eq!(
+        outcome.report.reparse_skipped,
+        preview.report.reparse_skipped
+    );
 
     // ③ 真数据一字未变，链接本身已移除
     assert_eq!(
@@ -200,7 +213,10 @@ fn a_file_target_is_reported_as_not_a_directory() {
 
     let outcome = run_rule(&rule, Mode::DryRun, &no_cancel(), profile, None);
     assert_eq!(outcome.report.status, RuleStatus::NotADirectory);
-    assert!(!outcome.report.target_display.is_empty(), "报告里要能指出是哪个目标");
+    assert!(
+        !outcome.report.target_display.is_empty(),
+        "报告里要能指出是哪个目标"
+    );
 }
 
 #[test]
@@ -287,10 +303,10 @@ fn the_recycle_bin_dry_run_reports_the_measured_size() {
     let rule = builtin_rule("recycle-bin");
     let profile = SafetyProfile::global().unwrap();
 
-    let outcome = crate::disk_cleanup::recycle_bin::with_volumes_for_tests(
-        vec![volume.clone()],
-        || run_rule(&rule, Mode::DryRun, &no_cancel(), profile, None),
-    );
+    let outcome =
+        crate::disk_cleanup::recycle_bin::with_volumes_for_tests(vec![volume.clone()], || {
+            run_rule(&rule, Mode::DryRun, &no_cancel(), profile, None)
+        });
     assert_eq!(
         outcome.report.status,
         RuleStatus::Ok,
@@ -311,10 +327,8 @@ fn the_recycle_bin_dry_run_reports_the_measured_size() {
 
     // 报告里的字节数必须与独立实测一致（干跑不改动任何东西，两次实测应当相同）
     let cancel = std::sync::atomic::AtomicBool::new(false);
-    let measured = crate::disk_cleanup::recycle_bin::measure_volumes(
-        std::slice::from_ref(&volume),
-        &cancel,
-    );
+    let measured =
+        crate::disk_cleanup::recycle_bin::measure_volumes(std::slice::from_ref(&volume), &cancel);
     assert_eq!(
         outcome.report.bytes_deleted,
         measured.bytes(),
@@ -330,18 +344,15 @@ fn an_unreadable_recycle_bin_falls_back_to_the_shell_query() {
     let rule = builtin_rule("recycle-bin");
     let profile = SafetyProfile::global().unwrap();
 
-    let outcome = crate::disk_cleanup::recycle_bin::with_volumes_for_tests(
-        vec![r"Q:\".to_string()],
-        || run_rule(&rule, Mode::DryRun, &no_cancel(), profile, None),
-    );
+    let outcome =
+        crate::disk_cleanup::recycle_bin::with_volumes_for_tests(vec![r"Q:\".to_string()], || {
+            run_rule(&rule, Mode::DryRun, &no_cancel(), profile, None)
+        });
     assert_eq!(outcome.report.status, RuleStatus::Ok);
     // 兜底查询对不存在的卷会失败 → 必须留下"未统计"的说明，而不是悄悄报 0
     assert!(
-        outcome
-            .records
-            .iter()
-            .any(|record| record.reason.is_some()
-                && record.path == crate::disk_cleanup::recycle_bin::RECYCLE_BIN_LABEL),
+        outcome.records.iter().any(|record| record.reason.is_some()
+            && record.path == crate::disk_cleanup::recycle_bin::RECYCLE_BIN_LABEL),
         "读不到的卷必须留下说明，不能悄悄算成 0"
     );
     // 而且这句话要真的送到用户眼前（状态是 Ok，所以它走的是"提示"而不是"报错"）
@@ -364,7 +375,10 @@ fn the_recycle_bin_rule_scans_all_fixed_volumes() {
     let outcome = run_rule(&rule, Mode::DryRun, &no_cancel(), profile, None);
     eprintln!(
         "回收站扫描：{:?} files={} bytes={} error={:?}",
-        outcome.report.status, outcome.report.files, outcome.report.bytes_deleted, outcome.report.error
+        outcome.report.status,
+        outcome.report.files,
+        outcome.report.bytes_deleted,
+        outcome.report.error
     );
     assert_eq!(outcome.report.status, RuleStatus::Ok);
     assert_eq!(outcome.report.failures, 0, "跳过卷不算失败");
@@ -405,11 +419,25 @@ fn a_quarantine_rule_moves_instead_of_deleting() {
 
     let job_id = crate::disk_cleanup::audit::new_job_id();
     let mut store = crate::disk_cleanup::quarantine::JobQuarantine::begin(&job_id).unwrap();
-    let outcome = run_rule(&rule, Mode::Execute, &no_cancel(), profile, Some(&mut store));
+    let outcome = run_rule(
+        &rule,
+        Mode::Execute,
+        &no_cancel(),
+        profile,
+        Some(&mut store),
+    );
     store.finish().unwrap();
 
-    assert_eq!(outcome.report.status, RuleStatus::Ok, "{:?}", outcome.report.error);
-    assert_eq!(outcome.report.bytes_deleted, 0, "隔离不是删除，不能计进「已释放」");
+    assert_eq!(
+        outcome.report.status,
+        RuleStatus::Ok,
+        "{:?}",
+        outcome.report.error
+    );
+    assert_eq!(
+        outcome.report.bytes_deleted, 0,
+        "隔离不是删除，不能计进「已释放」"
+    );
     assert!(outcome.report.quarantined >= 3, "三条内容都该进隔离区");
     assert!(outcome.report.bytes_quarantined > 0);
 
@@ -453,7 +481,12 @@ fn quarantined_dry_run_and_execute_agree() {
 
     // ① 预览：账目进隔离口径，磁盘一字未动
     let preview = run_rule(&rule, Mode::DryRun, &no_cancel(), profile, None);
-    assert_eq!(preview.report.status, RuleStatus::Ok, "{:?}", preview.report.error);
+    assert_eq!(
+        preview.report.status,
+        RuleStatus::Ok,
+        "{:?}",
+        preview.report.error
+    );
     assert_eq!(
         preview.report.bytes_deleted, 0,
         "隔离规则的预览不许把「将搬进隔离区」算成「可立即释放」"
@@ -475,10 +508,21 @@ fn quarantined_dry_run_and_execute_agree() {
     // ② 执行：与预览同一份数字
     let job_id = crate::disk_cleanup::audit::new_job_id();
     let mut store = crate::disk_cleanup::quarantine::JobQuarantine::begin(&job_id).unwrap();
-    let outcome = run_rule(&rule, Mode::Execute, &no_cancel(), profile, Some(&mut store));
+    let outcome = run_rule(
+        &rule,
+        Mode::Execute,
+        &no_cancel(),
+        profile,
+        Some(&mut store),
+    );
     store.finish().unwrap();
 
-    assert_eq!(outcome.report.status, RuleStatus::Ok, "{:?}", outcome.report.error);
+    assert_eq!(
+        outcome.report.status,
+        RuleStatus::Ok,
+        "{:?}",
+        outcome.report.error
+    );
     assert_eq!(
         outcome.report.bytes_quarantined, preview.report.bytes_quarantined,
         "预览说搬多少字节，执行就得搬多少字节"

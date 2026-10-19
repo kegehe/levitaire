@@ -279,7 +279,9 @@ impl AiService {
                         token.store(true, Ordering::SeqCst);
                     } else {
                         if guard.cancelled_before_start.len() >= 1024 {
-                            if let Some(oldest) = guard.cancelled_before_start.iter().next().copied() {
+                            if let Some(oldest) =
+                                guard.cancelled_before_start.iter().next().copied()
+                            {
                                 guard.cancelled_before_start.remove(&oldest);
                             }
                         }
@@ -346,7 +348,9 @@ impl AiService {
             )
         };
 
-        crate::utils::logger::log("ai", &format!("请求 URL: {}, api_type: {}", url, api_type));
+        // Do not persist the endpoint: providers may put credentials in query
+        // parameters, and the prompt/response can contain user content.
+        crate::utils::logger::log("ai", &format!("request api_type: {}", api_type));
 
         // 构建请求
         let request_body = build_request_body(&api_type, &model, prompt, system_prompt);
@@ -365,7 +369,10 @@ impl AiService {
         let (content, thinking) = extract_content_and_thinking(&parsed, &api_type);
 
         if content.is_empty() {
-            crate::utils::logger::log("ai", &format!("响应中未找到内容, 原始响应: {}", body_text));
+            crate::utils::logger::log(
+                "ai",
+                &format!("response contained no content ({} bytes)", body_text.len()),
+            );
         }
 
         if let Some(ref t) = thinking {
@@ -413,7 +420,11 @@ impl AiService {
         if !status.is_success() {
             crate::utils::logger::log(
                 "ai",
-                &format!("请求错误, 状态码: {}, 响应: {}", status, body_text),
+                &format!(
+                    "request failed with status {} ({} bytes)",
+                    status,
+                    body_text.len()
+                ),
             );
             return Err(format!("AI 请求错误 ({}): {}", status, body_text));
         }
@@ -480,10 +491,7 @@ impl AiService {
             )
         };
 
-        crate::utils::logger::log(
-            "ai",
-            &format!("流式请求 URL: {}, api_type: {}", url, api_type),
-        );
+        crate::utils::logger::log("ai", &format!("stream request api_type: {}", api_type));
 
         // 构建流式请求体（添加 stream: true）
         let mut request_body = build_request_body(&api_type, &model, prompt, system_prompt);
@@ -509,7 +517,11 @@ impl AiService {
             let body_text = response.text().await.unwrap_or_default();
             crate::utils::logger::log(
                 "ai",
-                &format!("流式请求错误, 状态码: {}, 响应: {}", status, body_text),
+                &format!(
+                    "stream request failed with status {} ({} bytes)",
+                    status,
+                    body_text.len()
+                ),
             );
             return Err(format!("AI 请求错误 ({}): {}", status, body_text));
         }

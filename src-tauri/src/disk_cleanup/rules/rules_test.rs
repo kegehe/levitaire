@@ -78,10 +78,7 @@ fn system_root() -> PathBuf {
 
 fn with_target(path: &Path) -> R {
     R {
-        target: format!(
-            r#"{{"kind":"fixedPath","path":"{}"}}"#,
-            json_path(path)
-        ),
+        target: format!(r#"{{"kind":"fixedPath","path":"{}"}}"#, json_path(path)),
         ..Default::default()
     }
 }
@@ -251,14 +248,15 @@ fn zero_retention_days_is_rejected_instead_of_silently_deleting_nothing() {
         strategy: r#"{"kind":"purgeContents","olderThanDays":0}"#.into(),
         ..Default::default()
     };
-    assert!(matches!(validate(&zero), Err(RuleError::ZeroRetention { .. })));
+    assert!(matches!(
+        validate(&zero),
+        Err(RuleError::ZeroRetention { .. })
+    ));
 
     // 省略字段 = 不设保留期，这才是"全都删"的表达方式
     let all = R::default();
     assert!(validate(&all).is_ok());
-    assert!(all
-        .strategy
-        .contains("purgeContents"));
+    assert!(all.strategy.contains("purgeContents"));
 }
 
 #[test]
@@ -315,9 +313,10 @@ fn a_newer_schema_version_is_rejected_rather_than_guessed() {
 fn unknown_fields_are_rejected_so_a_newer_schema_cannot_be_half_understood() {
     // 例如 P6 才有的 `services`：现在的程序不懂"停服务再清理"，
     // 若默默忽略这个字段就会在不该删的时候删 —— 必须解析失败。
-    let json = R::default()
-        .json()
-        .replace(r#""consequence":"#, r#""services":["wuauserv"],"consequence":"#);
+    let json = R::default().json().replace(
+        r#""consequence":"#,
+        r#""services":["wuauserv"],"consequence":"#,
+    );
     assert!(matches!(validate_json(&json), Err(RuleError::Parse(_))));
 }
 
@@ -346,7 +345,11 @@ fn one_bad_rule_rejects_the_whole_table() {
             .trim_end_matches("]}")
             .to_string()
     };
-    let json = format!(r#"{{"schemaVersion":1,"rules":[{},{}]}}"#, strip(good), strip(bad));
+    let json = format!(
+        r#"{{"schemaVersion":1,"rules":[{},{}]}}"#,
+        strip(good),
+        strip(bad)
+    );
     assert!(matches!(
         validate_json(&json),
         Err(RuleError::MissingConsequence { .. })
@@ -440,7 +443,9 @@ fn purge_roots_are_derived_and_contain_the_user_level_battlefields() {
     // %TEMP% 必须在清单里：用户级清理的主战场
     let temp = PathBuf::from(std::env::var("TEMP").expect("TEMP"));
     assert!(
-        roots.iter().any(|r| super::super::safety::equal_ci(r, &temp)),
+        roots
+            .iter()
+            .any(|r| super::super::safety::equal_ci(r, &temp)),
         "允许根里缺少 %TEMP%"
     );
 }

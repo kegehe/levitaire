@@ -13,10 +13,10 @@ use tauri::State;
 use windows::Win32::Foundation::{HWND, POINT};
 
 use windows::Win32::UI::WindowsAndMessaging::{
-
-    GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowTextW,
-    IsWindow, SetForegroundWindow, SetWindowDisplayAffinity, SetWindowLongPtrW, WindowFromPoint,
-    GA_ROOT, GWL_EXSTYLE, WDA_NONE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowTextW, IsWindow, SetForegroundWindow, SetWindowDisplayAffinity, SetWindowLongPtrW,
+    WindowFromPoint, GA_ROOT, GWL_EXSTYLE, WDA_NONE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT,
 };
 
 use crate::automation::SelectionInfo;
@@ -26,7 +26,6 @@ use crate::clipboard::ClipboardManager;
 use crate::config::ConfigManager;
 
 use serde::Serialize;
-
 
 static SCREENSHOT_STARTING: AtomicBool = AtomicBool::new(false);
 
@@ -58,13 +57,11 @@ static ORB_READY: AtomicBool = AtomicBool::new(false);
 
 static STICKY_MANAGER_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
-
 const MAX_IPC_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 
 // GIF keeps each captured frame as an RGBA bitmap before palette encoding.
 // This bounds peak per-frame allocation to roughly 64 MiB while allowing UHD.
 const MAX_GIF_RECORDING_PIXELS: u64 = 16_000_000;
-
 
 #[derive(Clone, Copy)]
 struct ScreenshotMonitorBounds {
@@ -73,7 +70,6 @@ struct ScreenshotMonitorBounds {
     right: i32,
     bottom: i32,
 }
-
 
 // Captured before the overlay takes focus so the selection controls stay on
 // the monitor where the screenshot was started, even if the cursor moves while
@@ -93,7 +89,6 @@ static TIMER_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 static TODO_CLOSE_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
-
 /// 截图/录屏会话开始前 orb 的可见状态。
 /// 会话清理（取消截图/录屏）时按此状态恢复 orb，而不是无条件 show：
 /// 否则用户通过托盘「显示/隐藏浮球」已隐藏的 orb 会被强制弹出，
@@ -106,7 +101,6 @@ static ORB_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(true);
 static TIMER_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
 
 static TODO_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
-
 
 /// 截图/录屏会话是否活跃。进入 start_screenshot / start_recording_select 时置 true，
 /// 会话清理（cleanup_screenshot_session_inner / cancel_recording_select）时置 false。
@@ -139,13 +133,11 @@ static SMART_SCREENSHOT_OVERLAY_LOCK: Mutex<()> = Mutex::new(());
 /// 长截图开始时用此句柄把交互权交还给用户刚才操作的应用。
 static SCREENSHOT_TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
 
-
 /// 恢复默认位置时抑制对应窗口 onMoved 保存的截止时间戳（窗口 id → 截止毫秒）。
 /// 程序化 set_position 会触发 onMoved → 前端在 300ms 后再次 set_window_position，
 /// 若不抑制会把刚恢复的默认位置重新记忆。此窗口期内仅忽略该窗口的保存请求，
 /// 不影响其他悬浮窗的正常拖动记忆。
 static POSITION_SAVE_SUPPRESS_UNTIL_MS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-
 
 /// 保护 settings 窗口"检查+创建+注册关闭拦截"的异步互斥锁，防止快速双击导致竞态
 /// 使用 tokio::sync::Mutex 而非 std::sync::Mutex，避免在 async 函数中持有同步锁导致死锁
@@ -156,7 +148,6 @@ static TOOL_CONFIG_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 
 /// 保护 palette 窗口"检查+创建+注册关闭拦截"的异步互斥锁，防止快速双击导致竞态
 static PALETTE_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 
 struct ScreenshotStartGuard;
 
@@ -169,22 +160,18 @@ impl ScreenshotStartGuard {
     }
 }
 
-
 impl Drop for ScreenshotStartGuard {
     fn drop(&mut self) {
         SCREENSHOT_STARTING.store(false, Ordering::SeqCst);
     }
 }
 
-
 /// prompt 最大长度限制（字节数，String::len() 返回 UTF-8 字节数）
 const MAX_PROMPT_LENGTH: usize = 100000;
-
 
 /// 允许通过 open_url 打开的 URL scheme 白名单。
 /// 仅放行浏览器/常见协议，阻止 file://、脚本协议等可能被构造用于命令注入的 scheme。
 const ALLOWED_URL_SCHEMES: &[&str] = &["http", "https", "mailto"];
-
 
 #[derive(Clone, Serialize)]
 pub struct HotkeyConflictResult {
@@ -194,47 +181,45 @@ pub struct HotkeyConflictResult {
     pub message: String,
 }
 
-
 // ─── TTS 朗读 ────────────────────────────────────────────────────
 
 /// TTS 单次合成的字符上限（一次性合成，超长会阻塞且占内存）
 const MAX_TTS_CHARS: usize = 5000;
 
-
-mod session;
-mod text;
-mod screenshot;
-mod long_capture;
-mod recording;
-mod sketch;
 mod ai;
-mod quick_input;
-mod todo;
-mod sticky;
-mod timer;
-mod pomodoro;
+mod disk_cleanup;
+mod long_capture;
+mod media_filename;
 mod monitor;
+mod pomodoro;
+mod quick_input;
+mod recording;
+mod screenshot;
+mod session;
+mod sketch;
+mod sticky;
+mod text;
+mod timer;
+mod todo;
 mod tools;
 mod window;
-mod disk_cleanup;
 
-pub use session::*;
-pub use text::*;
-pub use screenshot::*;
-pub use long_capture::*;
-pub use recording::*;
-pub use sketch::*;
 pub use ai::*;
-pub use quick_input::*;
-pub use todo::*;
-pub use sticky::*;
-pub use timer::*;
-pub use pomodoro::*;
+pub use disk_cleanup::*;
+pub use long_capture::*;
 pub use monitor::*;
+pub use pomodoro::*;
+pub use quick_input::*;
+pub use recording::*;
+pub use screenshot::*;
+pub use session::*;
+pub use sketch::*;
+pub use sticky::*;
+pub use text::*;
+pub use timer::*;
+pub use todo::*;
 pub use tools::*;
 pub use window::*;
-pub use disk_cleanup::*;
-
 
 fn decode_base64_media(data: &str, kind: &str) -> Result<Vec<u8>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -258,16 +243,13 @@ fn decode_base64_media(data: &str, kind: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-
 fn screenshot_monitor_bounds() -> &'static Mutex<Option<ScreenshotMonitorBounds>> {
     SCREENSHOT_MONITOR_BOUNDS.get_or_init(|| Mutex::new(None))
 }
 
-
 pub fn queue_screenshot_start_pending() {
     SCREENSHOT_START_PENDING.store(true, Ordering::SeqCst);
 }
-
 
 /// 置位/复位截图·录屏捕获会话活跃标记，并把状态变化同步给 screenshot-overlay
 /// 渲染进程：会话激活时 OverlaySwitcher 需要持续发送心跳，供原生 watchdog 确认
@@ -286,31 +268,25 @@ fn set_capture_session_active(app: &tauri::AppHandle, active: bool) {
     );
 }
 
-
 pub fn queue_recording_select_start_pending() {
     RECORDING_SELECT_START_PENDING.store(true, Ordering::SeqCst);
 }
-
 
 pub fn queue_sketch_start_pending() {
     SKETCH_START_PENDING.store(true, Ordering::SeqCst);
 }
 
-
 pub fn queue_todo_quick_add_pending() {
     TODO_QUICK_ADD_PENDING.store(true, Ordering::SeqCst);
 }
-
 
 pub fn is_orb_ready() -> bool {
     ORB_READY.load(Ordering::SeqCst)
 }
 
-
 fn position_save_suppress() -> &'static Mutex<HashMap<String, u64>> {
     POSITION_SAVE_SUPPRESS_UNTIL_MS.get_or_init(|| Mutex::new(HashMap::new()))
 }
-
 
 /// 位置记忆抑制：本次「窗口位置落盘」是否应当被忽略。
 ///
@@ -338,14 +314,12 @@ pub(crate) fn position_save_is_suppressed(id: &str) -> bool {
     suppress.contains_key(id)
 }
 
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
-
 
 fn show_screenshot_native_error(message: impl Into<String>) {
     let message = message.into();
@@ -358,12 +332,10 @@ fn show_screenshot_native_error(message: impl Into<String>) {
     });
 }
 
-
 fn start_screenshot_overlay_watchdog(app: tauri::AppHandle, session: u64) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_millis(1_000));
-        if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
-            || current_screenshot_session() != session
+        if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst) || current_screenshot_session() != session
         {
             break;
         }
@@ -389,7 +361,6 @@ fn start_screenshot_overlay_watchdog(app: tauri::AppHandle, session: u64) {
     });
 }
 
-
 /// Wait for JavaScript to prove that the overlay renderer is alive before the
 /// native window is made visible. This prevents WebView2's own load-error page
 /// from ever becoming the user-facing screenshot surface.
@@ -397,8 +368,7 @@ fn wait_for_screenshot_overlay_ready(app: &tauri::AppHandle, session: u64) -> Re
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_millis(SCREENSHOT_OVERLAY_READY_TIMEOUT_MS);
     while std::time::Instant::now() < deadline {
-        if current_screenshot_session() != session
-            || !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
+        if current_screenshot_session() != session || !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
         {
             return Err("截图会话已结束".to_string());
         }
@@ -410,7 +380,6 @@ fn wait_for_screenshot_overlay_ready(app: &tauri::AppHandle, session: u64) -> Re
     cleanup_screenshot_session_if_current(app, session);
     Err("截图工具页面加载失败，请重试".to_string())
 }
-
 
 /// 该工具此刻是否仍处于启用状态（用于判断会话清理能否按「会话前可见」恢复浮窗）。
 ///
@@ -432,7 +401,6 @@ fn tool_still_enabled(app: &tauri::AppHandle, tool: &str) -> bool {
     };
     enabled.unwrap_or(true)
 }
-
 
 /// End a screenshot session from every exit path without destroying the configured overlay.
 fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
@@ -532,7 +500,6 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
     set_capture_session_active(app, false);
 }
 
-
 pub fn cleanup_screenshot_session(app: &tauri::AppHandle) {
     SCREENSHOT_SESSION.fetch_add(1, Ordering::SeqCst);
     let _session_lock = CAPTURE_SESSION_LOCK
@@ -540,7 +507,6 @@ pub fn cleanup_screenshot_session(app: &tauri::AppHandle) {
         .unwrap_or_else(|e| e.into_inner());
     cleanup_screenshot_session_inner(app);
 }
-
 
 /// 自有窗口 label 清单。两处共用同一份，避免「判定自己的窗口」与「文件对话框 owner
 /// 候选」两张清单各自漂移。
@@ -578,7 +544,6 @@ pub const OWN_WINDOW_LABELS: &[&str] = &[
     "sticky-notes-manager",
     "system-cleaner-overlay",
 ];
-
 
 /// 某个 HWND 是否属于 Levitaire 自己的窗口（**唯一权威实现**）。
 ///
@@ -628,7 +593,6 @@ pub fn is_own_window(app: &tauri::AppHandle, hwnd: HWND) -> bool {
         .any(|window| window.0 == root.0)
 }
 
-
 /// 桌面 / 任务栏等 shell 窗口从来不是可用目标。
 ///
 /// 选中它们只会让调用方进入「按钮都正常、点了没反应」的状态，而这还是**持久**的：
@@ -645,7 +609,6 @@ pub fn is_shell_window(hwnd: HWND) -> bool {
     )
 }
 
-
 /// 能当作「外部目标窗口」的窗口：存在 + 不属于 Levitaire 自己 + 不是桌面/任务栏。
 ///
 /// 调用方：滚动导航的目标绑定、通用工具·窗口置顶的点选与清理。两处必须同口径 ——
@@ -658,7 +621,6 @@ pub fn is_usable_target(app: &tauri::AppHandle, hwnd: HWND) -> bool {
         && !is_shell_window(hwnd)
 }
 
-
 /// 窗口标题是否以给定前缀开头（无标题返回 false）。
 fn window_text_starts_with(hwnd: HWND, prefix: &str) -> bool {
     let mut buffer = [0u16; 512];
@@ -669,7 +631,6 @@ fn window_text_starts_with(hwnd: HWND, prefix: &str) -> bool {
     String::from_utf16_lossy(&buffer[..length as usize]).starts_with(prefix)
 }
 
-
 /// 窗口类名是否**完全等于**给定值。
 fn window_class_equals(hwnd: HWND, class_name: &str) -> bool {
     let mut buffer = [0u16; 256];
@@ -679,7 +640,6 @@ fn window_class_equals(hwnd: HWND, class_name: &str) -> bool {
     }
     String::from_utf16_lossy(&buffer[..length as usize]) == class_name
 }
-
 
 /// 当前自有窗口的根 HWND（用于把「自己的窗口」排除出录屏的窗口识别列表）。
 ///
@@ -702,7 +662,6 @@ pub fn own_window_root_hwnds(app: &tauri::AppHandle) -> Vec<isize> {
         .collect()
 }
 
-
 /// 隐藏文字工具栏，并把**后端侧**的工具栏状态一并复位（所有非前端主动关闭的路径都要走它）。
 ///
 /// 只调 `window.hide()` 会漏掉 `qrcode_preview` 标志：该标志为 true 时鼠标钩子会忽略
@@ -717,7 +676,6 @@ pub fn hide_toolbar_and_reset_state(app: &tauri::AppHandle) {
     crate::hooks::set_toolbar_visible(false);
     let _ = app.emit("toolbar-hidden", ());
 }
-
 
 /// 打开原生文件对话框期间的置顶守卫（`Drop` 时自动恢复）。
 ///
@@ -763,7 +721,12 @@ impl DialogTopmostGuard {
             .collect();
         let owner = preferred
             .iter()
-            .find_map(|label| visible.iter().find(|window| window.label() == *label).cloned())
+            .find_map(|label| {
+                visible
+                    .iter()
+                    .find(|window| window.label() == *label)
+                    .cloned()
+            })
             .or_else(|| visible.last().cloned());
 
         // 取消置顶的范围要比 owner 候选**更宽**：便利贴（动态 label）与贴图窗（原生窗）
@@ -821,16 +784,13 @@ impl Drop for DialogTopmostGuard {
     }
 }
 
-
 pub fn current_screenshot_session() -> u64 {
     SCREENSHOT_SESSION.load(Ordering::SeqCst)
 }
 
-
 pub fn is_screenshot_starting() -> bool {
     SCREENSHOT_STARTING.load(Ordering::SeqCst)
 }
-
 
 /// 若指定的 session 是当前截图会话则清理，并返回是否实际清理。
 /// 返回 false 表示该 session 已过期（已有更新的会话接管），调用方据此判断
@@ -854,7 +814,6 @@ pub fn cleanup_screenshot_session_if_current(app: &tauri::AppHandle, session: u6
         false
     }
 }
-
 
 /// 校验 URL 是否为允许的 scheme（大小写不敏感）。
 /// 返回规范化后的小写 scheme。
@@ -880,7 +839,6 @@ fn validate_url_scheme(url: &str) -> Result<String, String> {
     Ok(scheme)
 }
 
-
 /// 为日志生成脱敏 URL：仅保留 scheme 与 host，丢弃路径与查询串。
 /// 避免把用户的搜索词、URL 中的 token 等敏感信息写进本地日志。
 fn redact_url_for_log(url: &str) -> String {
@@ -897,7 +855,6 @@ fn redact_url_for_log(url: &str) -> String {
         format!("{}://{}", scheme, host)
     }
 }
-
 
 /// 捕获当前光标所在显示器的工作区边界（物理像素）。
 /// 供截图逻辑在异步/前端操作可能移动光标之前，锁定发起截图的目标显示器。
@@ -940,7 +897,6 @@ fn monitor_work_area_for_cursor() -> Option<ScreenshotMonitorBounds> {
         None
     }
 }
-
 
 /// start_screenshot 的核心逻辑，独立出来供热键等非命令入口复用。
 /// 缓存 State 在内部用 app.state() 获取，避免调用方构造 State 的麻烦与生命周期问题。
@@ -1031,18 +987,17 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     // becomes active and takes focus. Long capture restores this window after
     // the region has been confirmed.
     let foreground = unsafe { GetForegroundWindow() };
-    let foreground_target = if unsafe { IsWindow(Some(foreground)).as_bool() }
-        && !is_own_window(&app, foreground)
-    {
-        let root = unsafe { GetAncestor(foreground, GA_ROOT) };
-        if root.0.is_null() {
-            foreground
+    let foreground_target =
+        if unsafe { IsWindow(Some(foreground)).as_bool() } && !is_own_window(&app, foreground) {
+            let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+            if root.0.is_null() {
+                foreground
+            } else {
+                root
+            }
         } else {
-            root
-        }
-    } else {
-        HWND(std::ptr::null_mut())
-    };
+            HWND(std::ptr::null_mut())
+        };
     SCREENSHOT_TARGET_HWND.store(foreground_target.0 as isize, Ordering::SeqCst);
     // A completed long capture keeps its preview window visible. It must not
     // appear in the clean desktop frame captured for the next screenshot.
@@ -1412,7 +1367,6 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 从全屏缓存裁剪选区 BGRA：缓存由 start_screenshot 在 overlay 显示前截取，
 /// 不含任何截图 UI，故选区框不会被截入；且无需 hide/show overlay，无闪烁。
 /// 缓存不可用时回退到实时截屏（罕见，仅在 start_screenshot 截屏失败时）。
@@ -1431,14 +1385,10 @@ fn capture_from_cache(
     if let Some(result) = cached {
         result
     } else {
-        crate::utils::logger::log(
-            "screenshot",
-            "全屏缓存为空，回退实时截屏",
-        );
+        crate::utils::logger::log("screenshot", "全屏缓存为空，回退实时截屏");
         capture_region_without_overlay(app, left, top, width, height)
     }
 }
-
 
 /// Capture a selected region while keeping the screenshot UI out of the frame.
 /// This is the fallback used when the full-desktop cache was rejected or could
@@ -1488,7 +1438,6 @@ fn capture_region_without_overlay(
     result
 }
 
-
 // ─── 系统监控 ───────────────────────────────────────────────────
 
 /// 将物理坐标裁剪到该点所在显示器的工作区内，防止窗口在显示器布局/分辨率变化后跑到屏幕外。
@@ -1525,12 +1474,10 @@ pub fn clamp_position_to_workarea(x: i32, y: i32, win_w: i32, win_h: i32) -> (i3
     (x, y)
 }
 
-
 #[cfg(not(target_os = "windows"))]
 pub fn clamp_position_to_workarea(x: i32, y: i32, _win_w: i32, _win_h: i32) -> (i32, i32) {
     (x, y)
 }
-
 
 /// 计算浮球（orb）的默认位置：主屏工作区右下角（与启动时未记忆的回退定位一致）。
 fn default_orb_position(win_w: i32, win_h: i32) -> Option<(i32, i32)> {
@@ -1566,7 +1513,6 @@ fn default_orb_position(win_w: i32, win_h: i32) -> Option<(i32, i32)> {
     None
 }
 
-
 /// 计算悬浮窗的默认（未记忆）位置。
 /// - orb：主屏工作区右下角
 /// - monitor-overlay：跟随鼠标（偏移 8px，多显示器边界钳制）
@@ -1594,7 +1540,6 @@ fn default_window_position(window_id: &str, win_w: i32, win_h: i32) -> (i32, i32
     }
 }
 
-
 // ─── 便利贴 ────────────────────────────────────────────────────
 
 /// 通知管理窗刷新列表（便签窗口不订阅，避免自己打字被刷新打断）。
@@ -1606,7 +1551,6 @@ pub fn notify_sticky_notes_changed(app: &tauri::AppHandle) {
     );
 }
 
-
 /// 新建便签默认落点：主屏工作区左上偏内的级联位置，避免多张完全重叠。
 /// 传入 x/y 时由调用方决定，show 阶段还会统一裁剪到工作区内。
 fn default_sticky_note_position(count: usize) -> (i32, i32) {
@@ -1614,7 +1558,6 @@ fn default_sticky_note_position(count: usize) -> (i32, i32) {
     let row = (count / 12) as i32;
     (140 + col * 30, 120 + row * 34)
 }
-
 
 // ─── 录屏 ────────────────────────────────────────────────────────
 
@@ -1624,7 +1567,9 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     let _lifecycle = RECORDING_SELECT_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let recording_session = RECORDING_SELECT_SESSION.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    let recording_session = RECORDING_SELECT_SESSION
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
     let startup_current = || {
         RECORDING_SELECT_SESSION.load(Ordering::SeqCst) == recording_session
             && CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst)
@@ -1866,7 +1811,6 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     Ok(())
 }
 
-
 fn destroy_recording_controls_window(app: &tauri::AppHandle) {
     if let Some(controls) = app.get_webview_window("recording-controls") {
         // WebView2 can leave a white composited surface after hide() on a
@@ -1874,7 +1818,6 @@ fn destroy_recording_controls_window(app: &tauri::AppHandle) {
         let _ = controls.destroy();
     }
 }
-
 
 fn set_recording_capture_protection(app: &tauri::AppHandle) {
     // ⚠ 这里**只**处理这两扇 WebView2 窗，不要改成"遍历所有自有窗统一设 WDA_NONE"：
@@ -1902,18 +1845,18 @@ fn set_recording_capture_protection(app: &tauri::AppHandle) {
     }
 }
 
-
 /// 弹出文件保存对话框保存 GIF
 async fn save_gif_with_dialog(
     app: &tauri::AppHandle,
     bytes: &[u8],
-    filename: &str,
+    _filename: &str,
 ) -> Result<bool, String> {
     // 与 save_image 同理：仅 set_parent 不足以防止「另一扇前台置顶窗盖住对话框」，
     // 统一走 DialogTopmostGuard（取可见 overlay 作 owner + 临时取消自有置顶窗的置顶）。
     let guard = DialogTopmostGuard::suspend(app, &["screenshot-overlay"]);
+    let dialog_filename = media_filename::timestamped_filename("recording", "gif");
     let mut dialog = rfd::FileDialog::new()
-        .set_file_name(filename)
+        .set_file_name(&dialog_filename)
         .add_filter("GIF 动图", &["gif"]);
     if let Some(owner) = guard.owner() {
         dialog = dialog.set_parent(owner);
@@ -1932,15 +1875,15 @@ async fn save_gif_with_dialog(
     result
 }
 
-
 async fn save_video_file_with_dialog(
     app: &tauri::AppHandle,
     source: &std::path::Path,
-    filename: &str,
+    _filename: &str,
 ) -> Result<bool, String> {
     let guard = DialogTopmostGuard::suspend(app, &["screenshot-overlay"]);
+    let dialog_filename = media_filename::timestamped_filename("recording", "mp4");
     let mut dialog = rfd::FileDialog::new()
-        .set_file_name(filename)
+        .set_file_name(&dialog_filename)
         .add_filter("MP4 视频", &["mp4"]);
     if let Some(owner) = guard.owner() {
         dialog = dialog.set_parent(owner);
@@ -1958,7 +1901,6 @@ async fn save_video_file_with_dialog(
     drop(guard);
     result
 }
-
 
 fn cancel_recording_select_inner(app: tauri::AppHandle) -> Result<(), String> {
     RECORDING_SELECT_SESSION.fetch_add(1, Ordering::SeqCst);
@@ -2010,7 +1952,6 @@ fn cancel_recording_select_inner(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 fn configure_long_capture_frame(frame: &tauri::WebviewWindow) -> Result<(), String> {
     let hwnd = frame.hwnd().map_err(|error| error.to_string())?;
     unsafe {
@@ -2023,7 +1964,6 @@ fn configure_long_capture_frame(frame: &tauri::WebviewWindow) -> Result<(), Stri
     }
     Ok(())
 }
-
 
 /// 根据当前配置同步触发键与触发模式到 keyboard hook。
 /// 触发键：启用且键有效时设置 vk_code，否则置 0。
@@ -2049,7 +1989,6 @@ fn sync_quick_input_trigger(config: &ConfigManager) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 把快速输入的音效配置同步到运行时状态。
 ///
 /// 三个入口（开关 / 风格 / 音量）任意一个变更都要走这里，否则运行时会用旧值播放：
@@ -2063,7 +2002,6 @@ fn sync_quick_input_sound(config: &ConfigManager) {
     let volume = config.get_quick_input_sound_volume().unwrap_or(45);
     crate::quick_input::set_sound_config(enabled, &style, volume);
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2195,8 +2133,10 @@ mod tests {
             .map(|(file, name)| (*file, name.as_str()))
             .collect();
         found_sorted.sort_unstable();
-        let mut expected_sorted: Vec<(&str, &str)> =
-            EXPECTED.iter().map(|(file, name, _)| (*file, *name)).collect();
+        let mut expected_sorted: Vec<(&str, &str)> = EXPECTED
+            .iter()
+            .map(|(file, name, _)| (*file, *name))
+            .collect();
         expected_sorted.sort_unstable();
         assert_eq!(
             found_sorted, expected_sorted,
@@ -2286,8 +2226,14 @@ mod tests {
     /// 系统清理面板回退到它自己的创建默认 (120, 120)。
     #[test]
     fn test_default_window_position_time_and_todo() {
-        assert_eq!(default_window_position("time-overlay", 380, 220), (100, 100));
-        assert_eq!(default_window_position("todo-overlay", 360, 560), (100, 100));
+        assert_eq!(
+            default_window_position("time-overlay", 380, 220),
+            (100, 100)
+        );
+        assert_eq!(
+            default_window_position("todo-overlay", 360, 560),
+            (100, 100)
+        );
         assert_eq!(
             default_window_position("system-cleaner-overlay", 520, 640),
             (120, 120)
@@ -2297,7 +2243,10 @@ mod tests {
     /// 未知窗口 id 一律回退 (100, 100)。
     #[test]
     fn test_default_window_position_unknown_fallback() {
-        assert_eq!(default_window_position("unknown-window", 100, 100), (100, 100));
+        assert_eq!(
+            default_window_position("unknown-window", 100, 100),
+            (100, 100)
+        );
     }
 
     /// 契约：「恢复默认位置」的窗口清单必须与前端 `WINDOW_POSITION_TARGETS` 逐项一致。
@@ -2443,11 +2392,20 @@ mod tests {
     #[test]
     fn every_file_dialog_suspends_topmost_first() {
         // (文件名, 源码, 该文件里预期的 rfd 调用点数)
-        let files: [(&str, &str, usize); 6] = [            ("commands/mod.rs", include_str!("mod.rs"), 2),
+        let files: [(&str, &str, usize); 6] = [
+            ("commands/mod.rs", include_str!("mod.rs"), 2),
             ("commands/screenshot.rs", include_str!("screenshot.rs"), 1),
             ("commands/todo.rs", include_str!("todo.rs"), 2),
-            ("commands/long_capture.rs", include_str!("long_capture.rs"), 1),
-            ("commands/disk_cleanup.rs", include_str!("disk_cleanup.rs"), 3),
+            (
+                "commands/long_capture.rs",
+                include_str!("long_capture.rs"),
+                1,
+            ),
+            (
+                "commands/disk_cleanup.rs",
+                include_str!("disk_cleanup.rs"),
+                3,
+            ),
             ("screenshot/pin.rs", include_str!("../screenshot/pin.rs"), 1),
         ];
         for (name, raw, expected) in files {
@@ -2463,11 +2421,17 @@ mod tests {
                 found += 1;
                 // 只在该调用所在的函数体内找守卫：不能因为「文件别处有守卫」就放行。
                 let before = &rest[..index];
-                let fn_start = ["\npub async fn ", "\npub fn ", "\nasync fn ", "\nunsafe fn ", "\nfn "]
-                    .iter()
-                    .filter_map(|pat| before.rfind(pat))
-                    .max()
-                    .unwrap_or(0);
+                let fn_start = [
+                    "\npub async fn ",
+                    "\npub fn ",
+                    "\nasync fn ",
+                    "\nunsafe fn ",
+                    "\nfn ",
+                ]
+                .iter()
+                .filter_map(|pat| before.rfind(pat))
+                .max()
+                .unwrap_or(0);
                 let body_prefix = &before[fn_start..];
                 assert!(
                     body_prefix.contains("DialogTopmostGuard::suspend(")
@@ -2609,7 +2573,11 @@ mod tests {
             .find("\n    }\n")
             .expect("解析不到 suspend 的函数体结束位置");
         let body = &rest[..end];
-        for needle in ["note_window_label(", "topmost_pin_hwnds(", "set_pins_topmost("] {
+        for needle in [
+            "note_window_label(",
+            "topmost_pin_hwnds(",
+            "set_pins_topmost(",
+        ] {
             assert!(
                 body.contains(needle),
                 "DialogTopmostGuard::suspend 漏了一类自有置顶窗：{needle} —— 固定 label 清单、\
@@ -2617,5 +2585,4 @@ mod tests {
             );
         }
     }
-
 }

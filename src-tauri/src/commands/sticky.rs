@@ -1,13 +1,9 @@
 use super::*;
 
-
 #[tauri::command]
-pub fn get_sticky_notes_enabled(
-    config_manager: State<'_, ConfigManager>,
-) -> Result<bool, String> {
+pub fn get_sticky_notes_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_sticky_notes_enabled()
 }
-
 
 #[tauri::command]
 pub async fn set_sticky_notes_enabled(
@@ -53,14 +49,12 @@ pub async fn set_sticky_notes_enabled(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_sticky_notes(
     store: State<'_, crate::sticky_note::NoteStore>,
 ) -> Result<Vec<crate::sticky_note::StickyNote>, String> {
     store.list()
 }
-
 
 #[tauri::command]
 pub fn get_sticky_note(
@@ -69,7 +63,6 @@ pub fn get_sticky_note(
 ) -> Result<crate::sticky_note::StickyNote, String> {
     store.get(&id)
 }
-
 
 /// 新建一张便签并立即在桌面显示聚焦（方便直接输入）。
 ///
@@ -98,7 +91,6 @@ pub async fn create_sticky_note(
     Ok(note)
 }
 
-
 #[tauri::command]
 pub fn update_sticky_note_content(
     app: tauri::AppHandle,
@@ -111,7 +103,6 @@ pub fn update_sticky_note_content(
     Ok(note)
 }
 
-
 #[tauri::command]
 pub fn update_sticky_note_color(
     app: tauri::AppHandle,
@@ -123,7 +114,6 @@ pub fn update_sticky_note_color(
     notify_sticky_notes_changed(&app);
     Ok(note)
 }
-
 
 /// 记住用户手动拖出来的窗口尺寸（逻辑像素，含透明留白）。
 /// 写入后便签进入「手动尺寸」模式：前端不再按内容下发高度。
@@ -140,7 +130,6 @@ pub fn set_sticky_note_size(
     store.set_size(&id, width, height)
 }
 
-
 /// 恢复「宽度固定 + 高度随内容」的自动尺寸（双击右下角手柄时调用）。
 #[tauri::command]
 pub fn reset_sticky_note_size(
@@ -149,7 +138,6 @@ pub fn reset_sticky_note_size(
 ) -> Result<crate::sticky_note::StickyNote, String> {
     store.reset_size(&id)
 }
-
 
 /// 拖拽过程中回写窗口位置（物理像素）。调用频繁，不触发列表刷新事件。
 ///
@@ -174,7 +162,6 @@ pub fn set_sticky_note_position(
     Ok(())
 }
 
-
 /// 唤出某张（可能已收起）便签：标记 visible=true 并重建/聚焦窗口。
 ///
 /// 必须保持 `async`：会经 `show_note_window` → `WebviewWindowBuilder::build()` 建窗，
@@ -190,7 +177,6 @@ pub async fn show_sticky_note(
     notify_sticky_notes_changed(&app);
     Ok(note)
 }
-
 
 /// 收起某张便签：先落盘（若携带最新正文），再标记 visible=false 并销毁窗口。
 /// content 由前端在收起瞬间主动传入，避免「防抖保存尚未触发窗口就被销毁」导致丢字。
@@ -210,7 +196,6 @@ pub fn collect_sticky_note(
     Ok(note)
 }
 
-
 /// 一键收起所有已钉在桌面的便签。
 #[tauri::command]
 pub fn collect_all_notes(
@@ -227,7 +212,6 @@ pub fn collect_all_notes(
     notify_sticky_notes_changed(&app);
     Ok(())
 }
-
 
 /// 一键把所有「已收起」的便签重新贴回桌面（`collect_all_notes` 的逆操作）。
 ///
@@ -269,7 +253,6 @@ pub async fn show_all_notes(
     Ok(count)
 }
 
-
 /// 彻底删除一张便签（数据与窗口一并移除）。
 /// 顺序：先销毁窗口，再校验并删除记录，最后清理图片目录——
 /// 确保只在便签确实存在时才触碰文件系统，避免误删孤儿路径。
@@ -286,13 +269,11 @@ pub fn delete_sticky_note(
     Ok(())
 }
 
-
 /// 便利贴图片根目录（绝对路径），前端用于 convertFileSrc 构造图片地址。
 #[tauri::command]
 pub fn get_sticky_note_images_dir(app: tauri::AppHandle) -> Result<String, String> {
     crate::sticky_note::images_dir(&app).map(|dir| dir.to_string_lossy().to_string())
 }
-
 
 /// 保存剪贴板粘贴的图片，返回正文令牌中的相对路径。
 /// 先校验便签存在，避免并发删除后仍重建其图片目录（孤儿文件）。
@@ -316,7 +297,6 @@ pub fn save_sticky_note_image(
     Ok(rel)
 }
 
-
 /// 从本地文件导入一张图片（把图片文件拖进便签）。返回正文令牌中的相对路径。
 ///
 /// 与剪贴板粘贴分开两件事：这里带来源**路径**，由后端校验扩展名与体积、再转码落盘，
@@ -336,7 +316,6 @@ pub fn import_sticky_note_image(
     }
     Ok(rel)
 }
-
 
 /// 把便签里的一张图片复制到系统剪贴板（右键「复制图片」）。
 ///
@@ -361,7 +340,6 @@ pub fn copy_sticky_note_image(
         .map_err(|e| format!("复制图片失败: {e}"))
 }
 
-
 /// 删除便签正文里的一张图片（右键「删除图片」）：磁盘文件与正文节点都要去掉，
 /// 正文节点由前端删除后照常走保存流程。
 #[tauri::command]
@@ -374,7 +352,6 @@ pub fn delete_sticky_note_image(
     store.get(&id)?;
     crate::sticky_note::delete_image(&app, &id, &rel)
 }
-
 
 /// 应用启动/管理窗挂载时调用：把所有已钉在桌面的便签窗口重建出来。
 /// 仅在工具启用时生效；不抢焦点。
@@ -396,7 +373,6 @@ pub async fn restore_pinned_notes(
     }
     restore_pinned_notes_inner(&app, &store).await
 }
-
 
 /// [`restore_pinned_notes`] 的实现体。抽出来是为了让「重新启用便利贴」
 /// （`set_sticky_notes_enabled`）复用同一条恢复路径，避免两套逻辑各自演化。
@@ -426,7 +402,6 @@ async fn restore_pinned_notes_inner(
     }
     Ok(count)
 }
-
 
 /// 显示便利贴管理窗。关闭拦截仅隐藏、不销毁，便于下次快速唤出。
 ///
@@ -476,7 +451,6 @@ pub fn show_sticky_notes_manager(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn hide_sticky_notes_manager(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("sticky-notes-manager") {
@@ -484,7 +458,6 @@ pub fn hide_sticky_notes_manager(app: tauri::AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -612,5 +585,4 @@ mod tests {
             );
         }
     }
-
 }

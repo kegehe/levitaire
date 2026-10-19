@@ -186,7 +186,9 @@ pub fn evaluate(ranked: &[DiscoveredDir], settings: &WatchSettings) -> Vec<Alert
             // ★ 一律在 i64 里比较。写成 `(delta as u64) < min_delta` 的话，
             //   负增量（目录变小了）会被转成一个天文数字而**通过**阈值 ——
             //   "缩小的目录被报成在增长"，这个 bug 真出现过，用例抓住了它。
-            if entry.bytes < settings.min_bytes || delta < min_delta || days < settings.min_age_days as i64
+            if entry.bytes < settings.min_bytes
+                || delta < min_delta
+                || days < settings.min_age_days as i64
             {
                 return None;
             }
@@ -298,7 +300,10 @@ pub fn add_watch_target(
 ) -> Result<WatchSettings, String> {
     let profile = safety::SafetyProfile::global().map_err(|e| e.to_string())?;
     let verified = profile.verify(dir).map_err(|e| e.to_string())?;
-    if !safety::stat(&verified).map(|st| st.is_dir()).unwrap_or(false) {
+    if !safety::stat(&verified)
+        .map(|st| st.is_dir())
+        .unwrap_or(false)
+    {
         return Err(format!("{} 不是目录", verified.display()));
     }
 
@@ -307,7 +312,11 @@ pub fn add_watch_target(
         .ok_or_else(|| "配置不可用".to_string())?;
     let mut settings = manager.get_system_cleaner_watch()?;
     let text = verified.display().to_string();
-    if settings.watched.iter().any(|item| item.eq_ignore_ascii_case(&text)) {
+    if settings
+        .watched
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(&text))
+    {
         return Err(format!("{text} 已经在监视列表里了"));
     }
     settings.watched.push(text);
@@ -320,10 +329,7 @@ pub fn add_watch_target(
 /// 移除第 `index` 个监视目录。
 ///
 /// 用**下标**而不是路径：前端不该有机会提供路径，哪怕只是"要删的那一条"。
-pub fn remove_watch_target(
-    app: &tauri::AppHandle,
-    index: usize,
-) -> Result<WatchSettings, String> {
+pub fn remove_watch_target(app: &tauri::AppHandle, index: usize) -> Result<WatchSettings, String> {
     let manager = app
         .try_state::<crate::config::ConfigManager>()
         .ok_or_else(|| "配置不可用".to_string())?;

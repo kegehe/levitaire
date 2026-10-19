@@ -15,9 +15,7 @@ use std::sync::OnceLock;
 
 use serde::Serialize;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, FILETIME,
-};
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, FILETIME};
 use windows::Win32::Storage::FileSystem::{
     GetDriveTypeW, GetFileAttributesExW, GetFileExInfoStandard, GetFullPathNameW, GetLongPathNameW,
     GetVolumePathNameW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
@@ -128,7 +126,9 @@ impl std::fmt::Display for SafetyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use SafetyError::*;
         match self {
-            MissingEnv { name } => write!(f, "环境变量 {name} 缺失，无法安全地派生红线，已拒绝清理"),
+            MissingEnv { name } => {
+                write!(f, "环境变量 {name} 缺失，无法安全地派生红线，已拒绝清理")
+            }
             EnvInconsistent { name, a, b } => write!(
                 f,
                 "环境变量 {name} 的两个来源不一致（{a} / {b}），环境可能被污染，已拒绝清理"
@@ -139,10 +139,16 @@ impl std::fmt::Display for SafetyError {
             EnvVarNotAllowed { var } => write!(f, "环境变量 {var} 不在允许清单内"),
             EnvVarMissing { var } => write!(f, "环境变量 {var} 未设置或为空"),
             EnvExpansionNotSupported { text } => {
-                write!(f, "目标描述 {text} 含 %，本工具不做环境展开，请改用 env 类型")
+                write!(
+                    f,
+                    "目标描述 {text} 含 %，本工具不做环境展开，请改用 env 类型"
+                )
             }
             RelativeNotAllowed { relative } => {
-                write!(f, "相对子路径 {relative} 必须是纯向下的相对路径（禁止 .. / . / 绝对路径）")
+                write!(
+                    f,
+                    "相对子路径 {relative} 必须是纯向下的相对路径（禁止 .. / . / 绝对路径）"
+                )
             }
             NotAPathTarget => write!(f, "该目标不是文件系统路径（需走 Shell API）"),
             NotAbsolute { path } => write!(f, "目标 {path} 不是绝对路径"),
@@ -289,7 +295,9 @@ fn has_device_prefix(text: &str) -> bool {
 /// `\\?\Volume{GUID}\...` 这类剥完不成样子，但也**不会因此放行任何东西** ——
 /// 它匹配不上任何红线根，属于 fail-closed 的一侧。
 pub fn strip_device_prefix(text: &str) -> &str {
-    for prefix in [r"\\?\", r"\\.\", "//?/", "//./", r"\\?/", "//?\\", r"\\./", "//.\\"] {
+    for prefix in [
+        r"\\?\", r"\\.\", "//?/", "//./", r"\\?/", "//?\\", r"\\./", "//.\\",
+    ] {
         if let Some(rest) = text.strip_prefix(prefix) {
             return rest;
         }
@@ -597,7 +605,11 @@ impl SafetyEnv {
 
         let system_drive = env_path("SystemDrive")?;
         let mut system_drive_root = system_drive;
-        if !system_drive_root.as_os_str().to_string_lossy().ends_with('\\') {
+        if !system_drive_root
+            .as_os_str()
+            .to_string_lossy()
+            .ends_with('\\')
+        {
             system_drive_root.push("\\");
         }
 
@@ -978,4 +990,3 @@ impl SafetyProfile {
 /// 「整体只在测试下编译」的文件路径的，平铺会让它推导出一个不存在的路径、失去效力。
 #[cfg(test)]
 mod safety_test;
-

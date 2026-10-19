@@ -181,7 +181,11 @@ impl AuditWriter {
     }
 
     /// 一条规则的明细：先写记录，再写该规则的汇总。
-    pub fn write_rule(&mut self, report: &RuleReport, records: &[DeleteRecord]) -> Result<(), String> {
+    pub fn write_rule(
+        &mut self,
+        report: &RuleReport,
+        records: &[DeleteRecord],
+    ) -> Result<(), String> {
         let ts = now_ts();
         for record in records {
             self.line(&AuditLine::Entry {
@@ -225,7 +229,9 @@ impl AuditWriter {
 
     fn flush(&mut self) -> Result<(), String> {
         if let Some(writer) = self.writer.as_mut() {
-            writer.flush().map_err(|e| format!("刷新审计日志失败：{e}"))?;
+            writer
+                .flush()
+                .map_err(|e| format!("刷新审计日志失败：{e}"))?;
         }
         Ok(())
     }
@@ -258,7 +264,10 @@ pub fn list_jobs() -> Vec<AuditJobInfo> {
             let modified = meta
                 .modified()
                 .ok()
-                .map(|t| chrono::DateTime::<chrono::Local>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .map(|t| {
+                    chrono::DateTime::<chrono::Local>::from(t)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                })
                 .unwrap_or_default();
             Some(AuditJobInfo {
                 job_id,

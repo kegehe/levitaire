@@ -1,17 +1,17 @@
+use super::TOOLBAR_SHADOW_MARGIN;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicPtr, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use super::TOOLBAR_SHADOW_MARGIN;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, GetWindowRect, LoadCursorW,
-    CopyIcon, DestroyIcon, HICON, PostThreadMessageW, SetCursor, SetSystemCursor, SetWindowsHookExW,
-    UnhookWindowsHookEx, HCURSOR, HHOOK, ICONINFO, IDC_ARROW, MSG, OCR_NORMAL, WH_MOUSE_LL,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+    CallNextHookEx, CopyIcon, DestroyIcon, GetMessageW, GetWindowRect, LoadCursorW,
+    PostThreadMessageW, SetCursor, SetSystemCursor, SetWindowsHookExW, UnhookWindowsHookEx,
+    HCURSOR, HHOOK, HICON, ICONINFO, IDC_ARROW, MSG, OCR_NORMAL, WH_MOUSE_LL, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
 
 // ─── 钩子全局状态 ──────────────────────────────────────────────
 
@@ -162,11 +162,23 @@ enum HookEvent {
         y: i32,
         delta: i16,
     },
-    SmartScreenshotMove { x: i32, y: i32 },
-    SmartScreenshotClick { x: i32, y: i32 },
-    ColorPicked { x: i32, y: i32 },
+    SmartScreenshotMove {
+        x: i32,
+        y: i32,
+    },
+    SmartScreenshotClick {
+        x: i32,
+        y: i32,
+    },
+    ColorPicked {
+        x: i32,
+        y: i32,
+    },
     /// 窗口置顶点选落点：由后台线程解析成目标窗口并切换其置顶状态。
-    WindowPicked { x: i32, y: i32 },
+    WindowPicked {
+        x: i32,
+        y: i32,
+    },
 }
 
 // ─── 工具函数 ──────────────────────────────────────────────────
@@ -269,11 +281,7 @@ fn is_point_in_orb_circle(hwnd_ptr: *mut std::ffi::c_void, x: i32, y: i32) -> bo
 }
 
 fn is_point_in_utility_hub(x: i32, y: i32) -> bool {
-    is_point_in_window_rect(
-        STATE.utility_hub_hwnd.load(Ordering::SeqCst),
-        x,
-        y,
-    )
+    is_point_in_window_rect(STATE.utility_hub_hwnd.load(Ordering::SeqCst), x, y)
 }
 
 fn now_ms() -> u64 {
@@ -593,7 +601,15 @@ fn target_pixels() -> [u32; EYEDROPPER_SIZE * EYEDROPPER_SIZE] {
         ((cx + ARM_INNER, cy), (cx + ARM_OUTER, cy)),
     ];
     for (a, b) in arms {
-        canvas_stroke(&mut high, a.0, a.1, b.0, b.1, ARM + 2.0 * (RIM + HALO), WHITE);
+        canvas_stroke(
+            &mut high,
+            a.0,
+            a.1,
+            b.0,
+            b.1,
+            ARM + 2.0 * (RIM + HALO),
+            WHITE,
+        );
         canvas_stroke(&mut high, a.0, a.1, b.0, b.1, ARM + 2.0 * RIM, INK);
     }
 
@@ -608,11 +624,7 @@ fn target_pixels() -> [u32; EYEDROPPER_SIZE * EYEDROPPER_SIZE] {
 ///
 /// 返回 `isize` 而非 `HCURSOR`，是为了能塞进 `OnceLock`（`HCURSOR` 不是 `Sync`）。
 /// 失败返回 `None`（GDI 资源耗尽等）——调用方须回退到不改光标，而不是照常进入取点模式。
-fn cursor_from_pixels(
-    pixels: &[u32],
-    size: usize,
-    hotspot: (u32, u32),
-) -> Option<isize> {
+fn cursor_from_pixels(pixels: &[u32], size: usize, hotspot: (u32, u32)) -> Option<isize> {
     use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
 
     unsafe {
@@ -665,7 +677,9 @@ fn cursor_from_pixels(
 fn eyedropper_cursor() -> Option<HCURSOR> {
     static CURSOR: OnceLock<Option<isize>> = OnceLock::new();
     CURSOR
-        .get_or_init(|| cursor_from_pixels(&eyedropper_pixels(), EYEDROPPER_SIZE, EYEDROPPER_HOTSPOT))
+        .get_or_init(|| {
+            cursor_from_pixels(&eyedropper_pixels(), EYEDROPPER_SIZE, EYEDROPPER_HOTSPOT)
+        })
         .as_ref()
         .map(|value| HCURSOR(*value as *mut std::ffi::c_void))
 }
@@ -788,7 +802,13 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     // 否则隐藏窗口仍保留最后的屏幕矩形，会让该区域内的正常拖选被误排除。
                     // 置于 text_toolbar_enabled 检查之后：开关关闭时选区检测本就跳过，无需查询。
                     let down_in_own_window = down_valid
-                        && ["settings", "scroll-navigator-overlay", "utility-hub-overlay"].iter().any(|label| {
+                        && [
+                            "settings",
+                            "scroll-navigator-overlay",
+                            "utility-hub-overlay",
+                        ]
+                        .iter()
+                        .any(|label| {
                             app.get_webview_window(label).is_some_and(|win| {
                                 win.is_visible().unwrap_or(false)
                                     && win
@@ -862,14 +882,24 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     match result {
                         Ok(pixel) if pixel.len() >= 3 => {
                             // GDI returns pixels in BGRA order.
-                            let color = format!("#{:02X}{:02X}{:02X}", pixel[2], pixel[1], pixel[0]);
-                            let _ = app.emit_to("utility-hub-overlay", "utility-color-picked", color);
+                            let color =
+                                format!("#{:02X}{:02X}{:02X}", pixel[2], pixel[1], pixel[0]);
+                            let _ =
+                                app.emit_to("utility-hub-overlay", "utility-color-picked", color);
                         }
                         Ok(_) => {
-                            let _ = app.emit_to("utility-hub-overlay", "utility-color-pick-error", "无法读取屏幕像素");
+                            let _ = app.emit_to(
+                                "utility-hub-overlay",
+                                "utility-color-pick-error",
+                                "无法读取屏幕像素",
+                            );
                         }
                         Err(error) => {
-                            let _ = app.emit_to("utility-hub-overlay", "utility-color-pick-error", error);
+                            let _ = app.emit_to(
+                                "utility-hub-overlay",
+                                "utility-color-pick-error",
+                                error,
+                            );
                         }
                     }
                 }
@@ -922,13 +952,15 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     let orb_hwnd = STATE.orb_hwnd.load(Ordering::SeqCst);
                     // 悬浮球隐藏时（GetWindowRect 仍会返回其矩形），不把该位置点击
                     // 当作悬浮球交互，否则隐藏状态下点击原位置会触发 orb-mouseup 弹面板
-                    let on_orb = STATE.orb_visible.load(Ordering::SeqCst)
-                        && is_point_on_orb(orb_hwnd, x, y);
+                    let on_orb =
+                        STATE.orb_visible.load(Ordering::SeqCst) && is_point_on_orb(orb_hwnd, x, y);
                     STATE.mouse_down_on_orb.store(on_orb, Ordering::SeqCst);
                     // 圆形热区精确判定：仅落在视觉球内才在 mouseup 触发 orb 交互，
                     // 避免点击透明留白/角落误弹面板
                     let on_orb_circle = is_point_in_orb_circle(orb_hwnd, x, y);
-                    STATE.mouse_down_on_orb_circle.store(on_orb_circle, Ordering::SeqCst);
+                    STATE
+                        .mouse_down_on_orb_circle
+                        .store(on_orb_circle, Ordering::SeqCst);
 
                     // The orb receives focus immediately after this low-level
                     // callback returns. Capture the real foreground target now,
@@ -979,7 +1011,9 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                         STATE.mouse_down_valid.store(false, Ordering::SeqCst);
                         STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
                         STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
-                        STATE.mouse_down_on_orb_circle.store(false, Ordering::SeqCst);
+                        STATE
+                            .mouse_down_on_orb_circle
+                            .store(false, Ordering::SeqCst);
                     }
                 }
                 HookEvent::OrbZone { inside } => {
@@ -1026,10 +1060,18 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     }
                 }
                 HookEvent::SmartScreenshotMove { x, y } => {
-                    let _ = app.emit_to("screenshot-overlay", "screenshot-target-move", serde_json::json!({ "x": x, "y": y }));
+                    let _ = app.emit_to(
+                        "screenshot-overlay",
+                        "screenshot-target-move",
+                        serde_json::json!({ "x": x, "y": y }),
+                    );
                 }
                 HookEvent::SmartScreenshotClick { x, y } => {
-                    let _ = app.emit_to("screenshot-overlay", "screenshot-target-click", serde_json::json!({ "x": x, "y": y }));
+                    let _ = app.emit_to(
+                        "screenshot-overlay",
+                        "screenshot-target-click",
+                        serde_json::json!({ "x": x, "y": y }),
+                    );
                 }
             }
         }
@@ -1280,9 +1322,9 @@ fn check_selection_and_show_toolbar(app: &tauri::AppHandle, interaction_seq: u64
                 } else {
                     info.rect.y + 20
                 };
-                let _ = win.set_position(tauri::Position::Physical(
-                    tauri::PhysicalPosition::new(x, y),
-                ));
+                let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                    x, y,
+                )));
                 let _ = win.show();
                 STATE.toolbar_visible.store(true, Ordering::SeqCst);
                 if let Ok(hwnd) = win.hwnd() {
@@ -1534,7 +1576,9 @@ pub fn set_screenshot_mode(active: bool) {
     if !active {
         STATE.mouse_down_valid.store(false, Ordering::SeqCst);
         STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
-        STATE.mouse_down_on_orb_circle.store(false, Ordering::SeqCst);
+        STATE
+            .mouse_down_on_orb_circle
+            .store(false, Ordering::SeqCst);
         STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
     }
 }
@@ -1542,7 +1586,9 @@ pub fn set_screenshot_mode(active: bool) {
 pub fn set_smart_screenshot_mode(active: bool) {
     STATE.smart_screenshot_mode.store(active, Ordering::SeqCst);
     if !active {
-        STATE.smart_screenshot_last_emit_ms.store(0, Ordering::SeqCst);
+        STATE
+            .smart_screenshot_last_emit_ms
+            .store(0, Ordering::SeqCst);
         STATE.smart_controls_valid.store(false, Ordering::SeqCst);
     }
 }
@@ -1552,8 +1598,12 @@ pub fn set_smart_screenshot_controls_bounds(bounds: Option<(i32, i32, i32, i32)>
         Some((left, top, width, height)) if width > 0 && height > 0 => {
             STATE.smart_controls_left.store(left, Ordering::SeqCst);
             STATE.smart_controls_top.store(top, Ordering::SeqCst);
-            STATE.smart_controls_right.store(left.saturating_add(width), Ordering::SeqCst);
-            STATE.smart_controls_bottom.store(top.saturating_add(height), Ordering::SeqCst);
+            STATE
+                .smart_controls_right
+                .store(left.saturating_add(width), Ordering::SeqCst);
+            STATE
+                .smart_controls_bottom
+                .store(top.saturating_add(height), Ordering::SeqCst);
             STATE.smart_controls_valid.store(true, Ordering::SeqCst);
         }
         _ => STATE.smart_controls_valid.store(false, Ordering::SeqCst),
@@ -1595,7 +1645,9 @@ pub fn set_recording_mode(active: bool) {
     if !active {
         STATE.mouse_down_valid.store(false, Ordering::SeqCst);
         STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
-        STATE.mouse_down_on_orb_circle.store(false, Ordering::SeqCst);
+        STATE
+            .mouse_down_on_orb_circle
+            .store(false, Ordering::SeqCst);
         STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
     }
 }
@@ -1619,9 +1671,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     if STATE.color_picker_active.load(Ordering::SeqCst) {
                         let hook = lparam.0
                             as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
-                        if !hook.is_null()
-                            && is_point_in_utility_hub((*hook).pt.x, (*hook).pt.y)
-                        {
+                        if !hook.is_null() && is_point_in_utility_hub((*hook).pt.x, (*hook).pt.y) {
                             return CallNextHookEx(None, code, wparam, lparam);
                         }
                         return LRESULT(1);
@@ -1630,9 +1680,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                         let hook = lparam.0
                             as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
                         // 与按下对称：面板内的抬起要放行，否则那上面的按钮点不动。
-                        if !hook.is_null()
-                            && is_point_in_utility_hub((*hook).pt.x, (*hook).pt.y)
-                        {
+                        if !hook.is_null() && is_point_in_utility_hub((*hook).pt.x, (*hook).pt.y) {
                             return CallNextHookEx(None, code, wparam, lparam);
                         }
                         return LRESULT(1);
@@ -1641,7 +1689,8 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                         return LRESULT(1);
                     }
                     if STATE.smart_screenshot_mode.load(Ordering::SeqCst) {
-                        let hook = lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                        let hook = lparam.0
+                            as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
                         if !hook.is_null() {
                             let event = &*hook;
                             if is_smart_controls_point(event.pt.x, event.pt.y) {
@@ -1666,9 +1715,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     }
                     let _ = sender.send(HookEvent::MouseUp);
                 }
-                _ if msg == WM_MOUSEMOVE
-                    && STATE.color_picker_active.load(Ordering::SeqCst) =>
-                {
+                _ if msg == WM_MOUSEMOVE && STATE.color_picker_active.load(Ordering::SeqCst) => {
                     let _ = SetCursor(eyedropper_cursor());
                 }
                 // 置顶点选：每次移动都重设准星。有些程序（浏览器、编辑器）会在自己的
@@ -1698,11 +1745,17 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     let now = now_ms();
                     let last = STATE.smart_screenshot_last_emit_ms.load(Ordering::SeqCst);
                     if now.saturating_sub(last) >= 30 {
-                        STATE.smart_screenshot_last_emit_ms.store(now, Ordering::SeqCst);
-                        let hook = lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                        STATE
+                            .smart_screenshot_last_emit_ms
+                            .store(now, Ordering::SeqCst);
+                        let hook = lparam.0
+                            as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
                         if !hook.is_null() {
                             let event = &*hook;
-                            let _ = sender.send(HookEvent::SmartScreenshotMove { x: event.pt.x, y: event.pt.y });
+                            let _ = sender.send(HookEvent::SmartScreenshotMove {
+                                x: event.pt.x,
+                                y: event.pt.y,
+                            });
                         }
                     }
                 }
@@ -1742,22 +1795,29 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 }
                 _ if msg == WM_LBUTTONDOWN => {
                     if STATE.color_picker_active.load(Ordering::SeqCst) {
-                        let hook = lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                        let hook = lparam.0
+                            as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
                         if !hook.is_null() {
                             let event = &*hook;
                             if is_point_in_utility_hub(event.pt.x, event.pt.y) {
                                 return CallNextHookEx(None, code, wparam, lparam);
                             }
-                            let _ = sender.send(HookEvent::ColorPicked { x: event.pt.x, y: event.pt.y });
+                            let _ = sender.send(HookEvent::ColorPicked {
+                                x: event.pt.x,
+                                y: event.pt.y,
+                            });
                         }
                         STATE.mouse_down_valid.store(false, Ordering::SeqCst);
                         STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
-                        STATE.mouse_down_on_orb_circle.store(false, Ordering::SeqCst);
+                        STATE
+                            .mouse_down_on_orb_circle
+                            .store(false, Ordering::SeqCst);
                         STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
                         return LRESULT(1);
                     }
                     if STATE.window_pin_active.load(Ordering::SeqCst) {
-                        let hook = lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                        let hook = lparam.0
+                            as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
                         if !hook.is_null() {
                             let event = &*hook;
                             // 落在通用工具面板内的按下放行给 WebView：否则用户在点选模式
@@ -1765,12 +1825,17 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                             if is_point_in_utility_hub(event.pt.x, event.pt.y) {
                                 return CallNextHookEx(None, code, wparam, lparam);
                             }
-                            let _ = sender.send(HookEvent::WindowPicked { x: event.pt.x, y: event.pt.y });
+                            let _ = sender.send(HookEvent::WindowPicked {
+                                x: event.pt.x,
+                                y: event.pt.y,
+                            });
                         }
                         // 与取色一致：点选期间清掉按下残留，避免退出后误触发文字工具栏。
                         STATE.mouse_down_valid.store(false, Ordering::SeqCst);
                         STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
-                        STATE.mouse_down_on_orb_circle.store(false, Ordering::SeqCst);
+                        STATE
+                            .mouse_down_on_orb_circle
+                            .store(false, Ordering::SeqCst);
                         STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
                         return LRESULT(1);
                     }
@@ -1779,14 +1844,18 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     // 选区检测/拖选逻辑，也不会在转盘区域拖出文字工具栏。
                     // 可见性守卫：active 卡死而转盘未显示时不吞点击，保证全局鼠标可用。
                     if STATE.smart_screenshot_mode.load(Ordering::SeqCst) {
-                        let hook = lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                        let hook = lparam.0
+                            as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
                         if !hook.is_null() {
                             let event = &*hook;
                             if is_smart_controls_point(event.pt.x, event.pt.y) {
                                 return CallNextHookEx(None, code, wparam, lparam);
                             }
                             STATE.smart_mouse_down.store(true, Ordering::SeqCst);
-                            let _ = sender.send(HookEvent::SmartScreenshotClick { x: event.pt.x, y: event.pt.y });
+                            let _ = sender.send(HookEvent::SmartScreenshotClick {
+                                x: event.pt.x,
+                                y: event.pt.y,
+                            });
                         }
                         return LRESULT(1);
                     }
@@ -1803,7 +1872,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                         // 清除残留的按下状态，避免随后的 WM_LBUTTONUP 误判为拖选而弹出文字工具栏
                         STATE.mouse_down_valid.store(false, Ordering::SeqCst);
                         STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
-                        STATE.mouse_down_on_orb_circle.store(false, Ordering::SeqCst);
+                        STATE
+                            .mouse_down_on_orb_circle
+                            .store(false, Ordering::SeqCst);
                         STATE.mouse_down_on_toolbar.store(false, Ordering::SeqCst);
                         // 吞掉该按下，不让它穿透到下层窗口
                         return LRESULT(1);
@@ -1820,11 +1891,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     } else {
                         foreground.0 as isize
                     };
-                    let _ = sender.send(HookEvent::MouseDown {
-                        x,
-                        y,
-                        foreground,
-                    });
+                    let _ = sender.send(HookEvent::MouseDown { x, y, foreground });
                 }
                 _ if msg == WM_MOUSEWHEEL => {
                     let hook =
@@ -2090,7 +2157,8 @@ mod tests {
     #[test]
     fn selection_check_flag_is_released_by_a_drop_guard() {
         let source = include_str!("mouse.rs");
-        let dispatch = fn_body(source, "spawn_selection_check").expect("spawn_selection_check 不见了");
+        let dispatch =
+            fn_body(source, "spawn_selection_check").expect("spawn_selection_check 不见了");
         let code = strip_line_comments(dispatch);
         assert!(
             code.contains("SelectionCheckGuard"),
@@ -2186,8 +2254,14 @@ mod tests {
         assert!(queue.pending.is_none());
 
         // 在飞期间：挂起，且**只保留最新一次**（旧的被顶掉是设计，结果由序号兜住）
-        assert!(!queue.claim_or_park(2, request(2)), "在飞期间不该再起一条链");
-        assert!(!queue.claim_or_park(3, request(3)), "在飞期间不该再起一条链");
+        assert!(
+            !queue.claim_or_park(2, request(2)),
+            "在飞期间不该再起一条链"
+        );
+        assert!(
+            !queue.claim_or_park(3, request(3)),
+            "在飞期间不该再起一条链"
+        );
         assert_eq!(queue.pending, Some(request(3)), "只保留最新一次");
 
         // 收尾取走它继续跑，且**不释放占有**（还有活要干）
@@ -2246,9 +2320,8 @@ mod tests {
     #[test]
     fn queued_selection_check_is_never_stranded() {
         let source = include_str!("mouse.rs");
-        let production = strip_line_comments(
-            source.split("#[cfg(test)]").next().expect("应有生产代码段"),
-        );
+        let production =
+            strip_line_comments(source.split("#[cfg(test)]").next().expect("应有生产代码段"));
         let dispatch = fn_body(&production, "spawn_selection_check").expect("派发函数不见了");
 
         // 「释放占有」只允许两处：判空时的释放、守卫按编号复位。多一处就可能把

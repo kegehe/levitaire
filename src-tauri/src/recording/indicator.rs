@@ -41,17 +41,16 @@ use windows::Win32::Graphics::Gdi::{
     SRCCOPY, TRANSPARENT,
 };
 
-use windows::Win32::Graphics::Gdi::{HBITMAP, HDC, HGDIOBJ, HFONT};
+use windows::Win32::Graphics::Gdi::{HBITMAP, HDC, HFONT, HGDIOBJ};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
-    GetWindowDisplayAffinity,
-    GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, RegisterClassExW,
-    SetLayeredWindowAttributes, SetTimer, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWL_USERDATA, HWND_TOPMOST, IDC_ARROW,
-    LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE,
-    WM_CLOSE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
-    WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowDisplayAffinity, GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW,
+    PostMessageW, RegisterClassExW, SetLayeredWindowAttributes, SetTimer, SetWindowDisplayAffinity,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    GWL_USERDATA, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WM_CLOSE, WM_ERASEBKGND, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::recording::RecordingState;
@@ -104,29 +103,29 @@ struct Palette {
 impl Palette {
     /// COLORREF 为 `0x00BBGGRR`
     const DARK: Palette = Palette {
-        panel: COLORREF(0x00_26_22_20),          // #202226
-        border: COLORREF(0x00_46_40_3C),         // #3C4046
-        text: COLORREF(0x00_F4_F2_F0),           // #F0F2F4
-        muted: COLORREF(0x00_A6_9E_96),          // #969EA6
-        rec: COLORREF(0x00_44_44_EF),            // #EF4444
-        rec_dim: COLORREF(0x00_28_28_8A),        // #8A2828
-        paused: COLORREF(0x00_0B_9E_F5),         // #F59E0B
-        button: COLORREF(0x00_40_3A_37),         // #373A40
-        button_hover: COLORREF(0x00_56_4F_4B),   // #4B4F56
-        button_stop: COLORREF(0x00_32_32_BE),    // #BE3232
+        panel: COLORREF(0x00_26_22_20),        // #202226
+        border: COLORREF(0x00_46_40_3C),       // #3C4046
+        text: COLORREF(0x00_F4_F2_F0),         // #F0F2F4
+        muted: COLORREF(0x00_A6_9E_96),        // #969EA6
+        rec: COLORREF(0x00_44_44_EF),          // #EF4444
+        rec_dim: COLORREF(0x00_28_28_8A),      // #8A2828
+        paused: COLORREF(0x00_0B_9E_F5),       // #F59E0B
+        button: COLORREF(0x00_40_3A_37),       // #373A40
+        button_hover: COLORREF(0x00_56_4F_4B), // #4B4F56
+        button_stop: COLORREF(0x00_32_32_BE),  // #BE3232
     };
 
     const LIGHT: Palette = Palette {
-        panel: COLORREF(0x00_FC_FA_FA),          // #FAFAFC
-        border: COLORREF(0x00_E0_DA_D6),         // #D6DAE0
-        text: COLORREF(0x00_1E_1A_18),           // #181A1E
-        muted: COLORREF(0x00_7C_74_6E),          // #6E747C
-        rec: COLORREF(0x00_44_44_DC),            // #DC4444
-        rec_dim: COLORREF(0x00_96_96_F0),        // #F09696
-        paused: COLORREF(0x00_0B_9E_D9),         // #D99E0B
-        button: COLORREF(0x00_F0_ED_EB),         // #EBEDF0
-        button_hover: COLORREF(0x00_E4_DF_DC),   // #DCDFE4
-        button_stop: COLORREF(0x00_32_32_BE),    // #BE3232
+        panel: COLORREF(0x00_FC_FA_FA),        // #FAFAFC
+        border: COLORREF(0x00_E0_DA_D6),       // #D6DAE0
+        text: COLORREF(0x00_1E_1A_18),         // #181A1E
+        muted: COLORREF(0x00_7C_74_6E),        // #6E747C
+        rec: COLORREF(0x00_44_44_DC),          // #DC4444
+        rec_dim: COLORREF(0x00_96_96_F0),      // #F09696
+        paused: COLORREF(0x00_0B_9E_D9),       // #D99E0B
+        button: COLORREF(0x00_F0_ED_EB),       // #EBEDF0
+        button_hover: COLORREF(0x00_E4_DF_DC), // #DCDFE4
+        button_stop: COLORREF(0x00_32_32_BE),  // #BE3232
     };
 }
 
@@ -160,12 +159,7 @@ pub fn destroy() {
         let raw = slot.swap(0, Ordering::SeqCst);
         if raw != 0 {
             unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(raw as *mut _)),
-                    WM_CLOSE,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
+                let _ = PostMessageW(Some(HWND(raw as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
         }
     }
@@ -692,7 +686,11 @@ unsafe extern "system" fn bar_wndproc(
             if let Some(state) = bar_state(hwnd) {
                 let state = &mut *state;
                 let (x, y) = cursor_in_client(hwnd, lparam);
-                let hover = state.layout.hit_test(x, y).map(BarButton::index).unwrap_or(0);
+                let hover = state
+                    .layout
+                    .hit_test(x, y)
+                    .map(BarButton::index)
+                    .unwrap_or(0);
                 if hover != state.hover {
                     state.hover = hover;
                     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -704,7 +702,11 @@ unsafe extern "system" fn bar_wndproc(
             if let Some(state) = bar_state(hwnd) {
                 let state = &mut *state;
                 let (x, y) = cursor_in_client(hwnd, lparam);
-                state.pressed = state.layout.hit_test(x, y).map(BarButton::index).unwrap_or(0);
+                state.pressed = state
+                    .layout
+                    .hit_test(x, y)
+                    .map(BarButton::index)
+                    .unwrap_or(0);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
@@ -713,7 +715,11 @@ unsafe extern "system" fn bar_wndproc(
             if let Some(state) = bar_state(hwnd) {
                 let state = &mut *state;
                 let (x, y) = cursor_in_client(hwnd, lparam);
-                let released = state.layout.hit_test(x, y).map(BarButton::index).unwrap_or(0);
+                let released = state
+                    .layout
+                    .hit_test(x, y)
+                    .map(BarButton::index)
+                    .unwrap_or(0);
                 // 按下与松开必须落在同一枚按钮上才算点击（按住后移开再松手视为取消）
                 let clicked = if released != 0 && released == state.pressed {
                     BarButton::from_index(released)
@@ -1159,7 +1165,10 @@ mod tests {
             assert!(PtInRegion(hollow, 639, 479).as_bool(), "右下角应在边框内");
             // 边框以里、以及中心，都必须镂空（镂空处不响应鼠标，才不会挡住用户操作）
             let inside = FRAME_BORDER + 2;
-            assert!(!PtInRegion(hollow, inside, inside).as_bool(), "边框内侧应镂空");
+            assert!(
+                !PtInRegion(hollow, inside, inside).as_bool(),
+                "边框内侧应镂空"
+            );
             assert!(!PtInRegion(hollow, 320, 240).as_bool(), "画面中心应镂空");
             assert!(
                 !PtInRegion(hollow, 640 - 1 - inside, 480 - 1 - inside).as_bool(),
@@ -1171,8 +1180,7 @@ mod tests {
                 let mut affinity = 0u32;
                 assert!(GetWindowDisplayAffinity(hwnd, &mut affinity).is_ok());
                 assert_eq!(
-                    affinity,
-                    WDA_EXCLUDEFROMCAPTURE.0,
+                    affinity, WDA_EXCLUDEFROMCAPTURE.0,
                     "呼吸框必须排除出捕获，否则会被 BitBlt 录进成片"
                 );
             } else {
@@ -1240,10 +1248,7 @@ mod tests {
             assert_eq!(layout.hit_test(gap_x, gap_y), None);
             // 窗口外（负坐标 / 超出右下角）不该命中
             assert_eq!(layout.hit_test(-1, -1), None);
-            assert_eq!(
-                layout.hit_test(layout.width + 1, layout.height + 1),
-                None
-            );
+            assert_eq!(layout.hit_test(layout.width + 1, layout.height + 1), None);
         }
     }
 

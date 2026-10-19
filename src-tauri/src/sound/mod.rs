@@ -242,7 +242,10 @@ impl Drop for TickInFlightGuard {
 
 /// 若干段音的总时长（秒）。
 fn segments_duration(segments: &[Segment]) -> f32 {
-    segments.iter().map(|s| s.dur).fold(0.0f32, |acc, d| acc + d)
+    segments
+        .iter()
+        .map(|s| s.dur)
+        .fold(0.0f32, |acc, d| acc + d)
 }
 
 /// 内存 WAV → MediaPlayer 播放。`keep_alive_ms` 为播放线程的存活时长。
@@ -299,8 +302,7 @@ fn synth_wav(segments: &[Segment]) -> Vec<u8> {
             let t = i as f32 / SAMPLE_RATE as f32;
             // 半正弦包络：首尾趋 0，无爆音
             let envelope = ((i as f32 / n as f32) * std::f32::consts::PI).sin();
-            let sample =
-                (t * 2.0 * std::f32::consts::PI * seg.freq).sin() * envelope * seg.amp;
+            let sample = (t * 2.0 * std::f32::consts::PI * seg.freq).sin() * envelope * seg.amp;
             pcm.push((sample * i16::MAX as f32) as i16);
         }
     }
@@ -410,12 +412,7 @@ mod tests {
     /// 反过来会让两个相反的语义听起来一模一样。
     #[test]
     fn confirm_is_brighter_than_cancel() {
-        let peak = |cue: Cue| {
-            cue.segments()
-                .iter()
-                .map(|s| s.freq)
-                .fold(0.0f32, f32::max)
-        };
+        let peak = |cue: Cue| cue.segments().iter().map(|s| s.freq).fold(0.0f32, f32::max);
         assert!(
             peak(Cue::Confirm) > peak(Cue::Cancel),
             "确认音峰值 {} 不高于取消音 {}",
@@ -649,12 +646,8 @@ mod tests {
                 amp: 0.0,
             },
         ]);
-        let data_len = u32::from_le_bytes([
-            with_gap[40],
-            with_gap[41],
-            with_gap[42],
-            with_gap[43],
-        ]) as usize;
+        let data_len =
+            u32::from_le_bytes([with_gap[40], with_gap[41], with_gap[42], with_gap[43]]) as usize;
         // 两段各 0.05s：44100 * 0.1 = 4410 个采样
         assert_eq!(data_len / 2, (SAMPLE_RATE as usize) / 10);
         // 后半段应全为零

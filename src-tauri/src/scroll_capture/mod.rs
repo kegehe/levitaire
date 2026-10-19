@@ -15,7 +15,9 @@ const MAX_LONG_CAPTURE_PIXELS: u64 = 30_000_000;
 // Sample at a bounded cadence while the user is scrolling. A pure debounce
 // would keep extending its deadline for every wheel message, so continuous
 // scrolling would produce only one frame after the user stopped.
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(70);
+// Keep adjacent frames close enough that ordinary touchpad/wheel bursts still
+// leave a visible overlap. The capture itself runs off the hook thread.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(30);
 
 #[derive(Clone, Copy, Debug)]
 pub struct CaptureRegion {
@@ -53,11 +55,13 @@ struct StoredResult {
     message: Option<String>,
     bgra_chunks: VecDeque<Vec<u8>>,
     bgra_len: usize,
+    row_signatures: Vec<u64>,
 }
 
 impl StoredResult {
     fn from_initial(width: u32, height: u32, initial: Vec<u8>) -> Self {
         let bgra_len = initial.len();
+        let row_signatures = frame_row_signatures(&initial, width);
         let mut bgra_chunks = VecDeque::new();
         bgra_chunks.push_back(initial);
         Self {
@@ -68,6 +72,7 @@ impl StoredResult {
             message: None,
             bgra_chunks,
             bgra_len,
+            row_signatures,
         }
     }
 
@@ -117,6 +122,14 @@ impl StoredResult {
         remaining == 0
     }
 
+    fn longest_prefix_match(&self, rows: &[u64]) -> usize {
+        longest_match(rows, &self.row_signatures, false)
+    }
+
+    fn longest_suffix_match(&self, rows: &[u64]) -> usize {
+        longest_match(rows, &self.row_signatures, true)
+    }
+
     fn summary(&self, result_id: u64) -> LongCaptureSummary {
         LongCaptureSummary {
             result_id,
@@ -127,6 +140,45 @@ impl StoredResult {
             message: self.message.clone(),
         }
     }
+}
+
+const MIN_REVISIT_ROWS: usize = 3;
+
+fn longest_match(candidate: &[u64], stitched: &[u64], suffix: bool) -> usize {
+    if candidate.len() < MIN_REVISIT_ROWS || stitched.len() < MIN_REVISIT_ROWS {
+        return 0;
+    }
+    let max_len = candidate.len().min(stitched.len());
+    for length in (MIN_REVISIT_ROWS..=max_len).rev() {
+        let needle = if suffix {
+            &candidate[candidate.len() - length..]
+        } else {
+            &candidate[..length]
+        };
+        if stitched.windows(length).any(|window| window == needle) {
+            return length;
+        }
+    }
+    0
+}
+
+fn frame_row_signatures(frame: &[u8], width: u32) -> Vec<u64> {
+    let row_bytes = width as usize * 4;
+    if row_bytes == 0 {
+        return Vec::new();
+    }
+    frame
+        .chunks_exact(row_bytes)
+        .map(|row| {
+            row.chunks_exact(4)
+                .step_by(4)
+                .fold(1469598103934665603u64, |hash, pixel| {
+                    pixel[..3].iter().fold(hash, |hash, byte| {
+                        hash ^ u64::from(*byte).wrapping_mul(1099511628211)
+                    })
+                })
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,7 +234,11 @@ impl LongCaptureState {
     pub fn owns_result(&self, result_id: u64) -> bool {
         self.active
             .lock()
-            .map(|guard| guard.as_ref().is_some_and(|active| active.result_id == result_id))
+            .map(|guard| {
+                guard
+                    .as_ref()
+                    .is_some_and(|active| active.result_id == result_id)
+            })
             .unwrap_or(false)
     }
 
@@ -514,16 +570,17 @@ fn worker_loop(
                     "long-capture",
                     &format!("worker stop requested result_id={}", result_id),
                 );
-                if pending {
-                    capture_and_merge(
-                        result_id,
-                        &app,
-                        region,
-                        &mut previous,
-                        &results,
-                        pending_direction,
-                    );
-                }
+                // Always sample once at completion. The last timer tick may
+                // have happened before the target finished its scroll
+                // animation, and a duplicate frame is safely ignored.
+                capture_and_merge(
+                    result_id,
+                    &app,
+                    region,
+                    &mut previous,
+                    &results,
+                    pending_direction,
+                );
                 set_completed(result_id, &results);
                 crate::utils::logger::log(
                     "long-capture",
@@ -575,6 +632,7 @@ fn capture_and_merge(
             return;
         }
     };
+    let current_rows = frame_row_signatures(&current, region.width);
     // For upward movement, reverse the comparison: the current frame's bottom
     // overlaps the previous frame's top, so the unique rows belong before the
     // accumulated image rather than after it.
@@ -594,7 +652,22 @@ fn capture_and_merge(
             let Some(result) = results_guard.get_mut(&result_id) else {
                 return;
             };
-            let new_height = match result.height.checked_add(add_rows) {
+            let candidate_rows = if direction < 0 {
+                &current_rows[..add_rows as usize]
+            } else {
+                &current_rows[overlap as usize..]
+            };
+            let reused_rows = if direction < 0 {
+                result.longest_suffix_match(candidate_rows)
+            } else {
+                result.longest_prefix_match(candidate_rows)
+            };
+            let rows_to_add = add_rows.saturating_sub(reused_rows as u32);
+            if rows_to_add == 0 {
+                previous.clone_from(&current);
+                return;
+            }
+            let new_height = match result.height.checked_add(rows_to_add) {
                 Some(value)
                     if u64::from(value) * u64::from(result.width) <= MAX_LONG_CAPTURE_PIXELS =>
                 {
@@ -607,34 +680,28 @@ fn capture_and_merge(
                 }
             };
             let row_bytes = region.width as usize * 4;
-            let unique_bytes = add_rows as usize * row_bytes;
+            let unique_bytes = rows_to_add as usize * row_bytes;
             let start = if direction < 0 {
-                unique_bytes
+                rows_to_add as usize * row_bytes
             } else {
-                overlap as usize * row_bytes
+                (overlap as usize + reused_rows) * row_bytes
             };
-            // Direction changes can revisit content already present at the
-            // corresponding edge. Do not duplicate it when the user scrolls
-            // back over an area captured earlier in the same session.
-            let already_present = if direction < 0 {
-                result.starts_with(current.get(..start).unwrap_or_default())
-            } else {
-                result.ends_with(current.get(start..).unwrap_or_default())
-            };
-            if already_present {
-                previous.clone_from(&current);
-                return;
-            }
             if direction < 0 {
                 let Some(prefix) = current.get(..start) else {
                     set_partial(result_id, results, "长截图帧数据不完整".into());
                     return;
                 };
                 result.bgra_chunks.push_front(prefix.to_vec());
+                result
+                    .row_signatures
+                    .splice(0..0, current_rows[..rows_to_add as usize].iter().copied());
             } else {
                 result
                     .bgra_chunks
                     .push_back(current.get(start..).unwrap_or_default().to_vec());
+                result
+                    .row_signatures
+                    .extend_from_slice(&current_rows[overlap as usize + reused_rows..]);
             }
             result.bgra_len += unique_bytes;
             result.height = new_height;
@@ -651,10 +718,9 @@ fn capture_and_merge(
                     "message": message,
                 }),
             );
-            // Start matching from the latest visible frame so a later, slower
-            // scroll can recover instead of comparing forever with an old
-            // frame from before the gap.
-            previous.clone_from(&current);
+            // Keep the last reliable frame as the reference. Replacing it
+            // with an unmatched fast-scroll frame would make recovery
+            // impossible even after the user slows down.
         }
     }
 }
@@ -851,6 +917,28 @@ mod tests {
 
         assert!(result.starts_with(&[9, 8, 7, 6]));
         assert!(result.ends_with(&[5, 4, 3, 2]));
-        assert_eq!(result.materialize(), vec![9, 8, 7, 6, 1, 2, 3, 4, 5, 4, 3, 2]);
+        assert_eq!(
+            result.materialize(),
+            vec![9, 8, 7, 6, 1, 2, 3, 4, 5, 4, 3, 2]
+        );
+    }
+
+    #[test]
+    fn stored_result_detects_a_revisited_middle_segment() {
+        let mut result = StoredResult::from_initial(
+            1,
+            4,
+            vec![0, 0, 0, 255, 1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255],
+        );
+        result.bgra_chunks.push_back(vec![4, 4, 4, 255]);
+        result.bgra_len += 4;
+        let revisited = frame_row_signatures(&[2, 2, 2, 255], 1);
+        let missing = frame_row_signatures(&[9, 9, 9, 255], 1);
+        assert_eq!(result.longest_prefix_match(&revisited), 0);
+        assert_eq!(result.longest_suffix_match(&revisited), 0);
+        assert_eq!(result.longest_prefix_match(&missing), 0);
+
+        let stitched = result.row_signatures.clone();
+        assert_eq!(longest_match(&stitched[1..4], &stitched, false), 3);
     }
 }

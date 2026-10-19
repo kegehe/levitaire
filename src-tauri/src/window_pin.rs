@@ -90,7 +90,11 @@ fn set_topmost(hwnd: HWND, topmost: bool) -> Result<(), String> {
     if !unsafe { IsWindow(Some(hwnd)).as_bool() } {
         return Err("目标窗口已关闭".to_string());
     }
-    let insert_after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    let insert_after = if topmost {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
     unsafe {
         SetWindowPos(
             hwnd,
@@ -376,7 +380,9 @@ mod tests {
     }
 
     fn with_clean_list(body: impl FnOnce()) {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         lock_list().clear();
         body();
         lock_list().clear();

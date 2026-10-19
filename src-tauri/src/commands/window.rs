@@ -1,11 +1,9 @@
 use super::*;
 
-
 #[tauri::command]
 pub fn copy_text(text: String, clipboard: State<'_, ClipboardManager>) -> Result<(), String> {
     clipboard.copy(&text).map_err(|e| e.to_string())
 }
-
 
 /// 读取剪贴板文本，供应用自绘的文本右键菜单「粘贴」使用
 /// （见 src/utils/textContextMenu.ts）。
@@ -14,7 +12,6 @@ pub fn copy_text(text: String, clipboard: State<'_, ClipboardManager>) -> Result
 pub fn clipboard_read_text(clipboard: State<'_, ClipboardManager>) -> Result<String, String> {
     clipboard.get_text().map_err(|e| e.to_string())
 }
-
 
 #[tauri::command]
 pub fn show_orb(app: tauri::AppHandle) -> Result<(), String> {
@@ -28,7 +25,6 @@ pub fn show_orb(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn hide_orb(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("orb") {
@@ -38,7 +34,6 @@ pub fn hide_orb(app: tauri::AppHandle) -> Result<(), String> {
     crate::hooks::set_orb_visible(false);
     Ok(())
 }
-
 
 #[tauri::command]
 pub fn toggle_orb(app: tauri::AppHandle) -> Result<(), String> {
@@ -57,12 +52,18 @@ pub fn toggle_orb(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn harden_webview_window(window: tauri::WebviewWindow) -> Result<(), String> {
     crate::webview_hardening::harden(&window)
 }
 
+/// Persist uncaught frontend failures so release builds can be diagnosed
+/// after a renderer crash or a black WebView surface.
+#[tauri::command]
+pub fn write_client_log(tag: String, message: String) -> Result<(), String> {
+    crate::utils::logger::log(&format!("frontend/{tag}"), &message);
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
@@ -135,7 +136,6 @@ pub async fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// Show the tool-specific configuration window. System preferences intentionally
 /// live in the separate `settings` window so the two scopes do not compete in
 /// a single navigation tree.
@@ -194,14 +194,12 @@ pub async fn show_tool_config(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_theme_preferences(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<crate::config::ThemePreferences, String> {
     config_manager.get_theme_preferences()
 }
-
 
 #[tauri::command]
 pub fn set_theme_preferences(
@@ -212,7 +210,6 @@ pub fn set_theme_preferences(
     config_manager.update_theme_preferences(preferences)
 }
 
-
 #[tauri::command]
 pub fn set_orb_icon(
     icon: String,
@@ -222,12 +219,14 @@ pub fn set_orb_icon(
     config_manager.update_orb_icon(icon)
 }
 
-
 /// 打开 URL（用默认浏览器）。
 /// 通过校验 scheme 白名单 + ShellExecuteW 直接打开，避免 cmd /C start 的命令注入风险。
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
-    crate::utils::logger::log("commands", &format!("open_url: {}", redact_url_for_log(&url)));
+    crate::utils::logger::log(
+        "commands",
+        &format!("open_url: {}", redact_url_for_log(&url)),
+    );
     validate_url_scheme(&url)?;
 
     #[cfg(target_os = "windows")]
@@ -260,13 +259,11 @@ pub fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 获取开机自启动状态
 #[tauri::command]
 pub fn get_auto_start() -> bool {
     crate::config::get_auto_start()
 }
-
 
 /// 设置开机自启动
 #[tauri::command]
@@ -274,14 +271,12 @@ pub fn set_auto_start(enable: bool) -> Result<(), String> {
     crate::config::set_auto_start(enable)
 }
 
-
 /// 设置二维码预览模式
 /// 为 true 时鼠标点击工具栏外部不会隐藏窗口
 #[tauri::command]
 pub fn set_qrcode_preview(active: bool) {
     crate::hooks::mouse::set_qrcode_preview(active);
 }
-
 
 /// 检查所有可配置的全局快捷键当前是否成功注册。
 /// Windows RegisterHotKey 能判断是否被占用，但不会暴露占用者进程名称。
@@ -319,7 +314,14 @@ pub fn check_hotkey_conflicts(
     let mut results = Vec::with_capacity(entries.len() + 1);
     let parsed_entries: Vec<_> = entries
         .iter()
-        .map(|(id, label, _slot, hotkey)| (*id, *label, hotkey.trim().to_string(), crate::hooks::hotkey::parse_hotkey(hotkey)))
+        .map(|(id, label, _slot, hotkey)| {
+            (
+                *id,
+                *label,
+                hotkey.trim().to_string(),
+                crate::hooks::hotkey::parse_hotkey(hotkey),
+            )
+        })
         .collect();
     for (id, _label, slot, hotkey) in entries.iter() {
         let trimmed = hotkey.trim().to_string();
@@ -342,9 +344,12 @@ pub fn check_hotkey_conflicts(
             });
             continue;
         }
-        let conflict_label = parsed_entries.iter().find_map(|(other_id, other_label, _, other_parsed)| {
-            (*other_id != *id && *other_parsed == parsed).then_some(*other_label)
-        });
+        let conflict_label =
+            parsed_entries
+                .iter()
+                .find_map(|(other_id, other_label, _, other_parsed)| {
+                    (*other_id != *id && *other_parsed == parsed).then_some(*other_label)
+                });
         if let Some(conflict_label) = conflict_label {
             results.push(HotkeyConflictResult {
                 id: (*id).into(),
@@ -412,7 +417,6 @@ pub fn check_hotkey_conflicts(
     Ok(results)
 }
 
-
 /// palette 面板窗口四周的透明留白（逻辑像素）。
 ///
 /// 窗口尺寸 = 视觉面板 + 留白。留白是给面板的 CSS 投影展开用的：窗口尺寸若等于
@@ -424,7 +428,6 @@ pub fn check_hotkey_conflicts(
 ///
 /// ⚠️ 必须与 `.palette-stage { padding }` 保持一致，改一处必须同时改另一处。
 const PALETTE_SHADOW_MARGIN: f64 = 20.0;
-
 
 /// palette 面板的视觉尺寸（逻辑像素），**不含**四周投影留白。
 ///
@@ -439,7 +442,6 @@ const PALETTE_SHADOW_MARGIN: f64 = 20.0;
 ///    当前值对应面板 436×486（4 列 × 96.5px 卡片；3 个分组各 1 行 = 3 行）。
 const PALETTE_PANEL_WIDTH: f64 = 436.0;
 const PALETTE_PANEL_HEIGHT: f64 = 486.0;
-
 
 /// 显示卡片工具选择器面板，定位到悬浮球附近
 #[tauri::command]
@@ -508,122 +510,123 @@ pub async fn show_palette(app: tauri::AppHandle) -> Result<(), String> {
     // Only the first opening is anchored beside the orb. Subsequent openings retain the
     // position selected by dragging the palette window.
     if should_anchor_to_orb {
-    // palette 物理尺寸：宽度固定为面板宽 + 四周投影留白，高度由前端自适应调整
-    // （fit-content + setSize）。
-    // 首次创建时 inner_size() 可能返回 0，使用 WebviewWindowBuilder 中指定的逻辑尺寸乘 scale_factor 作为 fallback。
-    // 高度取 inner_size()（非首次时已是前端上次调整的值），首次创建 fallback 用初始值。
-    let scale = palette.scale_factor().unwrap_or(1.0);
-    // 留白的物理像素值：窗口坐标是物理像素，留白是逻辑像素，必须按 DPI 缩放
-    let margin = (PALETTE_SHADOW_MARGIN * scale).round() as i32;
-    let inner = palette.inner_size().unwrap_or_else(|_| {
-        tauri::PhysicalSize::new(
-            ((PALETTE_PANEL_WIDTH + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as u32,
-            ((PALETTE_PANEL_HEIGHT + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as u32,
-        )
-    });
-    let pw = if inner.width > 0 {
-        inner.width as i32
-    } else {
-        ((PALETTE_PANEL_WIDTH + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as i32
-    };
-    let ph = if inner.height > 0 {
-        inner.height as i32
-    } else {
-        ((PALETTE_PANEL_HEIGHT + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as i32
-    };
+        // palette 物理尺寸：宽度固定为面板宽 + 四周投影留白，高度由前端自适应调整
+        // （fit-content + setSize）。
+        // 首次创建时 inner_size() 可能返回 0，使用 WebviewWindowBuilder 中指定的逻辑尺寸乘 scale_factor 作为 fallback。
+        // 高度取 inner_size()（非首次时已是前端上次调整的值），首次创建 fallback 用初始值。
+        let scale = palette.scale_factor().unwrap_or(1.0);
+        // 留白的物理像素值：窗口坐标是物理像素，留白是逻辑像素，必须按 DPI 缩放
+        let margin = (PALETTE_SHADOW_MARGIN * scale).round() as i32;
+        let inner = palette.inner_size().unwrap_or_else(|_| {
+            tauri::PhysicalSize::new(
+                ((PALETTE_PANEL_WIDTH + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as u32,
+                ((PALETTE_PANEL_HEIGHT + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as u32,
+            )
+        });
+        let pw = if inner.width > 0 {
+            inner.width as i32
+        } else {
+            ((PALETTE_PANEL_WIDTH + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as i32
+        };
+        let ph = if inner.height > 0 {
+            inner.height as i32
+        } else {
+            ((PALETTE_PANEL_HEIGHT + 2.0 * PALETTE_SHADOW_MARGIN) * scale) as i32
+        };
 
-    // 锚点：优先用 orb 窗口位置；失败则用鼠标位置
-    let (mut x, mut y, anchor_hwnd) = if let Some(orb) = app.get_webview_window("orb") {
-        match orb.outer_position() {
-            Ok(p) => {
-                let oi = orb.inner_size().unwrap_or_default();
-                let ow = oi.width as i32;
-                let oh = oi.height as i32;
-                let hwnd = orb.hwnd().map(|h| h.0).unwrap_or(std::ptr::null_mut());
-                let orb_scale = orb.scale_factor().unwrap_or(1.0);
-                let visual_size = (56.0 * orb_scale).round() as i32;
-                let visual_right = p.x + (ow + visual_size) / 2;
-                let visual_bottom = p.y + (oh + visual_size) / 2;
-                // 默认放在 orb 右上方，面板边缘与 orb 间隔 8px。
-                // 窗口左上角还要再向左/向上让出留白，面板边缘才落在目标位置。
-                (visual_right + 8 - margin, visual_bottom + margin - ph, hwnd)
-            }
-            Err(_) => {
-                if let Ok(cur) = crate::automation::get_mouse_position() {
-                    (cur.x + 8 - margin, cur.y + 8 - margin, std::ptr::null_mut())
-                } else {
-                    (100, 100, std::ptr::null_mut())
+        // 锚点：优先用 orb 窗口位置；失败则用鼠标位置
+        let (mut x, mut y, anchor_hwnd) = if let Some(orb) = app.get_webview_window("orb") {
+            match orb.outer_position() {
+                Ok(p) => {
+                    let oi = orb.inner_size().unwrap_or_default();
+                    let ow = oi.width as i32;
+                    let oh = oi.height as i32;
+                    let hwnd = orb.hwnd().map(|h| h.0).unwrap_or(std::ptr::null_mut());
+                    let orb_scale = orb.scale_factor().unwrap_or(1.0);
+                    let visual_size = (56.0 * orb_scale).round() as i32;
+                    let visual_right = p.x + (ow + visual_size) / 2;
+                    let visual_bottom = p.y + (oh + visual_size) / 2;
+                    // 默认放在 orb 右上方，面板边缘与 orb 间隔 8px。
+                    // 窗口左上角还要再向左/向上让出留白，面板边缘才落在目标位置。
+                    (visual_right + 8 - margin, visual_bottom + margin - ph, hwnd)
+                }
+                Err(_) => {
+                    if let Ok(cur) = crate::automation::get_mouse_position() {
+                        (cur.x + 8 - margin, cur.y + 8 - margin, std::ptr::null_mut())
+                    } else {
+                        (100, 100, std::ptr::null_mut())
+                    }
                 }
             }
-        }
-    } else if let Ok(cur) = crate::automation::get_mouse_position() {
-        (cur.x + 8 - margin, cur.y + 8 - margin, std::ptr::null_mut())
-    } else {
-        (100, 100, std::ptr::null_mut())
-    };
-
-    // 取 orb 所在显示器的工作区用于边界翻转（支持多显示器）
-    // GetMonitorInfoW 在 Per-Monitor DPI Aware V2 进程中返回物理像素坐标
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        } else if let Ok(cur) = crate::automation::get_mouse_position() {
+            (cur.x + 8 - margin, cur.y + 8 - margin, std::ptr::null_mut())
+        } else {
+            (100, 100, std::ptr::null_mut())
         };
-        let hwnd = HWND(anchor_hwnd);
-        if !hwnd.is_invalid() {
-            let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-            let mut mi = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
+
+        // 取 orb 所在显示器的工作区用于边界翻转（支持多显示器）
+        // GetMonitorInfoW 在 Per-Monitor DPI Aware V2 进程中返回物理像素坐标
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::Graphics::Gdi::{
+                GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
             };
-            if unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool() {
-                let rc = mi.rcWork;
-                // 边界翻转：palette 不超出 orb 所在屏工作区
-                if x + pw > rc.right {
-                    // 右边放不下，改为放在 orb 左边
-                    if let Some(orb) = app.get_webview_window("orb") {
-                        if let Ok(p) = orb.outer_position() {
-                            let ow = orb.inner_size().map(|size| size.width as i32).unwrap_or(96);
-                            let visual_size = (56.0 * orb.scale_factor().unwrap_or(1.0)).round() as i32;
-                            let visual_left = p.x + (ow - visual_size) / 2;
-                            // 同理：窗口右边缘要让出留白，面板右边缘才贴在
-                            // visual_left 左侧 8px（+ margin 抵消窗口自身的留白）
-                            x = visual_left - pw + margin - 8;
+            let hwnd = HWND(anchor_hwnd);
+            if !hwnd.is_invalid() {
+                let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool() {
+                    let rc = mi.rcWork;
+                    // 边界翻转：palette 不超出 orb 所在屏工作区
+                    if x + pw > rc.right {
+                        // 右边放不下，改为放在 orb 左边
+                        if let Some(orb) = app.get_webview_window("orb") {
+                            if let Ok(p) = orb.outer_position() {
+                                let ow =
+                                    orb.inner_size().map(|size| size.width as i32).unwrap_or(96);
+                                let visual_size =
+                                    (56.0 * orb.scale_factor().unwrap_or(1.0)).round() as i32;
+                                let visual_left = p.x + (ow - visual_size) / 2;
+                                // 同理：窗口右边缘要让出留白，面板右边缘才贴在
+                                // visual_left 左侧 8px（+ margin 抵消窗口自身的留白）
+                                x = visual_left - pw + margin - 8;
+                            }
+                        }
+                        // 如果左边也放不下，贴左边工作区
+                        if x < rc.left {
+                            x = rc.left;
                         }
                     }
-                    // 如果左边也放不下，贴左边工作区
+                    if y + ph > rc.bottom {
+                        y = rc.bottom - ph;
+                    }
                     if x < rc.left {
                         x = rc.left;
                     }
-                }
-                if y + ph > rc.bottom {
-                    y = rc.bottom - ph;
-                }
-                if x < rc.left {
-                    x = rc.left;
-                }
-                if y < rc.top {
-                    y = rc.top;
+                    if y < rc.top {
+                        y = rc.top;
+                    }
                 }
             }
         }
-    }
 
-    let _ = palette.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-        x, y,
-    )));
-    // set_size 使用 inner_size() 的当前值（非首次时已是前端上次调整的值），
-    // 前端 useLayoutEffect 会在渲染后按实际内容高度再次 setSize 修正，
-    // 两者之间可能有一帧微调，可接受。
-    let _ = palette.set_size(tauri::PhysicalSize::new(pw, ph));
+        let _ = palette.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )));
+        // set_size 使用 inner_size() 的当前值（非首次时已是前端上次调整的值），
+        // 前端 useLayoutEffect 会在渲染后按实际内容高度再次 setSize 修正，
+        // 两者之间可能有一帧微调，可接受。
+        let _ = palette.set_size(tauri::PhysicalSize::new(pw, ph));
     }
 
     palette.show().map_err(|e| e.to_string())?;
     palette.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
-
 
 /// 隐藏卡片工具选择器面板
 #[tauri::command]
@@ -633,7 +636,6 @@ pub fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 /// 执行滚动导航动作（top / bottom / page-up / page-down / line-up / line-down）。
 ///
@@ -648,7 +650,6 @@ pub async fn navigate_scroll(
         .map_err(|error| format!("滚动操作被中断: {error}"))?
 }
 
-
 /// 退出应用（悬浮球右键菜单「退出」入口，与托盘菜单 quit 等价）
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
@@ -660,7 +661,6 @@ pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
     app.exit(0);
     Ok(())
 }
-
 
 /// 重启应用（托盘右键菜单「重启应用」入口）：卡顿时用它拉起一个干净进程。
 ///
@@ -680,7 +680,6 @@ pub fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 记忆悬浮窗位置（由前端在窗口拖动结束后调用），应用重启后恢复到上次位置。
 /// window_id 如 "orb"、"monitor-overlay"、"time-overlay"
 #[tauri::command]
@@ -698,7 +697,6 @@ pub fn set_window_position(
     }
     config_manager.set_window_position(&id, crate::config::WindowPosition { x, y })
 }
-
 
 /// 可以「恢复默认位置」的悬浮窗 id（**id 即窗口 label**）。
 ///
@@ -718,7 +716,6 @@ pub(crate) const RESETTABLE_WINDOW_IDS: &[&str] = &[
     "system-cleaner-overlay",
     "sticky-notes-manager",
 ];
-
 
 /// 恢复悬浮窗默认位置：清除记忆位置，并将窗口移动到默认定位。
 /// 支持的 id 见 `RESETTABLE_WINDOW_IDS`。
@@ -755,7 +752,6 @@ pub fn reset_window_position(
     .map_err(|e| e.to_string())
 }
 
-
 // ─── OCR 引擎管理 ─────────────────────────────────────────────────
 
 /// 获取可用 OCR 引擎列表及当前激活引擎
@@ -778,7 +774,6 @@ pub async fn get_ocr_engines() -> Result<serde_json::Value, String> {
     .await
     .map_err(|e| format!("任务执行失败: {}", e))?
 }
-
 
 /// 切换 OCR 引擎，并将用户偏好持久化到配置（重启后保持所选引擎）
 #[tauri::command]
@@ -830,7 +825,6 @@ pub async fn set_ocr_engine(
     Ok(())
 }
 
-
 /// 打开文件夹选择对话框，返回用户选择的目录路径；取消返回 null
 #[tauri::command]
 pub async fn pick_folder() -> Result<Option<String>, String> {
@@ -844,7 +838,6 @@ pub async fn pick_folder() -> Result<Option<String>, String> {
     }))
 }
 
-
 /// 获取自启动工具 ID 列表
 #[tauri::command]
 pub fn get_tools_autostart(
@@ -852,7 +845,6 @@ pub fn get_tools_autostart(
 ) -> Result<Vec<String>, String> {
     config_manager.get_tools_autostart()
 }
-
 
 /// 设置自启动工具 ID 列表并持久化
 #[tauri::command]
@@ -862,7 +854,6 @@ pub fn set_tools_autostart(
 ) -> Result<(), String> {
     config_manager.update_tools_autostart(ids)
 }
-
 
 /// 把**调用它的那扇窗**夹进所在显示器的工作区。
 ///
@@ -900,7 +891,9 @@ pub fn clamp_window_to_workarea(
             suppress.insert(window.label().to_string(), now_ms() + 1500);
         }
         window
-            .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
+            .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, y,
+            )))
             .map_err(|e| e.to_string())?;
     }
     Ok(())

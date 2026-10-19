@@ -1,6 +1,5 @@
 use super::*;
 
-
 // ─── 待办清单 ──────────────────────────────────────────────────
 
 #[tauri::command]
@@ -12,14 +11,12 @@ pub fn get_todos(
     state.list(include_completed.unwrap_or(true), sort_mode.as_deref())
 }
 
-
 #[tauri::command]
 pub fn get_deleted_todos(
     state: State<'_, crate::todo::TodoStore>,
 ) -> Result<Vec<crate::todo::TodoItem>, String> {
     state.deleted()
 }
-
 
 #[tauri::command]
 pub fn purge_deleted_todos(
@@ -30,7 +27,6 @@ pub fn purge_deleted_todos(
     let _ = app.emit("todo-changed", serde_json::json!({ "trashPurged": true }));
     Ok(())
 }
-
 
 /// 导出待办为 JSON。
 ///
@@ -63,7 +59,6 @@ pub async fn export_todos(
     Ok(true)
 }
 
-
 /// 从 JSON 导入待办（异步原因同 [`export_todos`]）。
 #[tauri::command]
 pub async fn import_todos(
@@ -87,7 +82,6 @@ pub async fn import_todos(
     Ok(true)
 }
 
-
 #[tauri::command]
 pub fn reorder_todos(
     id: String,
@@ -99,7 +93,6 @@ pub fn reorder_todos(
     let _ = app.emit("todo-changed", &item);
     Ok(item)
 }
-
 
 #[tauri::command]
 pub fn move_todo(
@@ -113,14 +106,12 @@ pub fn move_todo(
     Ok(item)
 }
 
-
 #[tauri::command]
 pub fn get_todo_lists(
     state: State<'_, crate::todo::TodoStore>,
 ) -> Result<Vec<crate::todo::TodoList>, String> {
     state.list_lists()
 }
-
 
 #[tauri::command]
 pub fn create_todo_list(
@@ -133,7 +124,6 @@ pub fn create_todo_list(
     Ok(list)
 }
 
-
 #[tauri::command]
 pub fn update_todo_list(
     id: String,
@@ -145,7 +135,6 @@ pub fn update_todo_list(
     let _ = app.emit("todo-changed", &list);
     Ok(list)
 }
-
 
 #[tauri::command]
 pub fn delete_todo_list(
@@ -161,7 +150,6 @@ pub fn delete_todo_list(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn create_todo(
     input: crate::todo::CreateTodoInput,
@@ -172,7 +160,6 @@ pub fn create_todo(
     let _ = app.emit("todo-changed", &item);
     Ok(item)
 }
-
 
 #[tauri::command]
 pub fn update_todo(
@@ -185,7 +172,6 @@ pub fn update_todo(
     let _ = app.emit("todo-changed", &item);
     Ok(item)
 }
-
 
 #[tauri::command]
 pub fn set_todo_completed(
@@ -206,7 +192,6 @@ pub fn set_todo_completed(
     Ok(item)
 }
 
-
 #[tauri::command]
 pub fn snooze_todo(
     id: String,
@@ -218,7 +203,6 @@ pub fn snooze_todo(
     let _ = app.emit("todo-changed", &item);
     Ok(item)
 }
-
 
 #[tauri::command]
 pub fn delete_todo(
@@ -239,7 +223,6 @@ pub fn delete_todo(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn restore_todo(
     id: String,
@@ -251,14 +234,12 @@ pub fn restore_todo(
     Ok(restored)
 }
 
-
 #[tauri::command]
 pub fn get_todo_quick_add_hotkey(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<String, String> {
     config_manager.get_todo_quick_add_hotkey()
 }
-
 
 #[tauri::command]
 pub fn set_todo_quick_add_hotkey(
@@ -293,12 +274,10 @@ pub fn set_todo_quick_add_hotkey(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_todo_enabled(config_manager: State<'_, ConfigManager>) -> Result<bool, String> {
     config_manager.get_todo_enabled()
 }
-
 
 #[tauri::command]
 pub fn get_todo_reminders_enabled(
@@ -306,7 +285,6 @@ pub fn get_todo_reminders_enabled(
 ) -> Result<bool, String> {
     config_manager.get_todo_reminders_enabled()
 }
-
 
 #[tauri::command]
 pub fn set_todo_reminders_enabled(
@@ -320,12 +298,10 @@ pub fn set_todo_reminders_enabled(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn get_todo_reminder_sound(config_manager: State<'_, ConfigManager>) -> Result<String, String> {
     config_manager.get_todo_reminder_sound()
 }
-
 
 #[tauri::command]
 pub fn set_todo_reminder_sound(
@@ -334,7 +310,6 @@ pub fn set_todo_reminder_sound(
 ) -> Result<(), String> {
     config_manager.update_todo_reminder_sound(sound)
 }
-
 
 #[tauri::command]
 pub fn set_todo_enabled(
@@ -387,7 +362,6 @@ pub fn set_todo_enabled(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn show_todo_window(
     app: tauri::AppHandle,
@@ -434,7 +408,6 @@ pub fn show_todo_window(
     Ok(())
 }
 
-
 #[tauri::command]
 pub fn hide_todo_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("todo-overlay") {
@@ -442,7 +415,6 @@ pub fn hide_todo_window(app: tauri::AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 #[tauri::command]
 pub fn start_pomodoro_for_todo(

@@ -400,7 +400,10 @@ pub fn load_recent(volume: &str, limit: usize) -> Vec<Snapshot> {
 
 /// 最近一次快照的时间（展示用）。
 pub fn last_taken_at(volume: &str) -> Option<String> {
-    load_recent(volume, 1).into_iter().next().map(|s| s.taken_at)
+    load_recent(volume, 1)
+        .into_iter()
+        .next()
+        .map(|s| s.taken_at)
 }
 
 /// 保留最近 `SNAPSHOT_KEEP` 份，多余的删掉。

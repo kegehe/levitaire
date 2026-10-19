@@ -206,7 +206,12 @@ impl JobQuarantine {
         // 两处各写一遍判断曾经导致语义分叉：这里当空、`list()` 当硬错误 ——
         // 于是一个残留的空任务目录能让整个隔离区不可读。
         let manifest = read_manifest(&dir)?;
-        let next_seq = manifest.entries.iter().map(|e| e.seq + 1).max().unwrap_or(0);
+        let next_seq = manifest
+            .entries
+            .iter()
+            .map(|e| e.seq + 1)
+            .max()
+            .unwrap_or(0);
         Ok(Self {
             job_id: job_id.to_string(),
             dir,
@@ -224,7 +229,8 @@ impl JobQuarantine {
         source_label: &str,
         is_user_data: bool,
     ) -> Result<QuarantineEntry, String> {
-        let st = stat(src).map_err(|code| format!("{} 无法读取（Win32 错误 {code}）", src.display()))?;
+        let st =
+            stat(src).map_err(|code| format!("{} 无法读取（Win32 错误 {code}）", src.display()))?;
         let seq = self.next_seq;
         let dest = self.dir.join(seq.to_string());
 
@@ -252,12 +258,8 @@ impl JobQuarantine {
         let mut partial = false;
 
         if same_volume {
-            fs::rename(src, &dest).map_err(|e| {
-                format!(
-                    "把 {} 移入隔离区失败（同卷重命名）：{e}",
-                    src.display()
-                )
-            })?;
+            fs::rename(src, &dest)
+                .map_err(|e| format!("把 {} 移入隔离区失败（同卷重命名）：{e}", src.display()))?;
         } else {
             // 跨卷：先复制校验，再删源。校验不过就把副本删掉、源原样留着。
             if tree_has_reparse_point(src)? {
@@ -403,7 +405,30 @@ pub fn find(entry_id: &str) -> Result<Option<(PathBuf, QuarantineEntry)>, String
         .entries
         .into_iter()
         .find(|e| e.seq == seq);
-    Ok(entry.map(|entry| (dir.join(seq.to_string()), entry)))
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let stored = dir.join(seq.to_string());
+    validate_stored_entry(&dir, &stored)?;
+    Ok(Some((stored, entry)))
+}
+
+fn validate_stored_entry(job_dir: &Path, stored: &Path) -> Result<(), String> {
+    let root = quarantine_dir();
+    if !safety::starts_with_ci(job_dir, &root) || !safety::starts_with_ci(stored, job_dir) {
+        return Err("隔离条目的存储路径不在隔离区内，已拒绝操作".into());
+    }
+    let job_stat =
+        stat(job_dir).map_err(|code| format!("隔离任务目录无法读取（Win32 错误 {code}）"))?;
+    if !job_stat.is_dir() || job_stat.is_reparse_point() {
+        return Err("隔离任务目录不是普通目录，已拒绝操作".into());
+    }
+    if let Err(code) = stat(stored) {
+        if code != ERROR_FILE_NOT_FOUND.0 && code != ERROR_PATH_NOT_FOUND.0 {
+            return Err(format!("隔离条目无法读取（Win32 错误 {code}）"));
+        }
+    }
+    Ok(())
 }
 
 /// 把条目移回原位置。
@@ -411,8 +436,7 @@ pub fn find(entry_id: &str) -> Result<Option<(PathBuf, QuarantineEntry)>, String
 /// **原位置已被占用时拒绝，绝不覆盖**（§10.1）——覆盖等于用一份可能过期的副本
 /// 替换掉用户新建的东西。
 pub fn restore(entry_id: &str) -> Result<QuarantineEntry, String> {
-    let (stored, entry) = find(entry_id)?
-        .ok_or_else(|| format!("隔离条目不存在：{entry_id}"))?;
+    let (stored, entry) = find(entry_id)?.ok_or_else(|| format!("隔离条目不存在：{entry_id}"))?;
     if !stored.exists() {
         return Err(format!(
             "隔离条目 {entry_id} 的内容已不在隔离区（可能已被清理）"
@@ -464,7 +488,10 @@ pub fn restore(entry_id: &str) -> Result<QuarantineEntry, String> {
         if let Err(error) = copy_tree(&stored, &original) {
             // 复制中途失败（盘满/读错）要回滚：否则原位置留下半棵树，
             // 用户重试只会撞"已被占用"，恢复动作就永久卡死了。
-            return Err(rollback_message(&original, &format!("跨卷恢复复制失败：{error}")));
+            return Err(rollback_message(
+                &original,
+                &format!("跨卷恢复复制失败：{error}"),
+            ));
         }
         let copied = match tree_bytes(&original) {
             Ok(bytes) => bytes,
@@ -500,8 +527,7 @@ pub fn restore(entry_id: &str) -> Result<QuarantineEntry, String> {
 
 /// 彻底删除一个隔离条目（用户主动）。
 pub fn purge(entry_id: &str) -> Result<QuarantineEntry, String> {
-    let (stored, entry) = find(entry_id)?
-        .ok_or_else(|| format!("隔离条目不存在：{entry_id}"))?;
+    let (stored, entry) = find(entry_id)?.ok_or_else(|| format!("隔离条目不存在：{entry_id}"))?;
     // ★ 先删内容、**再**摘清单。反过来的话，删不掉时清单已经没了 ——
     //   内容还在磁盘上却谁也看不到（`list()` 里没有、`restore` 说"条目不存在"）。
     discard(&stored)?;
@@ -626,9 +652,7 @@ fn discard(path: &Path) -> Result<(), String> {
         // ★ 只有"真的不存在"才等价于删除成功。`GetFileAttributesExW` 对**以不共享方式
         //   打开**的文件返回 ACCESS_DENIED —— 把它也当成"已经没了"的话，`purge` 会接着
         //   把清单条目摘掉：内容还在磁盘上，而用户再也看不到、恢复不了。
-        Err(code)
-            if code == ERROR_FILE_NOT_FOUND.0 || code == ERROR_PATH_NOT_FOUND.0 =>
-        {
+        Err(code) if code == ERROR_FILE_NOT_FOUND.0 || code == ERROR_PATH_NOT_FOUND.0 => {
             return Ok(());
         }
         Err(code) => {
@@ -638,6 +662,15 @@ fn discard(path: &Path) -> Result<(), String> {
             ))
         }
     };
+    // A junction is an entry in its own right; remove only the link itself.
+    if st.is_reparse_point() {
+        let result = if st.is_dir() {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        };
+        return result.map_err(|e| format!("删除隔离区链接 {} 失败：{e}", path.display()));
+    }
     if !st.is_dir() {
         return fs::remove_file(path).map_err(|e| format!("删除 {} 失败：{e}", path.display()));
     }

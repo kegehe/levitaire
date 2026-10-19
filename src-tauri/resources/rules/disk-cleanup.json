@@ -61,7 +61,7 @@
       "target": { "kind": "knownFolder", "folder": "localAppData", "relative": "npm-cache" },
       "strategy": { "kind": "purgeContents" },
       "requiresAdmin": false,
-      "defaultChecked": true,
+      "defaultChecked": false,
       "guard": [],
       "consequence": "删除 npm 下载缓存。下次 npm install 需要重新联网下载依赖，离线环境下会失败。",
       "undo": "none"
@@ -87,7 +87,7 @@
       "target": { "kind": "knownFolder", "folder": "localAppData", "relative": "pip\\Cache" },
       "strategy": { "kind": "purgeContents" },
       "requiresAdmin": false,
-      "defaultChecked": true,
+      "defaultChecked": false,
       "guard": [],
       "consequence": "删除 pip 的轮子与源码包缓存。下次 pip install 需要重新联网下载，离线环境下会失败。",
       "undo": "none"
@@ -100,7 +100,7 @@
       "target": { "kind": "knownFolder", "folder": "localAppData", "relative": "Yarn\\Cache" },
       "strategy": { "kind": "purgeContents" },
       "requiresAdmin": false,
-      "defaultChecked": true,
+      "defaultChecked": false,
       "guard": [],
       "consequence": "删除 Yarn 的包缓存。下次安装依赖需要重新联网下载。",
       "undo": "none"
@@ -113,7 +113,7 @@
       "target": { "kind": "knownFolder", "folder": "localAppData", "relative": "go-build" },
       "strategy": { "kind": "purgeContents" },
       "requiresAdmin": false,
-      "defaultChecked": true,
+      "defaultChecked": false,
       "guard": [],
       "consequence": "删除 Go 的编译缓存。下次构建需要重新编译全部依赖，首次构建会明显变慢；不影响源码与已编译的产物。",
       "undo": "none"
@@ -126,7 +126,7 @@
       "target": { "kind": "knownFolder", "folder": "localAppData", "relative": "NuGet\\v3-cache" },
       "strategy": { "kind": "purgeContents" },
       "requiresAdmin": false,
-      "defaultChecked": true,
+      "defaultChecked": false,
       "guard": [],
       "consequence": "删除 NuGet 的 HTTP 缓存。下次还原包需要重新联网下载；不影响全局包目录与项目引用。",
       "undo": "none"

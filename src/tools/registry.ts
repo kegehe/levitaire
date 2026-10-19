@@ -139,7 +139,7 @@ export const FLOATING_TOOLS: FloatingTool[] = [
     name: "系统清理",
     icon: "Broom",
     description:
-      "扫描并清理 C 盘垃圾：临时文件、开发缓存、缩略图等；每一项都写明后果，删不掉的绝不硬删",
+      "扫描并清理可安全识别的临时文件与缓存；每一项都写明后果，删不掉的绝不硬删",
     category: "system",
     defaultEnabled: false,
     loader: () => import("./system-cleaner/SystemCleanerTool"),

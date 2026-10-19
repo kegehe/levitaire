@@ -166,7 +166,9 @@ mod tests {
         // 全路径，按标题过滤可以免受其它程序开终端带来的干扰。
         let leaked: Vec<&String> = after
             .iter()
-            .filter(|window| !before.contains(window) && window.to_lowercase().contains("powershell"))
+            .filter(|window| {
+                !before.contains(window) && window.to_lowercase().contains("powershell")
+            })
             .collect();
         assert!(
             leaked.is_empty(),
@@ -503,7 +505,11 @@ mod tests {
             .or_else(|| trimmed.strip_prefix("pub mod "))
             .or_else(|| trimmed.strip_prefix("mod "))?;
         let name = rest.strip_suffix(';')?;
-        if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
             return None;
         }
         Some(name.to_string())
@@ -656,11 +662,17 @@ mod tests {
         // `#[cfg(test)] mod helper;` → `helper.rs` 整体只在测试下编译，不该按生产代码要求。
         let test_only = test_only_of(&[
             ("ocr/mod.rs", "#[cfg(test)]\nmod helper;\npub mod engine;\n"),
-            ("ocr/helper.rs", "fn t() { Command::new(\"cmd\").spawn(); }\n"),
+            (
+                "ocr/helper.rs",
+                "fn t() { Command::new(\"cmd\").spawn(); }\n",
+            ),
         ]);
         assert!(test_only.contains("ocr/helper.rs"));
         assert!(!test_only.contains("ocr/mod.rs"), "声明方本身仍是生产代码");
-        assert!(!test_only.contains("ocr/engine.rs"), "没被门控的模块文件不能跳过");
+        assert!(
+            !test_only.contains("ocr/engine.rs"),
+            "没被门控的模块文件不能跳过"
+        );
     }
 
     #[test]
@@ -793,10 +805,14 @@ mod tests {
     #[test]
     fn strip_test_modules_keeps_unrelated_cfg_test_imports() {
         // `#[cfg(test)] use ...` 不是测试模块，不能因此丢掉后面的生产代码。
-        let source = "#[cfg(test)]\nuse std::sync::Once;\nfn production() { Command::new(\"x\"); }\n";
+        let source =
+            "#[cfg(test)]\nuse std::sync::Once;\nfn production() { Command::new(\"x\"); }\n";
         let (stripped, gated) = strip_test_modules(source);
         assert!(stripped.contains("Command::new"));
-        assert!(gated.is_empty(), "这不是模块声明，不该产生跳过项：{gated:?}");
+        assert!(
+            gated.is_empty(),
+            "这不是模块声明，不该产生跳过项：{gated:?}"
+        );
     }
 
     #[test]
@@ -821,7 +837,10 @@ mod tests {
 "#;
         let (stripped, gated) = strip_test_modules(source);
         assert!(stripped.contains("pub mod engine;"), "中间的生产代码不能丢");
-        assert!(stripped.contains("use std::sync::Mutex;"), "中间的生产代码不能丢");
+        assert!(
+            stripped.contains("use std::sync::Mutex;"),
+            "中间的生产代码不能丢"
+        );
         assert!(
             stripped.contains(r#"Command::new("x")"#),
             "夹在测试模块之间的生产代码必须参与扫描"

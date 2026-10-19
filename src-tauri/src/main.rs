@@ -56,13 +56,13 @@ mod pomodoro;
 mod quick_input;
 mod recording;
 mod screenshot;
-mod scroll_navigation;
 mod scroll_capture;
+mod scroll_navigation;
 mod sound;
 mod sticky_note;
+mod timer;
 mod todo;
 mod tts;
-mod timer;
 mod updater;
 mod utils;
 mod webview_hardening;
@@ -109,10 +109,18 @@ fn tray_line(raw: &mut [u8], mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: 
         tray_pixel(raw, x0, y0, color);
         tray_pixel(raw, x0 + 1, y0, color);
         tray_pixel(raw, x0, y0 + 1, color);
-        if x0 == x1 && y0 == y1 { break; }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
         let e2 = 2 * err;
-        if e2 >= dy { err += dy; x0 += sx; }
-        if e2 <= dx { err += dx; y0 += sy; }
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
     }
 }
 
@@ -146,11 +154,7 @@ fn tray_accent_color(accent: &str, hover: bool) -> [u8; 4] {
 }
 
 #[allow(dead_code)]
-pub(crate) fn tray_orb_image(
-    id: &str,
-    hover: bool,
-    accent: &str,
-) -> tauri::image::Image<'static> {
+pub(crate) fn tray_orb_image(id: &str, hover: bool, accent: &str) -> tauri::image::Image<'static> {
     let mut raw = vec![0u8; 32 * 32 * 4];
     let fg = tray_accent_color(accent, hover);
     match id {
@@ -161,16 +165,79 @@ pub(crate) fn tray_orb_image(
             tray_line(&mut raw, 14, 10, 18, 10, fg);
             tray_line(&mut raw, 18, 10, 19, 13, fg);
         }
-        "butterfly" => { tray_line(&mut raw, 16, 13, 16, 24, fg); tray_circle(&mut raw, 11, 12, 4, fg, false); tray_circle(&mut raw, 21, 12, 4, fg, false); tray_circle(&mut raw, 12, 19, 3, fg, false); tray_circle(&mut raw, 20, 19, 3, fg, false); }
-        "balloon" => { tray_circle(&mut raw, 16, 12, 7, fg, false); tray_line(&mut raw, 16, 19, 16, 23, fg); tray_line(&mut raw, 12, 24, 20, 24, fg); }
-        "rocket" => { tray_line(&mut raw, 16, 7, 22, 19, fg); tray_line(&mut raw, 22, 19, 10, 19, fg); tray_line(&mut raw, 10, 19, 16, 7, fg); tray_circle(&mut raw, 16, 13, 2, fg, false); tray_line(&mut raw, 12, 19, 9, 23, fg); tray_line(&mut raw, 20, 19, 23, 23, fg); }
-        "cloud" => { tray_circle(&mut raw, 11, 17, 5, fg, false); tray_circle(&mut raw, 17, 14, 7, fg, false); tray_circle(&mut raw, 22, 18, 4, fg, false); tray_line(&mut raw, 8, 21, 24, 21, fg); }
-        "plane" => { tray_line(&mut raw, 25, 8, 7, 16, fg); tray_line(&mut raw, 7, 16, 14, 18, fg); tray_line(&mut raw, 14, 18, 17, 24, fg); tray_line(&mut raw, 17, 24, 25, 8, fg); tray_line(&mut raw, 14, 18, 20, 13, fg); }
-        "dandelion" => { tray_line(&mut raw, 16, 13, 16, 25, fg); for (x, y) in [(16, 7), (10, 10), (22, 10), (8, 15), (24, 15), (12, 6), (20, 6)] { tray_line(&mut raw, 16, 14, x, y, fg); tray_circle(&mut raw, x, y, 1, fg, true); } }
-        "kite" => { tray_line(&mut raw, 16, 6, 23, 14, fg); tray_line(&mut raw, 23, 14, 16, 22, fg); tray_line(&mut raw, 16, 22, 9, 14, fg); tray_line(&mut raw, 9, 14, 16, 6, fg); tray_line(&mut raw, 16, 6, 16, 22, fg); tray_line(&mut raw, 9, 14, 23, 14, fg); tray_line(&mut raw, 16, 22, 19, 26, fg); }
-        "bubble" => { tray_circle(&mut raw, 16, 15, 8, fg, false); tray_circle(&mut raw, 11, 11, 2, fg, false); tray_circle(&mut raw, 12, 12, 1, fg, true); }
-        "jellyfish" => { tray_circle(&mut raw, 16, 13, 8, fg, false); tray_line(&mut raw, 9, 15, 23, 15, fg); for x in [10, 14, 18, 22] { tray_line(&mut raw, x, 16, x - 1, 24, fg); } }
-        _ => { tray_circle(&mut raw, 16, 16, 8, fg, false); tray_circle(&mut raw, 16, 16, 2, fg, true); }
+        "butterfly" => {
+            tray_line(&mut raw, 16, 13, 16, 24, fg);
+            tray_circle(&mut raw, 11, 12, 4, fg, false);
+            tray_circle(&mut raw, 21, 12, 4, fg, false);
+            tray_circle(&mut raw, 12, 19, 3, fg, false);
+            tray_circle(&mut raw, 20, 19, 3, fg, false);
+        }
+        "balloon" => {
+            tray_circle(&mut raw, 16, 12, 7, fg, false);
+            tray_line(&mut raw, 16, 19, 16, 23, fg);
+            tray_line(&mut raw, 12, 24, 20, 24, fg);
+        }
+        "rocket" => {
+            tray_line(&mut raw, 16, 7, 22, 19, fg);
+            tray_line(&mut raw, 22, 19, 10, 19, fg);
+            tray_line(&mut raw, 10, 19, 16, 7, fg);
+            tray_circle(&mut raw, 16, 13, 2, fg, false);
+            tray_line(&mut raw, 12, 19, 9, 23, fg);
+            tray_line(&mut raw, 20, 19, 23, 23, fg);
+        }
+        "cloud" => {
+            tray_circle(&mut raw, 11, 17, 5, fg, false);
+            tray_circle(&mut raw, 17, 14, 7, fg, false);
+            tray_circle(&mut raw, 22, 18, 4, fg, false);
+            tray_line(&mut raw, 8, 21, 24, 21, fg);
+        }
+        "plane" => {
+            tray_line(&mut raw, 25, 8, 7, 16, fg);
+            tray_line(&mut raw, 7, 16, 14, 18, fg);
+            tray_line(&mut raw, 14, 18, 17, 24, fg);
+            tray_line(&mut raw, 17, 24, 25, 8, fg);
+            tray_line(&mut raw, 14, 18, 20, 13, fg);
+        }
+        "dandelion" => {
+            tray_line(&mut raw, 16, 13, 16, 25, fg);
+            for (x, y) in [
+                (16, 7),
+                (10, 10),
+                (22, 10),
+                (8, 15),
+                (24, 15),
+                (12, 6),
+                (20, 6),
+            ] {
+                tray_line(&mut raw, 16, 14, x, y, fg);
+                tray_circle(&mut raw, x, y, 1, fg, true);
+            }
+        }
+        "kite" => {
+            tray_line(&mut raw, 16, 6, 23, 14, fg);
+            tray_line(&mut raw, 23, 14, 16, 22, fg);
+            tray_line(&mut raw, 16, 22, 9, 14, fg);
+            tray_line(&mut raw, 9, 14, 16, 6, fg);
+            tray_line(&mut raw, 16, 6, 16, 22, fg);
+            tray_line(&mut raw, 9, 14, 23, 14, fg);
+            tray_line(&mut raw, 16, 22, 19, 26, fg);
+        }
+        "bubble" => {
+            tray_circle(&mut raw, 16, 15, 8, fg, false);
+            tray_circle(&mut raw, 11, 11, 2, fg, false);
+            tray_circle(&mut raw, 12, 12, 1, fg, true);
+        }
+        "jellyfish" => {
+            tray_circle(&mut raw, 16, 13, 8, fg, false);
+            tray_line(&mut raw, 9, 15, 23, 15, fg);
+            for x in [10, 14, 18, 22] {
+                tray_line(&mut raw, x, 16, x - 1, 24, fg);
+            }
+        }
+        _ => {
+            tray_circle(&mut raw, 16, 16, 8, fg, false);
+            tray_circle(&mut raw, 16, 16, 2, fg, true);
+        }
     }
     tauri::image::Image::new_owned(raw, 32, 32)
 }
@@ -183,16 +250,12 @@ pub(crate) fn app_icon_image() -> tauri::image::Image<'static> {
     let source = image::load_from_memory(APP_ICON_PNG)
         .expect("bundled application icon is invalid")
         .to_rgba8();
-    let resized = image::imageops::resize(
-        &source,
-        32,
-        32,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let resized = image::imageops::resize(&source, 32, 32, image::imageops::FilterType::Lanczos3);
     tauri::image::Image::new_owned(resized.into_raw(), 32, 32)
 }
 
 fn main() {
+    utils::logger::init();
     // 初始化 ONNX Runtime DLL 搜索路径（ort load-dynamic 模式，在 OCR 线程前调用）
     init_ort_dylib();
 
@@ -669,12 +732,13 @@ fn main() {
                         tauri::PhysicalPosition::new(x, y),
                     ));
                     // Normalize legacy/window coordinates to the visual-anchor format used by the frontend.
-                    let _ = app
-                        .state::<config::ConfigManager>()
-                        .set_window_position("orb", config::WindowPosition {
+                    let _ = app.state::<config::ConfigManager>().set_window_position(
+                        "orb",
+                        config::WindowPosition {
                             x: x + position_offset,
                             y: y + position_offset,
-                        });
+                        },
+                    );
                 } else {
                     let margin = 20.0f64;
                     // 取主屏工作区（已排除任务栏），避免浮球被任务栏遮挡
@@ -727,6 +791,7 @@ fn main() {
             commands::hide_orb,
             commands::toggle_orb,
             commands::harden_webview_window,
+            commands::write_client_log,
             commands::show_palette,
             commands::hide_palette,
             commands::start_scroll_navigation,

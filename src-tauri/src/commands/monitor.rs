@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// 标准模式各显示样式的首帧窗口尺寸（逻辑像素）：`(layout, width, height)`。
 ///
 /// **真源在前端** `src/constants/systemMonitorConfig.ts::MONITOR_LAYOUT_OPTIONS` ——
@@ -42,7 +41,6 @@ fn monitor_window_size_from_config(config: Option<&str>) -> (f64, f64) {
         .map(|(_, width, height)| (*width, *height))
         .unwrap_or(MONITOR_LAYOUT_DEFAULT_SIZE)
 }
-
 
 /// 显示系统监控悬浮窗（优先恢复到上次记忆位置，未记忆时跟随鼠标，多显示器边界翻转）
 /// 并启动采集线程
@@ -122,7 +120,6 @@ pub fn show_monitor_window(
     Ok(())
 }
 
-
 /// 隐藏系统监控悬浮窗并停止采集线程。窗口保留以避免再次打开时与销毁竞态。
 #[tauri::command]
 pub fn hide_monitor_window(app: tauri::AppHandle) -> Result<(), String> {
@@ -135,7 +132,6 @@ pub fn hide_monitor_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// 获取系统监控工具启用状态
 #[tauri::command]
 pub fn get_system_monitor_enabled(
@@ -143,7 +139,6 @@ pub fn get_system_monitor_enabled(
 ) -> Result<bool, String> {
     config_manager.get_system_monitor_enabled()
 }
-
 
 /// 设置系统监控工具启用状态并持久化。禁用时停采并隐藏窗口，避免重启销毁竞态。
 #[tauri::command]
@@ -163,7 +158,6 @@ pub fn set_system_monitor_enabled(
     config_manager.update_system_monitor_enabled(enabled)
 }
 
-
 /// 获取系统监控配置（JSON 字符串，空串表示未设置）
 #[tauri::command]
 pub fn get_system_monitor_config(
@@ -171,7 +165,6 @@ pub fn get_system_monitor_config(
 ) -> Result<String, String> {
     config_manager.get_system_monitor_config()
 }
-
 
 /// 更新系统监控配置并持久化。解析 intervalMs 即时生效（无需重启采集线程）
 #[tauri::command]
@@ -191,7 +184,6 @@ pub fn set_system_monitor_config(
     }
     config_manager.update_system_monitor_config(config)
 }
-
 
 #[cfg(test)]
 mod tests {

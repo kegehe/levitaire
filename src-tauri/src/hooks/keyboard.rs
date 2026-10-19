@@ -381,11 +381,12 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     // 不能直接读取后端缓存的高亮：快速松开时最新异步同步可能尚未到达。
                     // GetCursorPos 仅是一次轻量 Win32 读取，必须在 keyup 回调当下执行，
                     // 这样 begin_wheel 延迟或前端 IPC 排队期间鼠标移动也不会改变结果。
-                    let release_pos = crate::automation::get_mouse_position()
-                        .unwrap_or(crate::automation::Point {
+                    let release_pos = crate::automation::get_mouse_position().unwrap_or(
+                        crate::automation::Point {
                             x: crate::quick_input::state().x,
                             y: crate::quick_input::state().y,
-                        });
+                        },
+                    );
                     crate::quick_input::mark_hold_release_pending(release_pos.x, release_pos.y);
                     if crate::quick_input::is_active() {
                         if let Some(app) = KB_STATE.app_handle.get() {
@@ -678,9 +679,9 @@ fn handle_ctrl_c(
         // 窗口四周有投影留白（见 hooks::TOOLBAR_SHADOW_MARGIN）：容器在窗口内左上角
         // 内缩一个留白，窗口位置要相应左移，工具栏才落在光标原位（y 不补偿，留白
         // 只在左右与底部）。
-        let toolbar_margin =
-            (crate::hooks::TOOLBAR_SHADOW_MARGIN * win.scale_factor().unwrap_or(1.0)).round()
-                as i32;
+        let toolbar_margin = (crate::hooks::TOOLBAR_SHADOW_MARGIN
+            * win.scale_factor().unwrap_or(1.0))
+        .round() as i32;
         let x = cursor_pos.x - toolbar_margin;
         let y = cursor_pos.y + 20;
         let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(

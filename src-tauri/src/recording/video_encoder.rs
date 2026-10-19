@@ -470,9 +470,7 @@ mod tests {
             .finish(std::time::Duration::from_secs(30))
             .expect("ffmpeg 应正常退出");
 
-        let size = std::fs::metadata(&output)
-            .expect("应当产出 mp4 文件")
-            .len();
+        let size = std::fs::metadata(&output).expect("应当产出 mp4 文件").len();
         assert!(size > 0, "编码产物不应为空");
         let _ = std::fs::remove_file(&output);
     }

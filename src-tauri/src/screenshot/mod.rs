@@ -38,12 +38,10 @@ pub struct CachedScreen {
     pub origin_y: i32,
 }
 
-// Keep the raw BGRA allocation bounded. A 100 MP capture needs about 381 MiB
-// before PNG encoding, and encoding temporarily creates another RGBA buffer,
-// the PNG output, and a base64 string. That peak can crash the WebView process
-// on machines already under memory pressure. 32 MP still covers common UHD
-// and multi-monitor desktops while keeping the raw frame below 128 MiB.
-pub const MAX_SCREENSHOT_PIXELS: u64 = 32_000_000;
+// Keep the raw BGRA allocation bounded. Encoding temporarily creates another
+// RGBA buffer, the PNG output, and a base64 string. 24 MP keeps the raw frame
+// below 96 MiB and leaves headroom for WebView2 renderers under memory pressure.
+pub const MAX_SCREENSHOT_PIXELS: u64 = 24_000_000;
 /// Keep encoded screenshot payloads below the IPC and WebView transfer limit.
 pub const MAX_SCREENSHOT_PNG_BYTES: usize = 64 * 1024 * 1024;
 

@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// 调用 AI 接口
 #[tauri::command]
 pub async fn call_ai(
@@ -23,7 +22,6 @@ pub async fn call_ai(
     }
     ai_service.call(&prompt, system_prompt.as_deref()).await
 }
-
 
 /// 流式调用 AI 接口，通过事件推送文本片段
 #[tauri::command]
@@ -61,17 +59,25 @@ pub async fn call_ai_stream(
     // 发起新流式调用前重置取消标志（防止上一次取消影响本次请求），
     // 前端「取消」通过 cancel_ai_stream 命令置位，call_stream 每帧检测后提前终止。
     let result = ai_service
-        .call_stream(request_id, &prompt, system_prompt.as_deref(), move |chunk| {
-            let _ = app_handle.emit(
-                "ai-stream",
-                serde_json::json!({ "type": "chunk", "data": chunk, "requestId": request_id }),
-            );
-        })
+        .call_stream(
+            request_id,
+            &prompt,
+            system_prompt.as_deref(),
+            move |chunk| {
+                let _ = app_handle.emit(
+                    "ai-stream",
+                    serde_json::json!({ "type": "chunk", "data": chunk, "requestId": request_id }),
+                );
+            },
+        )
         .await;
 
     match result {
         Ok(_) => {
-            let _ = app.emit("ai-stream", serde_json::json!({ "type": "done", "requestId": request_id }));
+            let _ = app.emit(
+                "ai-stream",
+                serde_json::json!({ "type": "done", "requestId": request_id }),
+            );
             Ok(())
         }
         Err(e) => {
@@ -86,16 +92,11 @@ pub async fn call_ai_stream(
     }
 }
 
-
 /// 请求取消当前流式 AI 调用（前端点取消时调用）
 #[tauri::command]
-pub fn cancel_ai_stream(
-    request_id: Option<u64>,
-    ai_service: State<'_, crate::ai::AiService>,
-) {
+pub fn cancel_ai_stream(request_id: Option<u64>, ai_service: State<'_, crate::ai::AiService>) {
     ai_service.request_cancel(request_id);
 }
-
 
 /// 获取当前 AI 配置
 #[tauri::command]
@@ -104,7 +105,6 @@ pub fn get_ai_config(
 ) -> Result<crate::config::AiConfig, String> {
     config_manager.get_ai_config()
 }
-
 
 /// 更新 AI 配置
 #[tauri::command]
