@@ -1,11 +1,11 @@
 {
-  "version": "0.1.7",
-  "notes": "新增系统清理工具与可恢复隔离区；托盘菜单新增「重启应用」；截图标注画后可调整；快速输入二级子转盘与音效；便利贴缩放与图片；安装包体积 92MB→37MB",
-  "pub_date": "2026-10-13T04:36:42.801Z",
+  "version": "0.1.8",
+  "notes": "系统清理面板改版：构成卡 + 索引行，标题与构成条同源；修复录制取消死锁、便利贴丢字、长截图丢行、GIF 常驻内存等一批发布前问题。Rust 1.89+。",
+  "pub_date": "2026-10-21T09:00:07.039Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDZZeHFNNWdaVnNxZGdSblVZNnc0SlVRZjBqMVdiY0JBNVlQTDlOUm9wM2ExdW9BL09KSmFZOUc0Mnk4QlpqTS9nMHdUS2tYRkk5Tk13QjQwOWtsSFE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODY2MjAyCWZpbGU6TGV2aXRhaXJlXzAuMS43X3g2NC1zZXR1cC5leGUKT3dsQ3ZYVWZ1QnZiV00rN1p6ZmRpOWFvbXE0d2NlcU5Yb3hMZ0M3NWtwU3NuaHNUcjZOUFlBMWJoaWlOTG4wK0Y4NWFRbXFtYjRQWGJrVlZrMjNqQnc9PQo=",
-      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.7/Levitaire_0.1.7_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDMvOEllMUlIOGl5SDhybVJ5aGY1ZVNYekN0WWNLb0cyaXJVamlrMmZndmIwdUZmdWF2VlpFbGk3NlpqakwrOUhwdGdiM0k5cjU2VmhRem9URWhzUWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNTczMjA2CWZpbGU6TGV2aXRhaXJlXzAuMS44X3g2NC1zZXR1cC5leGUKY1VuY0RmcVRkait6OGN6Q3FiM3BBUEtDdnVCdmFtU1R5dU1uSFBPUGtSVnUrMFhNQjFiaVFVcllMU0J0bitrOGJScGRPbWl5Z0oySmpKZXl1dnlVQVE9PQo=",
+      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.8/Levitaire_0.1.8_x64-setup.exe"
     }
   }
 }
