@@ -1362,8 +1362,11 @@ pub fn parse_trigger_key(name: &str) -> Option<u16> {
     None
 }
 
-/// vk_code 转回可读名（与 parse_trigger_key 保持一一对应）
-/// vk_code 转回可读名（与 parse_trigger_key 保持一一对应）
+/// vk_code 转回可读名（与 parse_trigger_key 保持一一对应）。
+///
+/// 生产路径不再调用：键盘钩子回调里不允许做格式化 / 落盘（见 keyboard.rs 的
+/// 触发键分支）。保留给测试与后续非实时路径的诊断使用。
+#[allow(dead_code)]
 pub fn vk_to_name(vk: u16) -> String {
     match vk {
         0x14 => "CapsLock".to_string(),

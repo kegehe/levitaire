@@ -164,11 +164,16 @@ function OverlaySwitcher() {
   // 但 webview 可能还在加载 JS/React，此时后端发出的 recording-select-switch 事件
   // 会丢失（前端监听器尚未注册）。通过主动查询后端状态来弥补事件丢失。
   useEffect(() => {
+    let disposed = false;
     invoke<boolean>("is_recording_select_active")
       .then((active) => {
-        if (active) setMode("recording");
+        // 查询在监听器注册前发出；卸载/取消后返回的过期快照不能再改 mode。
+        if (!disposed && active) setMode("recording");
       })
       .catch(() => {});
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   useEffect(() => {

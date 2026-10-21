@@ -419,33 +419,38 @@ pub unsafe fn set_clipboard_text_pub(text: &str) -> bool {
 /// 那样两次调用之间若有人（用户自己按 Ctrl+C）写了剪贴板，拿到的是**对方**的序号，
 /// 之后 `current == write_sequence` 会误判「没人改过」，回滚时把用户自己的复制覆盖掉。
 unsafe fn write_clipboard_text(text: &str) -> Option<u32> {
-    // 标记为应用自写：剪贴板监听器（WM_CLIPBOARDUPDATE）据此跳过，
-    // 避免把粘贴/替换/恢复的原内容误入快速输入转盘历史。
-    crate::clipboard::listener::mark_self_write(text);
-    if OpenClipboard(None).is_err() {
-        return None;
-    }
-
-    let _ = EmptyClipboard();
-
+    // ★ 先在私有内存里备好数据，再打开 / 清空剪贴板：分配或复制失败时，用户
+    //   原来的剪贴板内容还没被动过。原来的顺序是先 EmptyClipboard 再分配，
+    //   分配一失败原有内容就永久丢失了。
     let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let byte_len = utf16.len() * 2;
     let hmem = match GlobalAlloc(GMEM_MOVEABLE, byte_len) {
-        Ok(h) => h,
-        Err(_) => {
-            let _ = CloseClipboard();
-            return None;
-        }
+        Ok(handle) => handle,
+        Err(_) => return None,
     };
     let ptr = GlobalLock(hmem);
     if ptr.is_null() {
         // GlobalLock 失败，hmem 仍有效但无法写入，必须释放避免泄漏
         let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
-        let _ = CloseClipboard();
         return None;
     }
     std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr as *mut u16, utf16.len());
     let _ = GlobalUnlock(hmem);
+
+    // 标记为应用自写：剪贴板监听器（WM_CLIPBOARDUPDATE）据此跳过，
+    // 避免把粘贴/替换/恢复的原内容误入快速输入转盘历史。只在实际要写之前标记，
+    // 分配失败时不留一个没有对应剪贴板事件的陈旧标记。
+    crate::clipboard::listener::mark_self_write(text);
+
+    if OpenClipboard(None).is_err() {
+        let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
+        return None;
+    }
+    if EmptyClipboard().is_err() {
+        let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));
+        let _ = CloseClipboard();
+        return None;
+    }
     let set_ok = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))).is_ok();
     if !set_ok {
         let _ = windows::Win32::Foundation::GlobalFree(Some(hmem));

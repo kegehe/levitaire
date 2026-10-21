@@ -48,9 +48,18 @@ export default function PinOcrResult() {
   }, []);
 
   useEffect(() => {
-    const unlistenTheme = subscribeThemePreferences();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    subscribeThemePreferences()
+      .then((stop) => {
+        // 订阅在 resolve 前卸载时 cleanup 已跑过，拿不到 unlisten；这里自行取消。
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
     return () => {
-      unlistenTheme.then((fn) => fn());
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -114,7 +123,13 @@ export default function PinOcrResult() {
 
   const copy = async () => {
     if (!text) return;
-    await invoke("copy_text", { text });
+    try {
+      setActionError("");
+      await invoke("copy_text", { text });
+    } catch (err) {
+      console.error("Failed to copy OCR text:", err);
+      setActionError("复制失败");
+    }
   };
 
   const handleSearch = async () => {

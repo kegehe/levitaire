@@ -81,15 +81,29 @@ pub fn to_hex(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// 将十六进制字符串解码为字节数组
+/// 将十六进制字符串解码为字节数组。
+///
+/// 按**字节**校验、按字节分块，绝不用 `&hex[i..i + 2]` 切字符串：`hex.len()`
+/// 是字节数，遇到多字节 UTF-8 字符时切点会落在字符中间而 panic。这个函数在启动
+/// 加载配置时被调用（config.json 的 apiKeyEncrypted），配置文件写坏不应让应用崩。
 pub fn from_hex(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
+    let bytes = hex.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return Err("无效的十六进制字符串长度".to_string());
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("十六进制解码失败: {}", e))
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    bytes
+        .chunks_exact(2)
+        .map(|pair| match (nibble(pair[0]), nibble(pair[1])) {
+            (Some(high), Some(low)) => Ok(high * 16 + low),
+            _ => Err("十六进制字符串包含非十六进制字符".to_string()),
         })
         .collect()
 }
@@ -116,6 +130,18 @@ mod tests {
     fn test_hex_invalid_length() {
         assert!(from_hex("1").is_err());
         assert!(from_hex("123").is_err());
+    }
+
+    #[test]
+    fn test_hex_accepts_uppercase() {
+        assert_eq!(from_hex("00FF").unwrap(), vec![0, 255]);
+    }
+
+    #[test]
+    fn test_hex_rejects_non_ascii_without_panicking() {
+        // "aéb" 的字节长度是 4（偶数），旧实现会在第 2 个字节处切进 'é' 直接 panic。
+        assert!(from_hex("aéb").is_err());
+        assert!(from_hex("0é").is_err());
     }
 
     #[test]

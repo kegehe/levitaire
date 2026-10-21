@@ -1819,7 +1819,22 @@ fn destroy_recording_controls_window(app: &tauri::AppHandle) {
     }
 }
 
-fn set_recording_capture_protection(app: &tauri::AppHandle) {
+/// 预先取好录制相关的两扇 WebView2 窗的原生句柄。
+///
+/// ★ 必须在拿 `RECORDING_CONTROLS_LIFECYCLE_LOCK` **之前**调用。
+///   `hwnd()` 在非主线程上是阻塞式主线程往返（tauri 的 `window_getter!` 会
+///   `send_user_message` + `rx.recv()`）；若持锁时主线程正好在等同一把锁，
+///   两边就会互等，界面全僵。取句柄本身不要求任何一致性，放在锁外即可。
+fn recording_window_handles(app: &tauri::AppHandle) -> (Option<HWND>, Option<HWND>) {
+    let hwnd_of = |label: &str| {
+        app.get_webview_window(label)
+            .and_then(|window| window.hwnd().ok())
+    };
+    (hwnd_of("screenshot-overlay"), hwnd_of("recording-controls"))
+}
+
+/// 用预先取好的句柄恢复两扇窗的捕获保护（纯 Win32 调用，不阻塞）。
+fn apply_recording_capture_protection(handles: (Option<HWND>, Option<HWND>)) {
     // ⚠ 这里**只**处理这两扇 WebView2 窗，不要改成"遍历所有自有窗统一设 WDA_NONE"：
     // 全屏录制的原生指示层（`recording::indicator`）正是靠 WDA_EXCLUDEFROMCAPTURE
     // 才做到"用户看得见、成片里没有"，被改成 WDA_NONE 就会重新被 BitBlt 录进视频。
@@ -1827,22 +1842,15 @@ fn set_recording_capture_protection(app: &tauri::AppHandle) {
     // The selection outline and mask sit outside the recorded region. Applying
     // WDA_EXCLUDEFROMCAPTURE to this transparent WebView2 window makes its
     // visible content disappear on some Windows versions, so keep it visible.
-    if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
-        if let Ok(hwnd) = overlay.hwnd() {
-            unsafe {
-                let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
-            }
+    for hwnd in [handles.0, handles.1].into_iter().flatten() {
+        unsafe {
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
         }
     }
-    // Transparent WebView2 windows disappear from the desktop on some Windows
-    // versions when WDA_EXCLUDEFROMCAPTURE is applied. Keep the controls visible.
-    if let Some(controls) = app.get_webview_window("recording-controls") {
-        if let Ok(hwnd) = controls.hwnd() {
-            unsafe {
-                let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
-            }
-        }
-    }
+}
+
+fn set_recording_capture_protection(app: &tauri::AppHandle) {
+    apply_recording_capture_protection(recording_window_handles(app));
 }
 
 /// 弹出文件保存对话框保存 GIF

@@ -648,10 +648,13 @@ fn gif_recording_loop(app: tauri::AppHandle, gen: u64) {
         state.finish_encoding();
         return;
     }
+    // 结果只通过下面的 done 事件（gifBase64）交给前端。后端不再额外保存一份
+    // raw + base64：64MB 的 GIF 会因此常驻约 149MB，而 RecordResult 目前没有任何
+    // 读取方（take_result 无人调用）。保留结构本身，供将来真需要落盘结果时使用。
     if let Ok(mut guard) = state.result.lock() {
         *guard = Some(RecordResult {
-            data: gif_bytes,
-            base64: b64.clone(),
+            data: Vec::new(),
+            base64: String::new(),
             file_path: None,
             frame_count,
             width: region.width,

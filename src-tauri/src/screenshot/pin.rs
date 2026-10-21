@@ -83,7 +83,8 @@ fn pins_locked<F, R>(f: F) -> R
 where
     F: FnOnce(&mut HashMap<u32, PinWindow>) -> R,
 {
-    let mut guard = PINS.lock().expect("PINS mutex poisoned");
+    // 其他模块统一忽略中毒（持锁闭包里 panic 不应让整块功能永久瘫痪）。
+    let mut guard = PINS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
     f(map)
 }

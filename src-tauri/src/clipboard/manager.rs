@@ -159,26 +159,18 @@ impl ClipboardManager {
 
     fn set_clipboard(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
-            OpenClipboard(None)?;
-
-            // 清空剪贴板，检查是否成功
-            if EmptyClipboard().is_err() {
-                let _ = CloseClipboard();
-                return Err("EmptyClipboard failed".into());
-            }
-
             // CF_UNICODETEXT: UTF-16 with null terminator
+            // ★ 先在私有内存里备好，再打开 / 清空剪贴板：分配失败时用户原来的
+            //   剪贴板内容还在（原实现先 EmptyClipboard，且 GlobalAlloc 的 `?`
+            //   会跳过 CloseClipboard 直接把剪贴板留在打开状态）。
             let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
             let byte_size = utf16.len() * 2;
-
             let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_size)?;
             let ptr = GlobalLock(hmem);
             if ptr.is_null() {
                 let _ = GlobalFree(Some(hmem));
-                let _ = CloseClipboard();
                 return Err("GlobalLock failed".into());
             }
-
             std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr as *mut u16, utf16.len());
 
             // GlobalUnlock 失败通常不影响已复制的数据，但应记录
@@ -189,12 +181,21 @@ impl ClipboardManager {
                 );
             }
 
+            if let Err(error) = OpenClipboard(None) {
+                let _ = GlobalFree(Some(hmem));
+                return Err(error.into());
+            }
+            // 清空剪贴板，检查是否成功
+            if EmptyClipboard().is_err() {
+                let _ = GlobalFree(Some(hmem));
+                let _ = CloseClipboard();
+                return Err("EmptyClipboard failed".into());
+            }
             if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))).is_err() {
                 let _ = GlobalFree(Some(hmem));
                 let _ = CloseClipboard();
                 return Err("SetClipboardData failed".into());
             }
-
             CloseClipboard()?;
         }
         Ok(())

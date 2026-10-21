@@ -34,20 +34,17 @@ Levitaire 是一个 Windows 悬浮工具，采用 Rust + Tauri 技术栈，主�
 
 1. **Rust 工具链**
    - 安装地址: https://rustup.rs/
-   - 版本要求: 1.70+
+   - 版本要求: 1.89+（下限由 `tauri-plugin-notification` → `notify-rust 4.18` 决定；`ort` 为 1.88），使用 MSVC 工具链
 
 2. **Node.js**
-   - 版本要求: 18+
+   - 版本要求: 20.19+ 或 22.12+
    - 用于前端开发和构建
 
-3. **Tauri CLI**
-   ```bash
-   cargo install tauri-cli
-   ```
-
-4. **Visual Studio Build Tools**
+3. **Visual Studio Build Tools**
    - 需要安装 C++ 构建工具
    - 下载地址: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+
+> 无需单独安装 Tauri CLI：`npm install` 已包含 `@tauri-apps/cli`，统一走 `npm run tauri`。
 
 ### 可选工具
 
@@ -59,8 +56,8 @@ Levitaire 是一个 Windows 悬浮工具，采用 Rust + Tauri 技术栈，主�
 
 1. 克隆项目
 ```bash
-git clone https://github.com/yourusername/Levitaire.git
-cd Levitaire
+git clone https://github.com/kegehe/levitaire.git
+cd levitaire
 ```
 
 2. 安装前端依赖
@@ -70,7 +67,7 @@ npm install
 
 3. 运行开发模式
 ```bash
-cargo tauri dev
+npm run tauri dev
 ```
 
 ---
@@ -316,7 +313,7 @@ pub fn count_words(text: String) -> Result<(usize, usize), String> {
 5. **勿阻塞钩子**：不要在低级钩子回调里做耗时操作，否则会拖慢系统输入
 6. **状态管理**：新状态优先放进 Tauri `State`，避免继续新增模块级 `static`
 7. **配置读写**：新增配置项走 `config::ConfigManager`，它保证原子写入（临时文件 + rename）
-8. **提交前自检**：`npm run typecheck && npm run lint && npm run test`，以及 `cargo test`
+8. **提交前自检**：`npm run typecheck && npm run lint && npm run test`，以及 `cargo test --manifest-path src-tauri/Cargo.toml`
 9. **浮窗的逻辑宽度有系统下限（约 136）**：Windows 对「带标题栏样式」的窗口强制最小宽度
    `SM_CXMINTRACK`（150% 缩放下 = 202 物理 px = 134.67 逻辑 px），`CreateWindowEx` 与
    `SetWindowPos` 都会夹——**`setSize` 也设不回去**。tao 的 `decorations: false` 并不是去掉
@@ -613,10 +610,10 @@ mod tests {
 
 ```bash
 # 后端全部测试
-cargo test
+cargo test --manifest-path src-tauri/Cargo.toml
 
 # 只跑名字含 redact_url 的测试
-cargo test redact_url
+cargo test --manifest-path src-tauri/Cargo.toml redact_url
 
 # 前端全部测试（Vitest）
 npm run test
@@ -627,7 +624,7 @@ npm run typecheck && npm run lint
 
 ### 调试技巧
 
-1. **日志输出**: 使用内置 `crate::utils::logger::log(tag, msg)`，写入 `levitaire-debug.log`
+1. **日志输出**: 使用内置 `crate::utils::logger::log(tag, msg)`，写入 `%APPDATA%\Levitaire\levitaire.log`（超过 5 MB 轮转为 `levitaire.log.1`）
 2. **断点调试**: 使用 VS Code + CodeLLDB 扩展
 3. **Windows API 调试**: 使用 Spy++ 查看窗口消息
 
@@ -644,6 +641,9 @@ npm run typecheck && npm run lint
 - `src-tauri/tauri.conf.json` 中的 `version`
 - `package.json` 中的 `version`
 
+> `package-lock.json` 的 root version 不在脚本同步范围内；发版后执行一次
+> `npm install --package-lock-only` 可让它与产品版本保持一致（不影响构建）。
+
 ### 2. 构建发布版本
 
 发版前需先补齐两个不入库的二进制资源（见 README「可选二进制资源」）：
@@ -653,7 +653,10 @@ npm run typecheck && npm run lint
 
 ```bash
 # 一条命令：升版本号 → 打包(--bundles nsis, 含发版叠加配置) → 签名 → 生成 latest.json
-npm run release 0.1.4 "修复了…\n新增了…"
+npm run release 0.1.8 "修复了…；新增了…"
+
+# 多行说明（推荐）：UTF-8 文件，避免 shell 转义 / PowerShell 下 npm 传中文乱码
+node scripts/release.mjs 0.1.8 --notes-file release-notes.txt
 
 # 仅想手动出包不发版
 npm run tauri build -- --bundles nsis --config src-tauri/tauri.bundle.conf.json
@@ -661,16 +664,35 @@ npm run tauri build -- --bundles nsis --config src-tauri/tauri.bundle.conf.json
 
 构建完成后，安装包位于 `src-tauri/target/release/bundle/nsis/`。
 
-### 3. 发布检查清单
+> 多行说明用 `--notes-file`；PowerShell 5.1 下用 `npm run` 传中文参数可能被 cmd.exe 转码，建议 Git Bash 或直接 `node scripts/release.mjs`。
 
-- [ ] 所有测试通过
-- [ ] 版本号已更新
-- [ ] 更新日志已编写
-- [ ] 文档已更新
-- [ ] 在不同 Windows 版本上测试
+### 3. 上传与升级清单
+
+```bash
+git tag v0.1.8 && git push origin v0.1.8
+gh release create v0.1.8 \
+  "src-tauri/target/release/bundle/nsis/Levitaire_0.1.8_x64-setup.exe" \
+  "release/latest.json" --notes "发布说明"
+
+# 在线更新的 endpoint 指向 GitHub Pages 的仓库根 latest.json，必须提交并推送
+git add latest.json && git commit -m "chore: 更新在线升级清单至 v0.1.8" && git push
+```
+
+> `release/` 是本地生成物（已忽略），但仓库根 `latest.json` 不是：漏推它时
+> Pages 仍返回 200 的旧清单，所有已安装客户端都收不到新版本，且不会有任何报错。
+
+### 4. 发布检查清单
+
+- [ ] 所有测试通过（`npm run typecheck && npm run lint && npm run test`，`cargo test --manifest-path src-tauri/Cargo.toml`）
+- [ ] 版本号已更新，且三处一致
+- [ ] 更新日志已编写：新增 `docs/releases/vX.Y.Z.md` 并更新 `docs/releases/README.md`
+- [ ] 打包所需二进制资源已就位（`ffmpeg.exe` / `onnxruntime.dll`）
+- [ ] `latest.json` 已生成、签名与本机私钥匹配
+- [ ] 在不同 Windows 版本 / 缩放下测试
 - [ ] 检查杀毒软件误报
-- [ ] 创建发布包
-- [ ] 上传到发布平台
+- [ ] tag、GitHub Release、根 `latest.json` 都已推送
+- [ ] 用上一版安装包实测一次在线升级
+- [ ] 签名私钥与口令已备份（丢失即永久无法再签名更新）
 
 ---
 
@@ -780,8 +802,8 @@ npm run tauri build -- --bundles nsis --config src-tauri/tauri.bundle.conf.json
 
 ## 联系方式
 
-- 项目主页: [GitHub](https://github.com/yourusername/Levitaire)
-- 问题反馈: [Issues](https://github.com/yourusername/Levitaire/issues)
+- 项目主页: [GitHub](https://github.com/kegehe/levitaire)
+- 问题反馈: [Issues](https://github.com/kegehe/levitaire/issues)
 
 ---
 

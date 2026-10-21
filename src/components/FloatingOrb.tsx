@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useCallback, useRef, useState, useMemo } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen, emit } from "@tauri-apps/api/event";
 import {
   applyThemePreferences,
@@ -26,8 +25,6 @@ function FloatingOrb() {
   // 它是多个 effect 的依赖，写在渲染体里会让它们每次渲染重跑（见 MEMORY.md 第 8 条）。
   const win = useMemo(() => getCurrentWebviewWindow(), []);
   const orbRef = useRef<HTMLDivElement | null>(null);
-  const windowPosOnMouseDown = useRef<PhysicalPosition | null>(null);
-  const mouseUpTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const paletteOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [orbIcon, setOrbIcon] = useState<OrbIconId>(() => getOrbIcon());
 
@@ -254,11 +251,6 @@ function FloatingOrb() {
   // payload = 是否为点击（非拖拽），由后端基于鼠标位移判定，比前端窗口位移判定更可靠
   useLayoutEffect(() => {
     const unlistenPromise = win.listen<boolean>("orb-mouseup", async (event) => {
-      // Clear the safety timeout since we received the event
-      if (mouseUpTimeout.current) {
-        clearTimeout(mouseUpTimeout.current);
-        mouseUpTimeout.current = null;
-      }
       const clicked = event.payload === true;
       if (clicked) {
         // 点击悬浮球：打开 / 收起卡片工具选择器面板（toggle）
@@ -281,19 +273,14 @@ function FloatingOrb() {
             invoke("show_palette").catch(console.error);
           }
         }, 80);
-        windowPosOnMouseDown.current = null;
         return;
       }
-      // 拖拽（payload=false 或未传）：记忆位置，仅清理状态，不弹面板
+      // 拖拽（payload=false 或未传）：记忆位置，不弹面板
       saveWindowPosition("orb");
-      windowPosOnMouseDown.current = null;
     });
 
     return () => {
       unlistenPromise.then((fn) => fn());
-      if (mouseUpTimeout.current) {
-        clearTimeout(mouseUpTimeout.current);
-      }
       if (paletteOpenTimer.current) {
         clearTimeout(paletteOpenTimer.current);
       }
@@ -343,23 +330,8 @@ function FloatingOrb() {
       // 圆形热区判定：点击球外透明留白不进入拖拽，避免空白处拖走悬浮球
       if (!isPointWithinOrb(e.clientX, e.clientY)) return;
       e.preventDefault();
-      // Clear any stale state from previous interactions
-      if (mouseUpTimeout.current) {
-        clearTimeout(mouseUpTimeout.current);
-        mouseUpTimeout.current = null;
-      }
-      // Record window position before drag to detect click vs drag later
-      try {
-        windowPosOnMouseDown.current = await win.outerPosition();
-      } catch (err) {
-        console.error("Failed to get window position:", err);
-      }
-      // Safety timeout: if orb-mouseup event is not received within 5 seconds,
-      // clean up the stale position to prevent false matches on next interaction
-      mouseUpTimeout.current = setTimeout(() => {
-        windowPosOnMouseDown.current = null;
-        mouseUpTimeout.current = null;
-      }, 5000);
+      // 点击 / 拖拽的判定由后端 orb-mouseup 的 payload 负责；这里直接开始拖拽，
+      // 不再先等一次 outerPosition() 的 IPC（会拖慢每次按下到跟手的间隔）。
       try {
         await win.startDragging();
       } catch (err) {

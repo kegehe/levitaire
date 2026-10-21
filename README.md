@@ -12,7 +12,7 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-blue.svg">
   <img alt="Release" src="https://img.shields.io/github/v/release/kegehe/levitaire">
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.88%2B-orange.svg">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.89%2B-orange.svg">
   <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2.x-green.svg">
 </p>
 
@@ -59,6 +59,7 @@ Levitaire 是一款面向 Windows 的悬浮效率工具集。运行后一个悬�
 - **时间工具** — 一个悬浮窗内置时钟、倒计时、番茄钟、秒表、月历五个页签；月历带农历与 24 节气（本地历法计算，不联网）
 - **待办清单** — 分组待办、截止时间与提醒、重复任务、导入导出，支持全局快捷键快速添加
 - **便利贴** — 桌面多张便签、6 种预置纸色、实时编辑并持久化；管理窗可一键收起 / 一键把已收起的全部贴回
+- **系统清理** — 扫描并清理用户级临时文件与开发缓存，逐项写明后果、占用中的文件一律跳过；删除先进可恢复隔离区（默认关闭，需在设置 / 工具面板开启）
 
 ### 🧰 通用工具
 
@@ -92,7 +93,7 @@ Levitaire 是一款面向 Windows 的悬浮效率工具集。运行后一个悬�
 ### 环境要求
 
 - Windows 10 / 11（x64）
-- [Rust](https://rustup.rs/) 1.88+（下限由 PaddleOCR 的 `ort` 依赖决定；tauri 2.x 自身只要求 1.77.2），需 Visual Studio C++ 生成工具（MSVC 工具链）
+- [Rust](https://rustup.rs/) 1.89+（下限由 `tauri-plugin-notification` → `notify-rust 4.18` 决定；`ort` 为 1.88），需 Visual Studio C++ 生成工具（MSVC 工具链）
 - [Node.js](https://nodejs.org/) 20.19+ 或 22.12+（本项目使用 npm，Node 自带 npm 即可）
 
 > 无需单独安装 Tauri CLI，`npm install` 已包含 `@tauri-apps/cli`，统一走 `npm run tauri`。
@@ -139,15 +140,19 @@ PaddleOCR 以 `load-dynamic` 模式运行时加载 ONNX Runtime（不静态链�
 ```bash
 # 升版本号（package.json / Cargo.toml / tauri.conf.json 三处校验并同步）
 # + 打包 NSIS + 签名 + 生成 release/latest.json（同时写入仓库根 latest.json）
-npm run release 0.1.6 "修复了…\n新增了…"
+npm run release 0.1.8 "修复了…；新增了…"
+
+# 多行说明（推荐）：UTF-8 文件，避免 shell 转义 / PowerShell 下 npm 传中文乱码
+# node scripts/release.mjs 0.1.8 --notes-file release-notes.txt
 
 # 发布：打 tag、上传安装包与升级清单、更新 GitHub Pages 上的 latest.json
-git tag v0.1.6 && git push origin v0.1.6
-gh release create v0.1.6 "src-tauri/target/release/bundle/nsis/Levitaire_0.1.6_x64-setup.exe" "release/latest.json" --notes "发布说明"
-git add latest.json && git commit -m "chore: 更新在线升级清单至 v0.1.6" && git push
+git tag v0.1.8 && git push origin v0.1.8
+gh release create v0.1.8 "src-tauri/target/release/bundle/nsis/Levitaire_0.1.8_x64-setup.exe" "release/latest.json" --notes "发布说明"
+git add latest.json && git commit -m "chore: 更新在线升级清单至 v0.1.8" && git push
 ```
 
-- 仅同步版本号不打包：`npm run release:bump 0.2.0`；不重新出包、只签现有安装包：`node scripts/release.mjs 0.1.6 --no-build`。
+- 仅同步版本号不打包：`npm run release:bump 0.2.0`；不重新出包、只签现有安装包：`node scripts/release.mjs 0.1.8 --no-build`。
+- 多行说明用 `--notes-file <utf8.txt>`。PowerShell 5.1 下用 `npm run` 传中文参数可能被 cmd.exe 转码，建议 Git Bash 或直接 `node scripts/release.mjs`。
 - 在线更新从 `https://kegehe.github.io/levitaire/latest.json` 读取（GitHub Pages 源 = `master` 分支根目录），因此**仓库根 `latest.json` 必须提交并推送**；`release/` 为本地生成物，已加入 `.gitignore`。
 - 签名私钥与口令保存在本机 `~/.tauri/` 且不入库，**丢失任一个即永久无法再签名更新包**，务必备份。
 - 更多细节见[开发指南 · 发布流程](docs/developer-guide.md#发布流程)。

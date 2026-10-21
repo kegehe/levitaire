@@ -133,6 +133,57 @@ describe("StickyNote", () => {
     });
   });
 
+  it("收起失败后不停写，后续输入仍会落盘", async () => {
+    mockGetNote(noteWith({ id: "note-1", content: "旧文字" }));
+    const { container } = render(<StickyNote />);
+    const editor = await screen.findByLabelText("便利贴内容");
+    await waitFor(() => expect(editor.textContent).toContain("旧文字"));
+
+    // 收起请求失败（真实触发：正文超过后端 10 万字上限时 update_content 返回 Err）。
+    // 回归点：失败后窗口还在，destroyedRef 不能停在 true，否则后续输入全部静默丢失。
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "get_sticky_note") {
+        return Promise.resolve(noteWith({ id: "note-1", content: "旧文字" }));
+      }
+      if (command === "get_sticky_note_images_dir") {
+        return Promise.resolve("C:/data/levitaire/sticky-images");
+      }
+      if (command === "collect_sticky_note") {
+        return Promise.reject("便利贴内容不能超过 100000 字");
+      }
+      return Promise.resolve();
+    });
+
+    getEditor(container).textContent = "失败后继续写";
+    fireEvent.input(getEditor(container));
+    fireEvent.keyDown(getEditor(container), { key: "Escape" });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("collect_sticky_note", {
+        id: "note-1",
+        content: "失败后继续写",
+      });
+    });
+    await screen.findByText(/收起失败/);
+
+    getEditor(container).textContent = "还在写";
+    fireEvent.input(getEditor(container));
+
+    await waitFor(
+      () => {
+        expect(mockInvoke).toHaveBeenCalledWith("update_sticky_note_content", {
+          id: "note-1",
+          content: "还在写",
+        });
+      },
+      { timeout: 2000 },
+    );
+
+    // 本用例替换了全局 invoke 实现；恢复成无害的 resolve，避免泄漏到后续用例
+    // （不能 mockReset：组件卸载时还会走一次 flushSave，undefined.catch 会直接炸）。
+    mockInvoke.mockImplementation(() => Promise.resolve());
+  });
+
   it("点击纸色圆点更新颜色", async () => {
     mockGetNote(noteWith({ id: "note-1", content: "hi", colorId: "yellow" }));
     render(<StickyNote />);

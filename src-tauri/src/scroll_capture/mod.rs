@@ -122,12 +122,9 @@ impl StoredResult {
         remaining == 0
     }
 
-    fn longest_prefix_match(&self, rows: &[u64]) -> usize {
-        longest_match(rows, &self.row_signatures, false)
-    }
-
-    fn longest_suffix_match(&self, rows: &[u64]) -> usize {
-        longest_match(rows, &self.row_signatures, true)
+    /// 合并一帧时可以跳过的行数（见 [`reusable_rows`] 的规则）。
+    fn reuse_rows(&self, rows: &[u64], direction: i8) -> usize {
+        reusable_rows(rows, &self.row_signatures, direction)
     }
 
     fn summary(&self, result_id: u64) -> LongCaptureSummary {
@@ -144,22 +141,55 @@ impl StoredResult {
 
 const MIN_REVISIT_ROWS: usize = 3;
 
-fn longest_match(candidate: &[u64], stitched: &[u64], suffix: bool) -> usize {
-    if candidate.len() < MIN_REVISIT_ROWS || stitched.len() < MIN_REVISIT_ROWS {
+/// 合并一帧时，能安全跳过的行数。
+///
+/// 1. 整段 candidate 正好贴在拼接边上 → 无论多短都跳过（与 HEAD 之前那版
+///    starts_with / ends_with 的行为一致；HEAD 那版对 <3 行返回 0，会把 1、2 行的
+///    微滚动重复追加。贴边重复行本身内容相同，跳过不会丢可见内容）。
+/// 2. 整段 candidate 出现在成图别处 → 只有达到 MIN_REVISIT_ROWS 才跳过；
+///    太短的片段在空白行 / 重复表格行里太容易误命中。
+/// 3. 只匹配到一部分时，只信任贴着拼接边的那一段（向下=成图尾部，向上=成图头部），
+///    且同样要求至少 MIN_REVISIT_ROWS 行。否则宁可全部追加 —— 凭一次中间匹配
+///    就少追加几行，会直接丢掉用户新看到的内容。
+fn reusable_rows(candidate: &[u64], stitched: &[u64], direction: i8) -> usize {
+    if candidate.is_empty() || stitched.is_empty() {
         return 0;
+    }
+    let edge_match = if direction < 0 {
+        candidate.len() <= stitched.len() && candidate == &stitched[..candidate.len()]
+    } else {
+        candidate.len() <= stitched.len()
+            && candidate == &stitched[stitched.len() - candidate.len()..]
+    };
+    if edge_match {
+        return candidate.len();
+    }
+    if candidate.len() >= MIN_REVISIT_ROWS && contains_run(stitched, candidate) {
+        return candidate.len();
     }
     let max_len = candidate.len().min(stitched.len());
     for length in (MIN_REVISIT_ROWS..=max_len).rev() {
-        let needle = if suffix {
-            &candidate[candidate.len() - length..]
+        let anchored = if direction < 0 {
+            // 向上滚动：新行接在成图头部，能跳过的只能是 candidate 的尾部
+            candidate[candidate.len() - length..] == stitched[..length]
         } else {
-            &candidate[..length]
+            // 向下滚动：新行接在成图尾部，能跳过的只能是 candidate 的头部
+            stitched[stitched.len() - length..] == candidate[..length]
         };
-        if stitched.windows(length).any(|window| window == needle) {
+        if anchored {
             return length;
         }
     }
     0
+}
+
+/// candidate 是否作为连续片段出现在 stitched 中。
+fn contains_run(stitched: &[u64], candidate: &[u64]) -> bool {
+    candidate.len() >= MIN_REVISIT_ROWS
+        && stitched.len() >= candidate.len()
+        && stitched
+            .windows(candidate.len())
+            .any(|window| window == candidate)
 }
 
 fn frame_row_signatures(frame: &[u8], width: u32) -> Vec<u64> {
@@ -170,6 +200,9 @@ fn frame_row_signatures(frame: &[u8], width: u32) -> Vec<u64> {
     frame
         .chunks_exact(row_bytes)
         .map(|row| {
+            // 每 4 个像素取 1 个：这是“这一行是否相似”的廉价指纹，不承诺逐像素
+            // 一致。reusable_rows 只在整段命中或贴边时跳过，采样碰撞要影响结果
+            // 需要整段候选都撞上，概率远低于单行误判。
             row.chunks_exact(4)
                 .step_by(4)
                 .fold(1469598103934665603u64, |hash, pixel| {
@@ -657,11 +690,7 @@ fn capture_and_merge(
             } else {
                 &current_rows[overlap as usize..]
             };
-            let reused_rows = if direction < 0 {
-                result.longest_suffix_match(candidate_rows)
-            } else {
-                result.longest_prefix_match(candidate_rows)
-            };
+            let reused_rows = result.reuse_rows(candidate_rows, direction);
             let rows_to_add = add_rows.saturating_sub(reused_rows as u32);
             if rows_to_add == 0 {
                 previous.clone_from(&current);
@@ -924,21 +953,36 @@ mod tests {
     }
 
     #[test]
-    fn stored_result_detects_a_revisited_middle_segment() {
-        let mut result = StoredResult::from_initial(
-            1,
-            4,
-            vec![0, 0, 0, 255, 1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255],
-        );
-        result.bgra_chunks.push_back(vec![4, 4, 4, 255]);
-        result.bgra_len += 4;
-        let revisited = frame_row_signatures(&[2, 2, 2, 255], 1);
-        let missing = frame_row_signatures(&[9, 9, 9, 255], 1);
-        assert_eq!(result.longest_prefix_match(&revisited), 0);
-        assert_eq!(result.longest_suffix_match(&revisited), 0);
-        assert_eq!(result.longest_prefix_match(&missing), 0);
+    fn reusable_rows_only_trusts_full_or_anchored_matches() {
+        let stitched = [0u64, 1, 2, 3, 4, 5, 6, 7];
 
-        let stitched = result.row_signatures.clone();
-        assert_eq!(longest_match(&stitched[1..4], &stitched, false), 3);
+        // 整段已存在（哪怕在成图中间）：可以整段跳过，因为不会追加任何东西
+        assert_eq!(reusable_rows(&[3, 4, 5], &stitched, 1), 3);
+
+        // 1 行贴边（微滚动）仍要跳过，避免复制一行；只在中间出现则不跳过
+        assert_eq!(reusable_rows(&[7], &stitched, 1), 1);
+        assert_eq!(reusable_rows(&[3], &stitched, 1), 0);
+
+        // 向下滚动：只有 candidate 的前缀贴着成图尾部时，才允许部分跳过
+        assert_eq!(reusable_rows(&[5, 6, 7, 8], &stitched, 1), 3);
+        // 只在中间撞上（不是尾部）→ 一行都不跳，全部追加
+        assert_eq!(reusable_rows(&[3, 4, 5, 9], &stitched, 1), 0);
+
+        // 向上滚动：只有 candidate 的后缀贴着成图头部时，才允许部分跳过
+        assert_eq!(reusable_rows(&[9, 9, 0, 1, 2], &stitched, -1), 3);
+        assert_eq!(reusable_rows(&[1, 2, 3, 9], &stitched, -1), 0);
+    }
+
+    #[test]
+    fn repeated_rows_in_the_middle_do_not_swallow_new_rows() {
+        // 成图中间有一段 8 行相同内容（空白行 / 重复表格行在真实页面很常见）。
+        let mut stitched: Vec<u64> = (0..30).collect();
+        for slot in &mut stitched[8..16] {
+            *slot = 999;
+        }
+
+        // 新内容恰好以 3 行相同内容开头，但这 3 行只出现在成图中间。
+        // 旧实现会在整图里任意位置匹配，跳过 3 行 → 丢内容；现在必须全部追加。
+        assert_eq!(reusable_rows(&[999, 999, 999, 41, 42, 43], &stitched, 1), 0);
     }
 }

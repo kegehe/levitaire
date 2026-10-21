@@ -8,6 +8,7 @@ use super::*;
 use crate::disk_cleanup::target::{resolve_target, KnownFolderId, Target};
 use std::ffi::OsString;
 use std::fs;
+use std::os::windows::ffi::OsStringExt;
 use windows::Win32::Storage::FileSystem::GetShortPathNameW;
 
 // ── 夹具 ────────────────────────────────────────────────────────────────
@@ -622,6 +623,20 @@ fn long_path_prefix_is_only_added_when_needed() {
     // 已经是设备路径就不叠加
     let already = PathBuf::from(format!(r"\\?\Q:\{}", "z".repeat(300)));
     assert_eq!(long_path(&already), already);
+}
+
+#[test]
+fn long_path_preserves_non_unicode_names() {
+    // NTFS 允许含孤立代理项的文件名。旧实现先 to_string_lossy 再拼 \\?\，
+    // 两个不同文件名都会变成 U+FFFD，长路径下就可能删错文件。
+    let mut first: Vec<u16> = "x".repeat(300).encode_utf16().collect();
+    first.push(0xD800);
+    let mut second: Vec<u16> = "x".repeat(300).encode_utf16().collect();
+    second.push(0xDC00);
+
+    let first = long_path(&PathBuf::from(OsString::from_wide(&first)));
+    let second = long_path(&PathBuf::from(OsString::from_wide(&second)));
+    assert_ne!(first, second, "两个不同的非法文件名不能被判成同一个");
 }
 
 #[test]

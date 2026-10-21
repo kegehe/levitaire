@@ -327,18 +327,10 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         // 跳过程序模拟的按键（SendInput 注入的事件标记为 LLKHF_INJECTED）。
         let trigger_vk = crate::quick_input::trigger_vk();
         if trigger_vk != 0 && vk_code == trigger_vk as u32 && kb_ref.flags.0 & 0x10 == 0 {
-            // 日志仅做纯内存操作（无 GetWindowTextW 等跨进程调用），
-            // 避免阻塞 WH_KEYBOARD_LL 回调导致钩子被系统静默卸载。
-            crate::utils::logger::log(
-                "keyboard",
-                &format!(
-                    "QUICK-TRIGGER key={} vk=0x{:X} msg=0x{:X} active={}",
-                    crate::quick_input::vk_to_name(vk_code as u16),
-                    vk_code,
-                    msg,
-                    crate::quick_input::is_active(),
-                ),
-            );
+            // ★ 这里不要写日志。`logger::log` 会拿全局锁并落盘（metadata /
+            //   open / write，超 5MB 还要 rename）；hold 模式下按住触发键会连续
+            //   重复 keydown，钩子回调一旦超过系统超时就会被静默卸载，届时 Ctrl+C
+            //   选区、Esc、快速输入会一起失效。需要诊断时请投递到后台线程再落盘。
             if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
                 // 去重：按住不松时 Windows 会持续送重复 keydown，用 TRIGGER_DOWN 忽略，
                 // 只有「新的一次按下」才处理。松开 keyup 时复位标志。

@@ -68,6 +68,9 @@ pub fn start_recording(
 /// only makes the full-screen selection overlay click-through.
 #[tauri::command]
 pub fn show_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
+    // ★ 句柄必须在锁外取：hwnd() 在非主线程是阻塞式主线程往返，持锁调用会和
+    //   主线程上等同一把锁的 show/finish 形成互等死锁（见 recording_window_handles）。
+    let handles = recording_window_handles(&app);
     let _lifecycle = RECORDING_CONTROLS_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -78,7 +81,7 @@ pub fn show_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
             return Err("录制已结束".to_string());
         }
     }
-    set_recording_capture_protection(&app);
+    apply_recording_capture_protection(handles);
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
         overlay
             .set_ignore_cursor_events(true)
@@ -126,12 +129,15 @@ pub fn show_recording_indicator(
 /// 异常路径而在屏幕上留下一扇置顶幽灵窗。
 #[tauri::command]
 pub fn finish_recording_controls(app: tauri::AppHandle) -> Result<(), String> {
+    // ★ 同上：hwnd() 的阻塞式主线程往返放在锁外。Esc 取消会同时从钩子线程和
+    //   前端 IPC 两条路径调到这里，持锁取句柄正是死锁窗口。
+    let handles = recording_window_handles(&app);
     let _lifecycle = RECORDING_CONTROLS_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     destroy_recording_controls_window(&app);
     crate::recording::indicator::destroy();
-    set_recording_capture_protection(&app);
+    apply_recording_capture_protection(handles);
     crate::hooks::mouse::set_recording_mode(false);
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
         overlay

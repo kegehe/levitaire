@@ -4,9 +4,13 @@
 // 只在你【明确要发版】时手动跑；日常 commit 完全不碰它，不影响正常开发。
 //
 // 用法（在仓库根目录）：
-//   npm run release 0.1.1 "修复了…\n新增了…"
+//   npm run release 0.1.1 "修复了…；新增了…"
+//   node scripts/release.mjs 0.1.1 --notes-file release-notes.txt  # 多行说明（推荐）
 //   npm run release:bump 0.1.1      # 只同步三处版本号，不打包不签名
 //   node scripts/release.mjs 0.1.1 --no-build   # 不重新出包，签现有安装包（需已 build）
+//
+// PowerShell 5.1 下用 npm run 传中文参数可能被 cmd.exe 转码；多行/中文说明请用
+// --notes-file 或 Git Bash 直接运行 node scripts/release.mjs。
 //
 // 环境变量：
 //   LEVITAIRE_PRIVKEY     私钥文件路径（默认 ~/.tauri/levitaire.key）
@@ -29,18 +33,48 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HOME = homedir();
 
 const args = process.argv.slice(2);
-const bumpOnly = args.includes("--bump-only");
-const noBuild = args.includes("--no-build");
-const positional = args.filter((a) => !a.startsWith("--"));
+let bumpOnly = false;
+let noBuild = false;
+let notesFile = null;
+const positional = [];
+
+// 只识别已知开关，其余一律当位置参数（说明文字里出现 "--fix" 之类不会被吞掉）。
+for (let i = 0; i < args.length; i += 1) {
+  const arg = args[i];
+  if (arg === "--bump-only") {
+    bumpOnly = true;
+  } else if (arg === "--no-build") {
+    noBuild = true;
+  } else if (arg === "--notes-file") {
+    notesFile = args[i + 1];
+    if (!notesFile) throw new Error("--notes-file 缺少文件路径");
+    i += 1;
+  } else if (arg.startsWith("--notes-file=")) {
+    notesFile = arg.slice("--notes-file=".length);
+  } else {
+    positional.push(arg);
+  }
+}
 
 if (positional.length < 1) {
   const msg =
-    "缺少版本号参数。\n示例:\n  npm run release 0.1.1 \"修复了XX\"\n  npm run release:bump 0.2.0";
+    "缺少版本号参数。\n示例:\n  npm run release 0.1.1 \"修复了XX；新增了XX\"\n  node scripts/release.mjs 0.1.1 --notes-file release-notes.txt\n  npm run release:bump 0.2.0";
   throw new Error(msg);
 }
 
 const nextVersion = positional[0];
-const notes = positional.slice(1).join(" ") || "Levitaire 新版本";
+// 多行说明走 --notes-file（UTF-8，原样保留换行），避免 shell 转义与 PowerShell 下
+// npm 传中文参数的转码问题。位置参数里的说明原样写入，不再猜测 \n 的含义
+// （否则 D:\new\logs 这类路径会被误改成换行）。
+if (notesFile && !existsSync(resolve(notesFile))) {
+  throw new Error(`找不到 notes 文件：${notesFile}`);
+}
+const notes = notesFile
+  ? readFileSync(resolve(notesFile), "utf8")
+      .replace(/^\uFEFF/, "")
+      .replace(/\r\n/g, "\n")
+      .trimEnd() || "Levitaire 新版本"
+  : positional.slice(1).join(" ") || "Levitaire 新版本";
 
 if (!/^\d+\.\d+\.\d+$/.test(nextVersion)) {
   throw new Error(`版本号必须形如 0.1.1（MAJOR.MINOR.PATCH），收到：${nextVersion}`);
@@ -61,8 +95,20 @@ function safeTauriCli() {
 function readJson(file) { return JSON.parse(readFileSync(file, "utf8")); }
 function writeJson(file, obj) { writeFileSync(file, JSON.stringify(obj, null, 2) + "\n", "utf8"); }
 
+/// Cargo.toml 的 [package] 段（到下一个行首 [section] 之前）。
+/// 版本号必须从这个段里读/改：文件后面还有 [dependencies.windows] 的 `version` 行，
+/// 裸的 ^version 正则只是碰巧因为 [package] 在最前面才没改错。
+function cargoPackageSection(text) {
+  const start = text.indexOf("[package]");
+  if (start < 0) throw new Error("Cargo.toml 缺少 [package] 段");
+  const next = text.indexOf("\n[", start + "[package]".length);
+  return text.slice(start, next < 0 ? text.length : next + 1);
+}
+
 function readCargoVersion(file) {
-  const match = readFileSync(file, "utf8").match(/^version\s*=\s*"([^"]+)"/m);
+  const match = cargoPackageSection(readFileSync(file, "utf8")).match(
+    /^version\s*=\s*"([^"]+)"/m,
+  );
   return match ? match[1] : null;
 }
 
@@ -85,9 +131,14 @@ const tauri = readJson(tauriConf);
 tauri.version = nextVersion;
 writeJson(tauriConf, tauri);
 
-const cargo = readFileSync(cargoToml, "utf8")
-  .replace(/^(version\s*=\s*")[^"]+(")/m, `$1${nextVersion}$2`);
-writeFileSync(cargoToml, cargo, "utf8");
+const cargoText = readFileSync(cargoToml, "utf8");
+const packageSection = cargoPackageSection(cargoText);
+const versionPattern = /^(version\s*=\s*")[^"]+(")/m;
+if (!versionPattern.test(packageSection)) {
+  throw new Error("Cargo.toml 的 [package] 段里找不到可更新的 version");
+}
+const bumpedSection = packageSection.replace(versionPattern, `$1${nextVersion}$2`);
+writeFileSync(cargoToml, cargoText.replace(packageSection, bumpedSection), "utf8");
 
 const pkg = readJson(rootPkg);
 pkg.version = nextVersion;
@@ -212,7 +263,9 @@ console.log("\n发布动作已完成（未上传）。下一步（在确认后�
 console.log(`  git tag v${nextVersion}`);
 console.log(`  git push origin v${nextVersion}`);
 console.log(
-  `  gh release create v${nextVersion} "${installer}" "release/latest.json" --notes "${notes.replace(/\\n/g, "\n")}"`,
+  notesFile
+    ? `  gh release create v${nextVersion} "${installer}" "release/latest.json" --notes-file "${resolve(notesFile)}"`
+    : `  gh release create v${nextVersion} "${installer}" "release/latest.json" --notes "${notes}"`,
 );
 console.log("\n然后把仓库根的 latest.json 提交并推到 master，GitHub Pages 会自动更新（当前 endpoints 指向 kegehe.github.io/levitaire/latest.json）。");
 

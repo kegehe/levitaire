@@ -202,21 +202,30 @@ pub fn wide(path: &Path) -> Vec<u16> {
 /// 给出参方向的长路径处理：**长度 ≥ 260 时才加** `\\?\`，且必须在规范化之后加
 /// （`\\?\` 不做 `.` / `..` / 正斜杠的规范化，§7.3）。
 pub fn long_path(path: &Path) -> PathBuf {
-    let text = path.as_os_str().to_string_lossy();
-    // 已经是设备路径（含我们自己刚加过的）就不再叠加
-    if text.starts_with(r"\\?\") || text.starts_with(r"\\.\") {
-        return path.to_path_buf();
-    }
+    // ★ 全程按宽字符处理，不经过 to_string_lossy：NTFS 允许含孤立代理项的
+    //   文件名，先 lossy 会把它们统一变成 U+FFFD，两个不同文件名可能撞成一个，
+    //   后续删除就会删错文件。
     let units = path.as_os_str().encode_wide().count();
     if units < 260 {
         return path.to_path_buf();
     }
-    let verbatim = match text.strip_prefix(r"\\") {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let backslash = b'\\' as u16;
+    // 已经是设备路径（含我们自己刚加过的）就不再叠加
+    if wide.starts_with(&[backslash, backslash, b'?' as u16, backslash])
+        || wide.starts_with(&[backslash, backslash, b'.' as u16, backslash])
+    {
+        return path.to_path_buf();
+    }
+    let unc = wide.starts_with(&[backslash, backslash]);
+    let mut prefixed: Vec<u16> = if unc {
         // UNC：\\server\share\... -> \\?\UNC\server\share\...
-        Some(rest) => format!(r"\\?\UNC\{rest}"),
-        None => format!(r"\\?\{text}"),
+        r"\\?\UNC\".encode_utf16().collect()
+    } else {
+        r"\\?\".encode_utf16().collect()
     };
-    PathBuf::from(verbatim)
+    prefixed.extend_from_slice(if unc { &wide[2..] } else { &wide[..] });
+    PathBuf::from(OsString::from_wide(&prefixed))
 }
 
 /// 供 Win32 调用使用的宽字符串，自动套用 [`long_path`]。

@@ -274,9 +274,20 @@ function TimerTool() {
     };
   }, []);
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
-    subscribeThemePreferences().then((stop) => { unlisten = stop; }).catch(() => {});
-    return () => unlisten?.();
+    subscribeThemePreferences()
+      .then((stop) => {
+        // 订阅在 Promise resolve 前卸载时，cleanup 已经跑过、拿不到 unlisten；
+        // 这里必须自己把刚拿到的取消函数调掉，否则监听器永久残留。
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
   useEffect(() => persistWindowPositionOnMove("time-overlay"), []);
   // 其他工具请求切到番茄钟页签（待办「开始专注」显示本窗口后触发）：

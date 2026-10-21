@@ -374,7 +374,17 @@ function StickyNote() {
   const positionTimerRef = useRef<number | null>(null);
   const confirmTimerRef = useRef<number | null>(null);
   const hydratedRef = useRef(false);
-  const destroyedRef = useRef(false);
+  /**
+   * 「收起 / 删除」请求已发出（或已成功）。
+   *
+   * ★ 只用于**卸载兜底**跳过那一次多余 flush，不能拿来当「窗口已销毁」：
+   *   tauri 的 destroy 只是把销毁事件投递给主线程（proxy.send_event），命令返回时
+   *   窗口往往还没真正关掉；若因此停写，这段间隙里用户继续输入的字会静默丢失。
+   *   所以 flushSave 本身不检查它。
+   */
+  const closingRef = useRef(false);
+  /** 删除请求在飞/已成功：此时任何 update_sticky_note_content 都没有意义。 */
+  const deletingRef = useRef(false);
   /** 我们刚下发过 setSize 的时刻；此刻到期的 resize 事件是回声，不当用户操作处理 */
   const programmaticResizeUntilRef = useRef(0);
   const sizeSaveTimerRef = useRef<number | null>(null);
@@ -399,9 +409,18 @@ function StickyNote() {
     applyThemePreferences(getStoredThemePreferences());
   }, []);
   useEffect(() => {
-    const un = subscribeThemePreferences();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    subscribeThemePreferences()
+      .then((stop) => {
+        // 订阅在 resolve 前卸载时 cleanup 已跑过，拿不到 unlisten；这里自行取消。
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
     return () => {
-      un.then((fn) => fn());
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -755,7 +774,9 @@ function StickyNote() {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
-    if (destroyedRef.current) return;
+    // 删除在飞/已成功时不再写：否则会在窗口关闭前撞上「便利贴不存在」，
+    // 给用户弹一条没有意义的「保存失败」。删除失败会在 catch 里复位并补一次 flush。
+    if (deletingRef.current) return;
     const id = noteIdRef.current;
     void invoke("update_sticky_note_content", { id, content: latestTextRef.current }).catch(
       (err) => {
@@ -1072,7 +1093,7 @@ function StickyNote() {
       if (confirmTimerRef.current) window.clearTimeout(confirmTimerRef.current);
       if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
       if (sizeSaveTimerRef.current) window.clearTimeout(sizeSaveTimerRef.current);
-      if (!destroyedRef.current && hydratedRef.current) flushSave();
+      if (!closingRef.current && hydratedRef.current) flushSave();
     };
   }, [flushSave]);
 
@@ -1152,12 +1173,21 @@ function StickyNote() {
   };
 
   const collect = () => {
-    destroyedRef.current = true;
+    // ★ 不能把「已请求收起」当成「已销毁」：destroy 是异步投递，命令返回时窗口
+    //   不一定已经关掉。因此这里只标记「收起中」，flushSave 照常工作；仅卸载兜底
+    //   跳过那一次多余 flush。请求失败则复位，保证窗口还在时继续保存。
+    closingRef.current = true;
     // 携带最新正文落盘，避免防抖保存尚未触发窗口即被销毁而丢字
     void invoke("collect_sticky_note", {
       id: noteIdRef.current,
       content: latestTextRef.current,
-    }).catch(() => {});
+    }).catch((error) => {
+      closingRef.current = false;
+      console.error("收起便利贴失败:", error);
+      showNotice(
+        `收起失败：${typeof error === "string" ? error : "请检查磁盘空间"}`,
+      );
+    });
   };
 
   const addNew = async () => {
@@ -1177,8 +1207,19 @@ function StickyNote() {
 
   const toggleDelete = () => {
     if (confirmDelete) {
-      destroyedRef.current = true;
-      void invoke("delete_sticky_note", { id: noteIdRef.current }).catch(() => {});
+      // 同 collect：请求失败时窗口仍可能活着，必须恢复保存能力。
+      closingRef.current = true;
+      deletingRef.current = true;
+      void invoke("delete_sticky_note", { id: noteIdRef.current }).catch((error) => {
+        closingRef.current = false;
+        deletingRef.current = false;
+        console.error("删除便利贴失败:", error);
+        showNotice(
+          `删除失败：${typeof error === "string" ? error : "请检查磁盘空间"}`,
+        );
+        // 请求期间可能又有输入；删除没成功，补一次落盘。
+        flushSave();
+      });
       return;
     }
     setConfirmDelete(true);

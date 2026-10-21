@@ -45,9 +45,18 @@ function LongCaptureControls() {
   }, []);
 
   useEffect(() => {
-    const unlistenTheme = subscribeThemePreferences();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    subscribeThemePreferences()
+      .then((stop) => {
+        // 订阅在 resolve 前卸载时 cleanup 已跑过，拿不到 unlisten；这里自行取消。
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
     return () => {
-      unlistenTheme.then((fn) => fn());
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -84,6 +93,8 @@ function LongCaptureControls() {
     });
     const unlistenCancel = listen("long-capture-cancelled", () => {
       previewRequestRef.current++;
+      // 会话已取消：清掉 view 让轮询 effect 立刻停掉，别在隐藏窗口上继续打 IPC。
+      setView(null);
       setWarning(null);
       void win.hide();
     });
@@ -125,15 +136,46 @@ function LongCaptureControls() {
     };
   }, [win]);
 
+  // 只在 resultId 变化时重建轮询。依赖整个 view 会让每次状态回写都拆掉并重开
+  // 一个 interval（周期被拉长到 350ms + IPC + 渲染）；inFlight 再挡掉慢 IPC 的叠加。
+  const capturingResultId = view?.kind === "capturing" ? view.result.resultId : null;
   useEffect(() => {
-    if (!view || view.kind !== "capturing") return;
+    if (capturingResultId === null) return;
+    let inFlight = false;
+    let requestToken = 0;
+    let resetTimer: number | undefined;
     const timer = window.setInterval(() => {
-      invoke<CaptureStatus>("get_long_capture_status", { resultId: view.result.resultId })
-        .then((result) => setView((current) => current?.kind === "capturing" ? { ...current, result } : current))
-        .catch(() => {});
+      if (inFlight) return;
+      const token = ++requestToken;
+      inFlight = true;
+      // 状态查询正常是毫秒级；5s 未返回说明 invoke 卡住了，强制放行下一轮，
+      // 避免一次永不 settle 的请求把轮询永久停住。
+      resetTimer = window.setTimeout(() => {
+        if (token === requestToken) inFlight = false;
+      }, 5000);
+      invoke<CaptureStatus>("get_long_capture_status", { resultId: capturingResultId })
+        .then((result) =>
+          setView((current) =>
+            current?.kind === "capturing" && current.result.resultId === capturingResultId
+              ? { ...current, result }
+              : current,
+          ),
+        )
+        .catch(() => {})
+        .finally(() => {
+          if (token !== requestToken) return;
+          inFlight = false;
+          if (resetTimer !== undefined) {
+            window.clearTimeout(resetTimer);
+            resetTimer = undefined;
+          }
+        });
     }, 350);
-    return () => window.clearInterval(timer);
-  }, [view]);
+    return () => {
+      window.clearInterval(timer);
+      if (resetTimer !== undefined) window.clearTimeout(resetTimer);
+    };
+  }, [capturingResultId]);
 
   const stop = async () => {
     if (!view || view.kind !== "capturing" || actionPending.current) return;
