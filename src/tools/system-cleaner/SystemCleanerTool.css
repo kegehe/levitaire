@@ -6,7 +6,8 @@
  * 滚动由内部的 `.cleaner-scroll` 段落承担 —— 这里没有内层滚动容器，
  * 直接把 `body` 做成纵向 flex + 中段滚动。
  *
- * 版式（布局 3「三格统计头」）：顶部一行三格数字结论 → 清理项纯列表 →
+ * 版式（布局 E「编辑索引」）：顶部构成卡（结论数字 + 右侧账目 + 构成条图例）→
+ * 清理项索引列表（名称 ‥点线‥ 数值，数字列「大数值小单位」）→
  * 高级分区（空间分析 / 隔离区 / 审计日志）收进手风琴折叠行，一次只摊开一个。
  * 分隔线约定：`.cleaner-section` 不再自带 border-bottom，改为
  * 「折叠行自带 border-top + 相邻 section 兄弟选择器」，避免双线。
@@ -150,58 +151,180 @@
   cursor: default;
 }
 
-/* ── 三格统计头 ─────────────────────────────────────────────────────── */
+/* ── 构成卡（布局 E「编辑索引」）────────────────────────────────────── */
 
-.cleaner-stats {
+/* 结论数字当主角；右侧两行账目右对齐（§10.2 分栏：隔离区单独一行）。
+   卡底用 sunken 色与列表拉开一层，浮层投影按纪律用自包含字面值。 */
+.cleaner-compose {
   display: flex;
-  align-items: stretch;
-  padding: 12px 0 10px;
-  border-bottom: 1px solid var(--color-border);
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 10px 12px 8px;
+  padding: 10px 12px;
+  background: var(--color-bg-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow: inset 0 1px 2px oklch(0.2 0 0 / 0.04);
 }
 
-.cleaner-stat {
-  flex: 1 1 0;
-  min-width: 0;
-  padding: 0 14px;
+/* 条与图例独占下一行 */
+.cleaner-compose-bar,
+.cleaner-compose-legend {
+  flex: 1 1 100%;
 }
 
-.cleaner-stat + .cleaner-stat {
-  border-left: 1px solid var(--color-border);
+[data-theme="dark"] .cleaner-compose {
+  box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.22);
 }
 
-.cleaner-stat-v {
-  font-size: 16px;
+.cleaner-compose-main {
+  flex: 0 0 auto;
+}
+
+/* 大数值：行内第二重的字，压缩字距换版面感 */
+.cleaner-compose-num {
+  font-size: 21px;
   font-weight: 700;
-  letter-spacing: -0.2px;
+  letter-spacing: -0.4px;
+  line-height: 1.1;
+  color: var(--color-brand);
   font-variant-numeric: tabular-nums;
 }
 
-.cleaner-stat.is-brand .cleaner-stat-v {
-  color: var(--color-brand);
-}
-
-.cleaner-stat-k {
-  margin-top: 2px;
+.cleaner-compose-cap {
+  margin-top: 1px;
   font-size: 10px;
   color: var(--color-fg-muted);
+}
+
+.cleaner-compose-side {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  min-width: 0;
+}
+
+.cleaner-compose-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+}
+
+.cleaner-compose-row b {
+  color: var(--color-fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「读取失败」必须是危险色。上面 .cleaner-compose-row b 的特异性是 (0,1,1)，
+   会压过 .cleaner-danger 的 (0,1,0)，所以这里单独提一级。 */
+.cleaner-compose-row b.cleaner-danger {
+  color: var(--color-danger-fg);
+}
+
+.cleaner-compose-pct {
+  font-size: 9.5px;
+  color: var(--color-fg-subtle);
+}
+
+/* 构成条：勾选且扫过的项按体积降序切片，颜色沿品牌色逐级变浅。
+   flex-grow 直接用字节数，比例交给数据自己说。 */
+.cleaner-compose-bar {
+  display: flex;
+  gap: 2px;
+  margin-top: 9px;
+  height: 6px;
+}
+
+.cleaner-compose-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  min-width: 3px;
+}
+
+.cleaner-compose-bar i:nth-child(1) {
+  background: var(--color-brand);
+}
+
+.cleaner-compose-bar i:nth-child(2) {
+  background: color-mix(in srgb, var(--color-brand) 65%, var(--color-bg));
+}
+
+.cleaner-compose-bar i:nth-child(3) {
+  background: color-mix(in srgb, var(--color-brand) 42%, var(--color-bg));
+}
+
+.cleaner-compose-bar i:nth-child(4) {
+  background: color-mix(in srgb, var(--color-brand) 24%, var(--color-bg));
+}
+
+/* 第 5 段是「其他 N 项」的汇总，用中性色，避免看起来像第 5 个品牌色层级。 */
+.cleaner-compose-bar i:nth-child(5) {
+  background: var(--color-border-strong);
+}
+
+/* 图例：两列网格，前 4 项 + 「其他」都排得整。点色与条段一一对应（同样的 nth-child）。 */
+.cleaner-compose-legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 14px;
+  margin-top: 8px;
+}
+
+.cleaner-compose-li {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  /* 图例名是色块唯一的文字说明，fg-subtle 在浅色底上约 3.3:1，不够 AA；用 muted。 */
+  color: var(--color-fg-muted);
+  min-width: 0;
+}
+
+.cleaner-compose-li i {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--color-border-strong);
+}
+
+.cleaner-compose-li:nth-child(1) i {
+  background: var(--color-brand);
+}
+
+.cleaner-compose-li:nth-child(2) i {
+  background: color-mix(in srgb, var(--color-brand) 65%, var(--color-bg));
+}
+
+.cleaner-compose-li:nth-child(3) i {
+  background: color-mix(in srgb, var(--color-brand) 42%, var(--color-bg));
+}
+
+.cleaner-compose-li:nth-child(4) i {
+  background: color-mix(in srgb, var(--color-brand) 24%, var(--color-bg));
+}
+
+.cleaner-compose-nm {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.cleaner-stat-bar {
-  margin-top: 5px;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--color-bg-sunken);
-  overflow: hidden;
-}
-
-.cleaner-stat-bar i {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--color-brand);
+.cleaner-compose-li b {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--color-fg-muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 账目细分行（只出现在隔离区折叠区内，不占主视图） */
@@ -270,20 +393,38 @@
   border-top: 1px solid var(--color-border);
 }
 
-/* ── 清理项列表 ─────────────────────────────────────────────────────── */
+/* ── 清理项列表（索引行）────────────────────────────────────────────── */
+
+/* 列表坐在一个带 inset 阴影的凹面容器里，与面板底色拉开一层 */
+.cleaner-rules {
+  margin: 0 10px 8px;
+  padding: 2px 9px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 2px oklch(0.2 0 0 / 0.04),
+    inset 0 0 0 1px oklch(1 0 0 / 0.35);
+}
+
+[data-theme="dark"] .cleaner-rules {
+  box-shadow:
+    inset 0 1px 2px oklch(0 0 0 / 0.28),
+    inset 0 0 0 1px oklch(1 0 0 / 0.03);
+}
 
 .cleaner-rule {
-  padding: 3px 0;
+  padding: 4px 0;
 }
 
 .cleaner-rule + .cleaner-rule {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
 }
 
 .cleaner-rule-head {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   cursor: pointer;
 }
 
@@ -292,23 +433,97 @@
   opacity: 0.6;
 }
 
+/* 勾选框：accent-color 一行到位（保留原生可达性，不自制盒） */
+.cleaner-rule-head input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--color-brand);
+  cursor: pointer;
+}
+
+/* 引导点：名称前的 5px 圆点，勾选后变品牌色 —— 索引行的视觉锚 */
+.cleaner-rule-lead {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-border-strong);
+}
+
+.cleaner-rule.is-checked .cleaner-rule-lead {
+  background: var(--color-brand);
+}
+
 .cleaner-rule-name {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 点线引导：名称与数值之间的编辑排印式连接线。
+   flex 收缩时先保证 min-width（12px），空间不够由名称先省略号。 */
+.cleaner-rule-dots {
+  flex: 1 1 12px;
+  min-width: 12px;
+  height: 8px;
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--color-border-strong) 75%, transparent) 1px,
+    transparent 1.2px
+  );
+  background-size: 6px 4px;
+  background-repeat: repeat-x;
+  background-position: 0 center;
+  opacity: 0.75;
+}
+
 .cleaner-rule-size {
-  color: var(--color-fg-muted);
+  flex: 0 0 auto;
+  min-width: 52px;
+  text-align: right;
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  font-size: 11.5px;
   /* 这格放的是「未扫描」「0 B」这类短词，**必须整块不换行**：汉字和空格都能在
      任意位置断行，不加这句时 flex 收缩会先把它折成两三行、行高突然跳一下
      （它的 min-content 只有一个字宽）。加了之后 min-content 就是整串宽度，
-     空间不够时由旁边的规则名去省略号（`.cleaner-rule-name`）。 */
+     空间不够时由点线段去收缩（`.cleaner-rule-dots`）。 */
   white-space: nowrap;
+}
+
+/* 数字列「大数值 + 小单位」：单位段自带前导空格，textContent 与旧版逐字一致 */
+.cleaner-rule-size-n {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.1px;
+  color: var(--color-fg);
+}
+
+.cleaner-rule-size-u {
+  font-size: 9.5px;
+  font-weight: 600;
+  /* 单位是数值唯一的量纲，9.5px 小字用 fg-subtle 在浅色底上不够 AA；提到 muted。 */
+  color: var(--color-fg-muted);
+}
+
+.cleaner-rule.is-checked .cleaner-rule-size-n {
+  color: var(--color-brand);
+}
+
+/* 未扫描 / 未安装 / 不可知：数值不放大加粗，退回说明文字的层级 */
+.cleaner-rule-size.is-unscanned .cleaner-rule-size-n {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--color-warning-fg);
+}
+
+.cleaner-rule-size.is-na .cleaner-rule-size-n,
+.cleaner-rule-size.is-unknown .cleaner-rule-size-n {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--color-fg-subtle);
 }
 
 .cleaner-info {
@@ -326,7 +541,9 @@
 }
 
 .cleaner-rule-status {
-  margin: 2px 0 2px 21px;
+  /* 与名称列对齐：勾选框 14 + gap 8 + 引导点 5 + gap 8 = 35px
+     （行首加了引导点之后，旧的 21px 会比名称偏左 14px） */
+  margin: 2px 0 2px 35px;
   font-size: 11px;
 }
 
@@ -343,7 +560,8 @@
 }
 
 .cleaner-rule-detail {
-  margin: 2px 0 2px 21px;
+  /* 同 `.cleaner-rule-status`：与名称列对齐（含行首引导点） */
+  margin: 2px 0 2px 35px;
   border-left: 2px solid var(--color-border);
   padding-left: 8px;
 }
@@ -511,9 +729,23 @@
 }
 
 .cleaner-btn-primary {
-  background: var(--color-brand);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-brand) 88%, oklch(1 0 0)),
+    var(--color-brand)
+  );
   border-color: var(--color-brand);
   color: var(--color-brand-fg);
+  /* 顶部一条内高光 + 一点同色投影：按钮从平面上微微浮起来 */
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.25),
+    0 1px 3px color-mix(in srgb, var(--color-brand) 30%, transparent);
+}
+
+[data-theme="dark"] .cleaner-btn-primary {
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.18),
+    0 1px 3px oklch(0 0 0 / 0.3);
 }
 
 .cleaner-btn-primary:hover:not(:disabled) {

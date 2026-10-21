@@ -257,6 +257,41 @@ describe("SystemCleanerTool", () => {
     expect(screen.getByText(/64\.0 MB/)).toBeInTheDocument();
   });
 
+  it("构成条与标题同源：取消勾选不会缩水，并汇总前 4 之外的项", async () => {
+    await mount();
+    const GB = 1024 * 1024 * 1024;
+    await pushStatus({
+      jobId: "1",
+      phase: "ready",
+      dryRun: true,
+      currentRule: null,
+      progress: null,
+      reports: [
+        ruleReport("temp-user", { ruleName: "用户临时文件", bytesDeleted: 10 * GB }),
+        ruleReport("r-2", { ruleName: "第二项", bytesDeleted: 5 * GB }),
+        ruleReport("r-3", { ruleName: "第三项", bytesDeleted: 4 * GB }),
+        ruleReport("r-4", { ruleName: "第四项", bytesDeleted: 3 * GB }),
+        ruleReport("recycle-bin", { ruleName: "回收站", bytesDeleted: 2 * GB }),
+      ],
+      totals: {},
+      advice: [],
+      ledger: { ...LEDGER, immediateBytes: 24 * GB },
+      discoveries: [],
+      error: null,
+      rulesError: null,
+    });
+
+    // 取消勾选最大的 TEMP：headline 与构成条都描述「上一轮报告」，不应随之缩水。
+    fireEvent.click(screen.getByRole("checkbox", { name: /用户临时文件/ }));
+
+    expect(screen.getByText("24.0 GB")).toBeInTheDocument();
+    const legend = document.querySelector(".cleaner-compose-legend");
+    expect(legend?.textContent).toContain("用户临时文件");
+    expect(legend?.textContent).toContain("其他 1 项");
+    // 前 4 项 + 「其他 N 项」各一段
+    expect(document.querySelectorAll(".cleaner-compose-bar i")).toHaveLength(5);
+  });
+
   it("未扫描前不给执行清理", async () => {
     await mount();
     const start = screen.getByRole("button", { name: "清理所选项目" }) as HTMLButtonElement;

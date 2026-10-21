@@ -99,6 +99,21 @@ function ruleSizeLabel(report: RuleReport | undefined): string {
 }
 
 /**
+ * 把「1.2 GB」拆成数值与单位两段。
+ *
+ * 编辑索引版的数字列用「大数值 + 小单位」排版：数值是行内第二重的字，
+ * 单位退到辅助层级。`textContent` 必须与 `ruleSizeLabel` 完全一致
+ * （守卫测试逐字比对「0 B」「未扫描」「——」），所以单位段自带前导空格。
+ */
+function ruleSizeParts(label: string): { n: string; u: string | null } {
+  const index = label.lastIndexOf(" ");
+  if (index > 0 && index < label.length - 1) {
+    return { n: label.slice(0, index), u: label.slice(index + 1) };
+  }
+  return { n: label, u: null };
+}
+
+/**
  * 规则详情里的「目标」。
  *
  * 同样不能靠 `targetDisplay` 空不空来推断有没有扫过 —— 扫过但没命中目标
@@ -938,6 +953,39 @@ function SystemCleanerTool() {
         )
       : 0;
   /**
+   * 构成条的切片：与 headline **同源**，统计上一轮扫描 / 清理的报告。
+   *
+   * headline 的 ledger.immediateBytes 是上一轮任务的 totals.bytes_deleted（dry-run
+   * 时是预估）。如果这里按当前 selected 现算，扫描后取消勾选就会出现「2.3 GB 的标题
+   * 下面只剩 200 MB 的条」—— 用户会以为剩下的空间凭空消失了。
+   *
+   * 所以：
+   * - 只统计 bytesDeleted（隔离量不算「立即释放」，见 §10.2）；
+   * - 取前 4 项 + 「其他 N 项」，保证条的总量始终等于 headline；
+   * - hasResult 为假时整条隐藏，构成卡退化为纯账目行。
+   */
+  const composeSegments = useMemo(() => {
+    if (!hasResult) return [];
+    const reported = (status?.reports ?? [])
+      .map((report) => ({
+        id: report.ruleId,
+        name: report.ruleName,
+        bytes: report.bytesDeleted,
+      }))
+      .filter((segment) => segment.bytes > 0)
+      .sort((a, b) => b.bytes - a.bytes);
+    if (reported.length <= 4) return reported;
+    const rest = reported.slice(4);
+    return [
+      ...reported.slice(0, 4),
+      {
+        id: "__rest__",
+        name: `其他 ${rest.length} 项`,
+        bytes: rest.reduce((sum, segment) => sum + segment.bytes, 0),
+      },
+    ];
+  }, [hasResult, status]);
+  /**
    * 管理员项完全不进主视图（勾了也执行不了，展示了只是噪音）；
    * 执行摘要只在清理完成的那一刻出现（§12.2 的前后对照），平时不占一行。
    */
@@ -1006,44 +1054,64 @@ function SystemCleanerTool() {
             </div>
           ) : (
             <>
-              {/* ── 三格统计头：结论一眼可读（§10.2 分栏保留：隔离区单独一格）── */}
-              <section className="cleaner-stats">
-                <div className="cleaner-stat is-brand">
-                  <div className="cleaner-stat-v">{formatBytes(ledger.immediateBytes)}</div>
-                  <div className="cleaner-stat-k">可立即释放</div>
+              {/* ── 构成卡（布局 E「编辑索引」）：结论数字当主角，
+                  右侧两行账目（§10.2 分栏保留：隔离区单独一行），
+                  有扫描结果时下面跟着构成条与图例 ── */}
+              <section className="cleaner-compose">
+                <div className="cleaner-compose-main">
+                  <div className="cleaner-compose-num">
+                    {formatBytes(ledger.immediateBytes)}
+                  </div>
+                  <div className="cleaner-compose-cap">可立即释放</div>
                 </div>
-                <div className="cleaner-stat">
-                  <div className="cleaner-stat-v">
+                <div className="cleaner-compose-side">
+                  <div className="cleaner-compose-row">
+                    <span>隔离区暂存</span>
                     {/* 读不出来时**显示"读取失败"，不显示 0** —— 0 会被读成
                         "隔离区是空的"，而磁盘上可能躺着几个 GB */}
                     {ledger.quarantineError ? (
-                      <span className="cleaner-danger" title={ledger.quarantineError}>
+                      <b className="cleaner-danger" title={ledger.quarantineError}>
                         读取失败
-                      </span>
+                      </b>
                     ) : (
-                      formatBytes(ledger.quarantineBytes)
+                      <b>{formatBytes(ledger.quarantineBytes)}</b>
                     )}
                   </div>
-                  <div className="cleaner-stat-k">隔离区暂存</div>
-                </div>
-                <div className="cleaner-stat">
-                  <div className="cleaner-stat-v">
-                    {systemVolume ? formatBytes(systemVolume.freeBytes) : "——"}
+                  <div className="cleaner-compose-row">
+                    {systemVolume ? (
+                      <>
+                        <span>{`${systemVolume.mountPoint} 可用`}</span>
+                        <b>{formatBytes(systemVolume.freeBytes)}</b>
+                        <span className="cleaner-compose-pct">已用 {systemUsedPct}%</span>
+                      </>
+                    ) : (
+                      // 读不到卷信息时不能写「磁盘信息 ——」：这与本文件「读不到就说
+                      // 读不到、不伪装成空/0」的规矩相反（对照隔离区那一行）。
+                      <span>未能读取磁盘信息</span>
+                    )}
                   </div>
-                  <div className="cleaner-stat-k">
-                    {systemVolume
-                      ? `${systemVolume.mountPoint} 可用 · 已用 ${systemUsedPct}%`
-                      : "未能读取磁盘信息"}
-                  </div>
-                  {systemVolume && (
-                    <div className="cleaner-stat-bar">
-                      <i style={{ width: `${systemUsedPct}%` }} />
-                    </div>
-                  )}
                 </div>
+                {composeSegments.length > 0 && (
+                  <div className="cleaner-compose-bar" aria-hidden="true">
+                    {composeSegments.map((segment) => (
+                      <i key={segment.id} style={{ flex: `${segment.bytes} 1 0%` }} />
+                    ))}
+                  </div>
+                )}
+                {composeSegments.length > 0 && (
+                  <div className="cleaner-compose-legend">
+                    {composeSegments.map((segment) => (
+                      <span key={segment.id} className="cleaner-compose-li">
+                        <i aria-hidden="true" />
+                        <span className="cleaner-compose-nm">{segment.name}</span>
+                        <b>{formatBytes(segment.bytes)}</b>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </section>
 
-              <section className="cleaner-section">
+              <section className="cleaner-section cleaner-rules">
                 <div className="cleaner-section-title">
                   清理项
                   <span className="cleaner-estimate">
@@ -1073,8 +1141,20 @@ function SystemCleanerTool() {
                     (guard) => guard.kind === "confirmUnrecoverable",
                   );
                   const tierMeta = CLEAN_TIER_META[rule.tier];
+                  const sizeLabel = ruleSizeLabel(report);
+                  const sizeParts = ruleSizeParts(sizeLabel);
+                  const sizeTone = !report
+                    ? " is-unscanned"
+                    : report.status === "no-target"
+                      ? " is-na"
+                      : sizeLabel === "——"
+                        ? " is-unknown"
+                        : "";
                   return (
-                    <div key={rule.id} className="cleaner-rule">
+                    <div
+                      key={rule.id}
+                      className={`cleaner-rule${selected.includes(rule.id) ? " is-checked" : ""}`}
+                    >
                       <label className="cleaner-rule-head">
                         <input
                           type="checkbox"
@@ -1082,6 +1162,7 @@ function SystemCleanerTool() {
                           disabled={busy}
                           onChange={() => toggle(rule.id)}
                         />
+                        <span className="cleaner-rule-lead" aria-hidden="true" />
                         <span className="cleaner-rule-name">{rule.name}</span>
                         {rule.tier !== "L1" && (
                           <span
@@ -1092,15 +1173,19 @@ function SystemCleanerTool() {
                           </span>
                         )}
                         {needsConfirm && <span className="cleaner-tag-warn">需确认</span>}
+                        <span className="cleaner-rule-dots" aria-hidden="true" />
                         <span
-                          className="cleaner-rule-size"
+                          className={`cleaner-rule-size${sizeTone}`}
                           title={
                             report
                               ? undefined
                               : "这一项没有扫描结果（扫描只覆盖勾选项）：勾上它重新扫一次，才知道能清出多少"
                           }
                         >
-                          {ruleSizeLabel(report)}
+                          <span className="cleaner-rule-size-n">{sizeParts.n}</span>
+                          {sizeParts.u && (
+                            <span className="cleaner-rule-size-u"> {sizeParts.u}</span>
+                          )}
                         </span>
                         <button
                           type="button"
