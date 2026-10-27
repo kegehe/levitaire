@@ -27,7 +27,9 @@ pub async fn call_ai(
 #[tauri::command]
 pub async fn call_ai_stream(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     request_id: Option<u64>,
+    request_scope: Option<String>,
     prompt: String,
     system_prompt: Option<String>,
     ai_service: State<'_, crate::ai::AiService>,
@@ -40,33 +42,48 @@ pub async fn call_ai_stream(
         ),
     );
     let request_id = request_id.unwrap_or_else(|| ai_service.next_stream_id());
+    let target = tauri::EventTarget::webview_window(window.label());
     if prompt.len() > MAX_PROMPT_LENGTH {
-        let _ = app.emit("ai-stream", serde_json::json!({ "type": "error", "data": format!("prompt 长度超过限制（最大 {} 字节）", MAX_PROMPT_LENGTH), "requestId": request_id }));
+        let _ = app.emit_to(
+            target,
+            "ai-stream",
+            serde_json::json!({
+                "type": "error",
+                "data": format!("prompt 长度超过限制（最大 {} 字节）", MAX_PROMPT_LENGTH),
+                "requestId": request_id,
+                "requestScope": request_scope,
+            }),
+        );
         return Err(format!(
             "prompt 长度超过限制（最大 {} 字节）",
             MAX_PROMPT_LENGTH
         ));
     }
     if prompt.is_empty() {
-        let _ = app.emit(
+        let _ = app.emit_to(
+            target,
             "ai-stream",
-            serde_json::json!({ "type": "error", "data": "prompt 不能为空", "requestId": request_id }),
+            serde_json::json!({ "type": "error", "data": "prompt 不能为空", "requestId": request_id, "requestScope": request_scope }),
         );
         return Err("prompt 不能为空".to_string());
     }
 
     let app_handle = app.clone();
-    // 发起新流式调用前重置取消标志（防止上一次取消影响本次请求），
-    // 前端「取消」通过 cancel_ai_stream 命令置位，call_stream 每帧检测后提前终止。
+    let stream_target = target.clone();
+    let stream_scope = request_scope.clone();
+    // 请求 ID 在组件重建后会重新递增；窗口、组件实例、ID 必须共同隔离。
     let result = ai_service
         .call_stream(
+            window.label(),
             request_id,
+            request_scope.as_deref(),
             &prompt,
             system_prompt.as_deref(),
             move |chunk| {
-                let _ = app_handle.emit(
+                let _ = app_handle.emit_to(
+                    stream_target.clone(),
                     "ai-stream",
-                    serde_json::json!({ "type": "chunk", "data": chunk, "requestId": request_id }),
+                    serde_json::json!({ "type": "chunk", "data": chunk, "requestId": request_id, "requestScope": stream_scope }),
                 );
             },
         )
@@ -74,28 +91,35 @@ pub async fn call_ai_stream(
 
     match result {
         Ok(_) => {
-            let _ = app.emit(
+            let _ = app.emit_to(
+                target,
                 "ai-stream",
-                serde_json::json!({ "type": "done", "requestId": request_id }),
+                serde_json::json!({ "type": "done", "requestId": request_id, "requestScope": request_scope }),
             );
             Ok(())
         }
         Err(e) => {
             // 用户取消导致的提前终止同样回传消息，前端取消时已移除监听器，无副作用；
             // 若取消后重新发起了新请求，则该 error 事件被新请求的监听器屏蔽（requestId 校验）。
-            let _ = app.emit(
+            let _ = app.emit_to(
+                target,
                 "ai-stream",
-                serde_json::json!({ "type": "error", "data": &e, "requestId": request_id }),
+                serde_json::json!({ "type": "error", "data": &e, "requestId": request_id, "requestScope": request_scope }),
             );
             Err(e)
         }
     }
 }
 
-/// 请求取消当前流式 AI 调用（前端点取消时调用）
+/// 只取消调用窗口的指定流式 AI 请求；空 ID 不影响任何请求。
 #[tauri::command]
-pub fn cancel_ai_stream(request_id: Option<u64>, ai_service: State<'_, crate::ai::AiService>) {
-    ai_service.request_cancel(request_id);
+pub fn cancel_ai_stream(
+    window: tauri::WebviewWindow,
+    request_id: Option<u64>,
+    request_scope: Option<String>,
+    ai_service: State<'_, crate::ai::AiService>,
+) {
+    ai_service.request_cancel(window.label(), request_id, request_scope.as_deref());
 }
 
 /// 获取当前 AI 配置

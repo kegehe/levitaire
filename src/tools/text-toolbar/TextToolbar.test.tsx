@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
+import { render, renderHook, screen, act, fireEvent, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import FloatingToolbar from "./TextToolbar";
 import { emitMockEvent, clearMockListeners, mockHide } from "../../test/tauri-mock";
 import { CLEAR_OPTIONS } from "../../constants/clearConfig";
 import type { SelectionInfo } from "../../types";
+import { useAiOptimize } from "../../hooks/useAiOptimize";
 
 // Mock chineseConvert：opencc-js 词库较大，避免每次单测加载真实词典；
 // 转换函数本身的正确性由 src/utils/chineseConvert.test.ts 单独覆盖
@@ -38,6 +39,49 @@ const showToolbar = async (text = "选中文字") => {
     emitMockEvent("selection-found", makeSelection(text));
   });
 };
+
+describe("FloatingToolbar 空闲取消隔离", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    mockInvoke.mockImplementation(() => Promise.resolve());
+  });
+
+  it.each(["新选区", "Esc 隐藏", "子菜单返回"])("%s 不取消其他窗口的 AI 请求", async (action) => {
+    const otherRequest = renderHook(() => useAiOptimize());
+    await act(async () => {
+      await otherRequest.result.current.optimize("other window", {
+        id: "polish",
+        icon: "Sparkles",
+        label: "润色",
+        systemPrompt: "polish",
+      });
+    });
+    const requestScope = (mockInvoke.mock.calls[0][1] as { requestScope: string }).requestScope;
+    render(<FloatingToolbar />);
+    await showToolbar("first selection");
+    if (action === "新选区") {
+      await showToolbar("new selection");
+    } else {
+      if (action === "子菜单返回") {
+        await act(async () => fireEvent.click(screen.getByRole("button", { name: "清除" })));
+      }
+      await act(async () => emitMockEvent("toolbar-esc", undefined));
+    }
+    expect(mockInvoke).not.toHaveBeenCalledWith("cancel_ai_stream", expect.anything());
+    await act(async () => {
+      emitMockEvent("ai-stream", {
+        type: "chunk",
+        data: "其他窗口结果",
+        requestId: 1,
+        requestScope,
+      });
+      emitMockEvent("ai-stream", { type: "done", requestId: 1, requestScope });
+    });
+    expect(otherRequest.result.current.optimizedText).toBe("其他窗口结果");
+    expect(otherRequest.result.current.isLoading).toBe(false);
+  });
+});
 
 describe("FloatingToolbar 搜索功能", () => {
   beforeEach(() => {

@@ -2,8 +2,9 @@ use crate::config::AiConfig;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// AI 响应结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,16 +20,32 @@ pub struct AiResponse {
 /// AI 客户端封装（内部使用 Mutex 实现线程安全的配置更新）
 pub struct AiService {
     inner: Mutex<AiServiceInner>,
-    /// 流式请求取消标志：request_cancel() 置位，call_stream 每收到一帧数据时检查。
-    /// 置位后立即终止当前流式请求（drop 底层连接），避免用户取消后仍把整段结果
-    /// 发给前端、白耗网络/CPU 与 token（并减小文本继续外传的隐私暴露）。
+    /// 每个请求独立的取消令牌；取消时唤醒网络等待并丢弃请求 future，释放连接。
     stream_cancellations: Mutex<StreamCancellationState>,
     next_stream_id: AtomicU64,
 }
 
 struct StreamCancellationState {
-    active: HashMap<u64, Arc<AtomicBool>>,
-    cancelled_before_start: HashSet<u64>,
+    active: HashMap<StreamRequestKey, Arc<CancellationToken>>,
+    cancelled_before_start: HashSet<StreamRequestKey>,
+}
+
+/// Frontend counters restart when a Hook is remounted or a window reloads.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct StreamRequestKey {
+    window_label: String,
+    request_scope: String,
+    request_id: u64,
+}
+
+impl StreamRequestKey {
+    fn new(window_label: &str, request_id: u64, request_scope: Option<&str>) -> Self {
+        Self {
+            window_label: window_label.to_string(),
+            request_scope: request_scope.unwrap_or_default().to_string(),
+            request_id,
+        }
+    }
 }
 
 /// AI 服务内部实现
@@ -41,8 +58,8 @@ struct AiServiceInner {
 
 struct StreamCancellationGuard<'a> {
     service: &'a AiService,
-    request_id: u64,
-    token: Arc<AtomicBool>,
+    request_key: StreamRequestKey,
+    token: Arc<CancellationToken>,
 }
 
 impl Drop for StreamCancellationGuard<'_> {
@@ -50,10 +67,10 @@ impl Drop for StreamCancellationGuard<'_> {
         if let Ok(mut guard) = self.service.stream_cancellations.lock() {
             if guard
                 .active
-                .get(&self.request_id)
+                .get(&self.request_key)
                 .is_some_and(|token| Arc::ptr_eq(token, &self.token))
             {
-                guard.active.remove(&self.request_id);
+                guard.active.remove(&self.request_key);
             }
         }
     }
@@ -266,39 +283,64 @@ impl AiService {
         }
     }
 
-    /// 请求取消当前流式调用（前端点「取消」时调用）
+    /// 为没有指定 ID 的流式调用分配 ID。
     pub fn next_stream_id(&self) -> u64 {
         self.next_stream_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn request_cancel(&self, request_id: Option<u64>) {
+    /// 只取消来源窗口的指定请求；空 ID 表示没有活动请求。
+    pub fn request_cancel(
+        &self,
+        window_label: &str,
+        request_id: Option<u64>,
+        request_scope: Option<&str>,
+    ) {
+        let Some(request_id) = request_id else {
+            return;
+        };
+        let request_key = StreamRequestKey::new(window_label, request_id, request_scope);
         if let Ok(mut guard) = self.stream_cancellations.lock() {
-            match request_id {
-                Some(id) => {
-                    if let Some(token) = guard.active.get(&id) {
-                        token.store(true, Ordering::SeqCst);
-                    } else {
-                        if guard.cancelled_before_start.len() >= 1024 {
-                            if let Some(oldest) =
-                                guard.cancelled_before_start.iter().next().copied()
-                            {
-                                guard.cancelled_before_start.remove(&oldest);
-                            }
-                        }
-                        guard.cancelled_before_start.insert(id);
+            if let Some(token) = guard.active.get(&request_key) {
+                token.cancel();
+            } else {
+                if guard.cancelled_before_start.len() >= 1024 {
+                    if let Some(key) = guard.cancelled_before_start.iter().next().cloned() {
+                        guard.cancelled_before_start.remove(&key);
                     }
                 }
-                None => {
-                    for token in guard.active.values() {
-                        token.store(true, Ordering::SeqCst);
-                    }
-                }
+                guard.cancelled_before_start.insert(request_key);
             }
         }
         crate::utils::logger::log("ai", "cancel requested for streaming call");
     }
 
-    /// 重置取消标志（发起新的流式调用前调用，避免上一次取消影响新请求）
+    fn register_stream(
+        &self,
+        window_label: &str,
+        request_id: u64,
+        request_scope: Option<&str>,
+    ) -> Result<StreamCancellationGuard<'_>, String> {
+        let request_key = StreamRequestKey::new(window_label, request_id, request_scope);
+        let token = Arc::new(CancellationToken::new());
+        let mut guard = self
+            .stream_cancellations
+            .lock()
+            .map_err(|_| "AI 流式请求取消状态不可用".to_string())?;
+        if guard.cancelled_before_start.remove(&request_key) {
+            return Err("已取消".to_string());
+        }
+        if guard.active.contains_key(&request_key) {
+            return Err(format!("AI 请求 id 已在使用中: {}", request_id));
+        }
+        guard.active.insert(request_key.clone(), Arc::clone(&token));
+        Ok(StreamCancellationGuard {
+            service: self,
+            request_key,
+            token,
+        })
+    }
+
+    /// 更新 AI 配置。
     pub fn update_config(&self, config: AiConfig) -> Result<(), String> {
         crate::utils::logger::log("ai", "AI 服务配置已更新");
         let mut inner = self
@@ -435,7 +477,9 @@ impl AiService {
     /// 流式调用 AI 接口，通过回调逐块推送文本
     pub async fn call_stream<F>(
         &self,
+        window_label: &str,
         request_id: u64,
+        request_scope: Option<&str>,
         prompt: &str,
         system_prompt: Option<&str>,
         on_chunk: F,
@@ -443,25 +487,26 @@ impl AiService {
     where
         F: Fn(&str) + Send + 'static,
     {
-        let cancel_token = Arc::new(AtomicBool::new(false));
-        {
-            let mut guard = self
-                .stream_cancellations
-                .lock()
-                .map_err(|_| "AI 流式请求取消状态不可用".to_string())?;
-            if guard.cancelled_before_start.remove(&request_id) {
-                return Err("已取消".to_string());
-            }
-            if guard.active.contains_key(&request_id) {
-                return Err(format!("AI 请求 id 已在使用中: {}", request_id));
-            }
-            guard.active.insert(request_id, Arc::clone(&cancel_token));
+        let stream_guard = self.register_stream(window_label, request_id, request_scope)?;
+        // The cancellation branch must wake even if the provider sends nothing.
+        // Dropping the losing future releases a pending HTTP request/body stream.
+        tokio::select! {
+            biased;
+            _ = stream_guard.token.cancelled() => Err("已取消".to_string()),
+            result = self.call_stream_request(prompt, system_prompt, on_chunk, &stream_guard.token) => result,
         }
-        let _stream_guard = StreamCancellationGuard {
-            service: self,
-            request_id,
-            token: Arc::clone(&cancel_token),
-        };
+    }
+
+    async fn call_stream_request<F>(
+        &self,
+        prompt: &str,
+        system_prompt: Option<&str>,
+        on_chunk: F,
+        cancel_token: &CancellationToken,
+    ) -> Result<String, String>
+    where
+        F: Fn(&str) + Send + 'static,
+    {
         crate::utils::logger::log(
             "ai",
             &format!("流式调用 AI, prompt 长度: {} 字节", prompt.len()),
@@ -538,7 +583,7 @@ impl AiService {
         while let Some(chunk_result) = stream.next().await {
             // 用户已取消流式调用 → 立即终止并丢弃剩余数据，避免白耗网络/CPU 与 token。
             // drop response 会断开底层连接；前端取消后已移除监听器，安全性无影响。
-            if cancel_token.load(Ordering::SeqCst) {
+            if cancel_token.is_cancelled() {
                 crate::utils::logger::log("ai", "streaming call cancelled, aborting read");
                 return Err("已取消".to_string());
             }
@@ -580,6 +625,225 @@ impl AiService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn assert_stalled_stream_is_cancelled(response_headers: Option<&'static str>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let sends_chunk =
+            response_headers.is_some_and(|headers| headers.starts_with("HTTP/1.1 200"));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (chunk_tx, chunk_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+            }
+            if let Some(headers) = response_headers {
+                socket.write_all(headers.as_bytes()).unwrap();
+                if sends_chunk {
+                    let data = b"data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n";
+                    write!(socket, "{:X}\r\n", data.len()).unwrap();
+                    socket.write_all(data).unwrap();
+                    socket.write_all(b"\r\n").unwrap();
+                }
+                socket.flush().unwrap();
+            }
+            let _ = ready_tx.send(());
+            // Keep the connection open without sending the next response bytes.
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        });
+        let service = Arc::new(AiService::new(AiConfig {
+            api_key: "test-key".into(),
+            base_url: format!("http://{}", address),
+            model: "test-model".into(),
+            api_type: "openai".into(),
+        }));
+        service.inner.lock().unwrap().http_client =
+            Some(reqwest::Client::builder().no_proxy().build().unwrap());
+        let request_service = Arc::clone(&service);
+        let chunk_tx = Mutex::new(Some(chunk_tx));
+        let mut pending = tokio::spawn(async move {
+            request_service
+                .call_stream("toolbar", 1, Some("stalled"), "test", None, move |_| {
+                    if let Some(sender) = chunk_tx.lock().unwrap().take() {
+                        let _ = sender.send(());
+                    }
+                })
+                .await
+        });
+        let ready = tokio::time::timeout(Duration::from_secs(5), ready_rx).await;
+        if !matches!(ready, Ok(Ok(()))) {
+            pending.abort();
+            let _ = release_tx.send(());
+            panic!("loopback server did not receive the request: {:?}", ready);
+        }
+        if sends_chunk {
+            // Observe a real parsed chunk before cancelling so this case tests
+            // the body-read phase, rather than another wait for response headers.
+            let chunk = tokio::time::timeout(Duration::from_secs(5), chunk_rx).await;
+            if !matches!(chunk, Ok(Ok(()))) {
+                pending.abort();
+                let _ = release_tx.send(());
+                server.join().unwrap();
+                panic!(
+                    "loopback stream did not deliver its first chunk: {:?}",
+                    chunk
+                );
+            }
+        }
+        tokio::task::yield_now().await;
+        service.request_cancel("toolbar", Some(1), Some("stalled"));
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut pending).await;
+        // Always release the local server before asserting, including on timeout.
+        let _ = release_tx.send(());
+        server.join().unwrap();
+        if result.is_err() {
+            pending.abort();
+            let _ = pending.await;
+        }
+        assert!(
+            matches!(result, Ok(Ok(Err(ref error))) if error == "已取消"),
+            "cancel must wake a stalled request, got {:?}",
+            result
+        );
+        assert!(service
+            .stream_cancellations
+            .lock()
+            .unwrap()
+            .active
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_while_waiting_for_response_headers() {
+        assert_stalled_stream_is_cancelled(None).await;
+    }
+
+    #[tokio::test]
+    async fn test_cancel_while_waiting_for_stream_data() {
+        assert_stalled_stream_is_cancelled(Some(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )).await;
+    }
+
+    #[tokio::test]
+    async fn test_cancel_while_waiting_for_error_body() {
+        assert_stalled_stream_is_cancelled(Some(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 100\r\n\r\n",
+        ))
+        .await;
+    }
+
+    #[test]
+    fn test_remounted_hook_with_same_id_is_isolated() {
+        let service = AiService::new(AiConfig::default());
+        let old = service
+            .register_stream("toolbar", 1, Some("old-hook"))
+            .unwrap();
+        let current = service
+            .register_stream("toolbar", 1, Some("new-hook"))
+            .unwrap();
+        // A cancellation without the instance scope cannot match a scoped request.
+        service.request_cancel("toolbar", Some(1), None);
+        assert!(!old.token.is_cancelled());
+        assert!(!current.token.is_cancelled());
+        service.request_cancel("toolbar", Some(1), Some("old-hook"));
+        assert!(old.token.is_cancelled());
+        assert!(!current.token.is_cancelled());
+        drop(old);
+        assert_eq!(service.stream_cancellations.lock().unwrap().active.len(), 1);
+        service.request_cancel("toolbar", Some(1), Some("new-hook"));
+        assert!(current.token.is_cancelled());
+    }
+
+    #[test]
+    fn test_delayed_cancel_cannot_poison_replacement_hook() {
+        let service = AiService::new(AiConfig::default());
+        // Cancellation arrives after the old request has already left the map.
+        service.request_cancel("toolbar", Some(1), Some("old-hook"));
+        let current = service
+            .register_stream("toolbar", 1, Some("new-hook"))
+            .unwrap();
+        assert!(!current.token.is_cancelled());
+        assert!(
+            matches!(service.register_stream("toolbar", 1, Some("old-hook")), Err(e) if e == "已取消")
+        );
+    }
+
+    #[test]
+    fn test_idle_cancel_does_not_cancel_any_stream() {
+        let service = AiService::new(AiConfig::default());
+        let toolbar = service.register_stream("toolbar", 1, None).unwrap();
+        let ocr = service.register_stream("pin-ocr-result", 1, None).unwrap();
+        service.request_cancel("toolbar", None, None);
+        assert!(!toolbar.token.is_cancelled());
+        assert!(!ocr.token.is_cancelled());
+        assert!(service
+            .stream_cancellations
+            .lock()
+            .unwrap()
+            .cancelled_before_start
+            .is_empty());
+    }
+
+    #[test]
+    fn test_cancel_is_scoped_to_window_and_request() {
+        let service = AiService::new(AiConfig::default());
+        let toolbar = service.register_stream("toolbar", 1, None).unwrap();
+        let next_toolbar = service.register_stream("toolbar", 2, None).unwrap();
+        let ocr = service.register_stream("pin-ocr-result", 1, None).unwrap();
+        service.request_cancel("toolbar", Some(1), None);
+        service.request_cancel("toolbar", Some(1), None);
+        assert!(toolbar.token.is_cancelled());
+        assert!(!next_toolbar.token.is_cancelled());
+        assert!(!ocr.token.is_cancelled());
+    }
+
+    #[test]
+    fn test_early_cancel_is_scoped_and_consumed() {
+        let service = AiService::new(AiConfig::default());
+        service.request_cancel("toolbar", Some(1), None);
+        let ocr = service.register_stream("pin-ocr-result", 1, None).unwrap();
+        assert!(matches!(service.register_stream("toolbar", 1, None), Err(e) if e == "已取消"));
+        assert!(!ocr.token.is_cancelled());
+        // The early cancellation is consumed and cannot poison a future stream.
+        assert!(service.register_stream("toolbar", 1, None).is_ok());
+    }
+
+    #[test]
+    fn test_stream_guard_cleans_up_only_its_request() {
+        let service = AiService::new(AiConfig::default());
+        let toolbar = service.register_stream("toolbar", 1, None).unwrap();
+        let ocr = service.register_stream("pin-ocr-result", 1, None).unwrap();
+        assert!(service.register_stream("toolbar", 1, None).is_err());
+        drop(toolbar);
+        assert!(service.register_stream("toolbar", 1, None).is_ok());
+        assert_eq!(service.stream_cancellations.lock().unwrap().active.len(), 1);
+        service.request_cancel("pin-ocr-result", Some(1), None);
+        assert!(ocr.token.is_cancelled());
+        drop(ocr);
+        assert!(service
+            .stream_cancellations
+            .lock()
+            .unwrap()
+            .active
+            .is_empty());
+    }
 
     #[test]
     fn test_build_request_body_anthropic() {
