@@ -167,26 +167,18 @@ pub fn start_long_capture(
         let _ = frame.show();
     }
     if let Some(controls) = app.get_webview_window("long-capture-controls") {
-        let bounds = crate::screenshot::virtual_desktop_bounds().ok();
         let control_size = controls.outer_size().ok();
-        let control_width = control_size.map(|size| size.width as i32).unwrap_or(300);
-        let control_height = control_size.map(|size| size.height as i32).unwrap_or(64);
-        let mut control_x = left;
-        let mut control_y = top.saturating_add(height).saturating_add(10);
-        if let Some(bounds) = bounds {
-            let right = bounds.origin_x.saturating_add(bounds.width);
-            let bottom = bounds.origin_y.saturating_add(bounds.height);
-            let max_x = right.saturating_sub(control_width).max(bounds.origin_x);
-            let max_y = bottom.saturating_sub(control_height).max(bounds.origin_y);
-            if control_y.saturating_add(control_height) > bottom {
-                control_y = top.saturating_sub(control_height + 10);
-            }
-            control_x = control_x.clamp(bounds.origin_x, max_x);
-            control_y = control_y.clamp(bounds.origin_y, max_y);
-        }
-        let _ = controls.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-            control_x, control_y,
-        )));
+        place_long_capture_controls(
+            &controls,
+            crate::scroll_capture::CaptureRegion {
+                left,
+                top,
+                width: width as u32,
+                height: height as u32,
+            },
+            control_size.map(|size| size.width as i32).unwrap_or(300),
+            control_size.map(|size| size.height as i32).unwrap_or(72),
+        );
         let _ = controls.show();
         let _ = controls.set_always_on_top(true);
     }
@@ -203,6 +195,68 @@ pub fn start_long_capture(
     let _ = app.emit("long-capture-started", &summary);
     crate::utils::logger::log("long-capture", "long-capture-started emitted");
     Ok(summary)
+}
+
+/// 把控制条摆到选区下方（下方放不下就翻到上方），并夹回虚拟桌面。
+///
+/// 长截图是 BitBlt 抓屏：控制条只要压在选区上，就会被截进后续帧（顶部烙一条
+/// 控制条）。所以控制条尺寸一变（警告独占一行后变高），就得按选区重新摆一次，
+/// 不能只在会话开始时定位。
+fn place_long_capture_controls(
+    controls: &tauri::WebviewWindow,
+    region: crate::scroll_capture::CaptureRegion,
+    control_width: i32,
+    control_height: i32,
+) {
+    let mut control_x = region.left;
+    let mut control_y = region
+        .top
+        .saturating_add(region.height as i32)
+        .saturating_add(10);
+    if let Ok(bounds) = crate::screenshot::virtual_desktop_bounds() {
+        let right = bounds.origin_x.saturating_add(bounds.width);
+        let bottom = bounds.origin_y.saturating_add(bounds.height);
+        let max_x = right.saturating_sub(control_width).max(bounds.origin_x);
+        let max_y = bottom.saturating_sub(control_height).max(bounds.origin_y);
+        if control_y.saturating_add(control_height) > bottom {
+            control_y = region.top.saturating_sub(control_height + 10);
+        }
+        control_x = control_x.clamp(bounds.origin_x, max_x);
+        control_y = control_y.clamp(bounds.origin_y, max_y);
+    }
+    let _ = controls.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        control_x, control_y,
+    )));
+}
+
+/// 控制条尺寸变化后按选区重新定位（见 place_long_capture_controls）。
+///
+/// 高度由前端传入刚下发的逻辑像素值，而不是读 `outer_size()`：setSize 与这条
+/// 命令是两次独立 IPC，读回来可能是旧高度，重新定位就会按旧高度算。
+#[tauri::command]
+pub fn reposition_long_capture_controls(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    if !height.is_finite() || height <= 0.0 {
+        return Ok(());
+    }
+    let state = app.state::<crate::scroll_capture::LongCaptureState>();
+    let Some(region) = state.active_region() else {
+        return Ok(());
+    };
+    let Some(controls) = app.get_webview_window("long-capture-controls") else {
+        return Ok(());
+    };
+    let scale = controls.scale_factor().unwrap_or(1.0);
+    let control_width = controls
+        .outer_size()
+        .map(|size| size.width as i32)
+        .unwrap_or(300);
+    place_long_capture_controls(
+        &controls,
+        region,
+        control_width,
+        (height * scale).round() as i32,
+    );
+    Ok(())
 }
 
 #[tauri::command]

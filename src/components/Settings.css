@@ -1325,6 +1325,36 @@
   flex-wrap: wrap;
 }
 
+/* 「已是最新版本」旁保留的再次检查入口（次要按钮，不抢占主操作） */
+.settings-updater-recheck {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  flex-shrink: 0;
+  padding: var(--space-1-5) var(--space-3);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--radius-md);
+  background: var(--settings-input-bg);
+  color: var(--color-fg-muted);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.settings-updater-recheck:hover {
+  background: var(--button-hover-bg);
+  color: var(--color-fg);
+}
+
+.settings-updater-recheck:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
 .settings-updater-error {
   display: flex;
   align-items: center;

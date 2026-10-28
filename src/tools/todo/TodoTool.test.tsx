@@ -68,6 +68,20 @@ describe("TodoTool", () => {
     expect((screen.getByLabelText("提醒时间") as HTMLInputElement).value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
   });
 
+  // 读屏需要知道当前停在哪一栏：页签不能只有样式上的 is-active，还要有 role 与选中态。
+  it("exposes the filter tabs with a selected state", () => {
+    render(<TodoTool />);
+    const tablist = screen.getByRole("tablist", { name: "任务筛选" });
+    const tabs = within(tablist).getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["待办", "今天", "已完成"]);
+    expect(tabs[0]).toHaveAttribute("aria-selected", "true");
+    expect(tabs[1]).toHaveAttribute("aria-selected", "false");
+
+    fireEvent.click(tabs[1]);
+    expect(screen.getByRole("tab", { name: "今天" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "待办" })).toHaveAttribute("aria-selected", "false");
+  });
+
   // 清单全部由用户自建：没有任何清单时下拉框只剩「全部任务」这一个伪选项，
   // 它不做清单过滤，未归类任务也照常显示。回收站视图则整条清单栏都不出现。
   it("falls back to the all-tasks option when no list exists and hides the list filter in trash", async () => {
@@ -77,12 +91,12 @@ describe("TodoTool", () => {
       return Promise.resolve(undefined);
     });
     render(<TodoTool />);
-    const listSelect = await screen.findByRole("combobox", { name: "Todo list" });
+    const listSelect = await screen.findByRole("combobox", { name: "按清单筛选" });
     await waitFor(() => expect(within(listSelect).getAllByRole("option")).toHaveLength(1));
     expect(within(listSelect).getByRole("option", { name: "全部任务" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
     fireEvent.click(screen.getByRole("button", { name: "回收站" }));
-    expect(screen.queryByRole("combobox", { name: "Todo list" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "按清单筛选" })).not.toBeInTheDocument();
     expect(screen.getByText("回收站")).toBeInTheDocument();
   });
 
@@ -100,7 +114,7 @@ describe("TodoTool", () => {
     await screen.findByText("清单内任务");
     expect(screen.getByText("未归类任务")).toBeInTheDocument();
 
-    const listSelect = screen.getByRole("combobox", { name: "Todo list" });
+    const listSelect = screen.getByRole("combobox", { name: "按清单筛选" });
     fireEvent.change(listSelect, { target: { value: "list-1" } });
     await waitFor(() => expect(screen.queryByText("未归类任务")).not.toBeInTheDocument());
     expect(screen.getByText("清单内任务")).toBeInTheDocument();
@@ -119,12 +133,12 @@ describe("TodoTool", () => {
     await waitFor(() => expect(screen.getByRole("option", { name: "工作" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "管理清单" }));
     // 「全部任务」不是真清单，没有可重命名/删除的对象
-    expect(screen.queryByRole("button", { name: "Rename list" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Delete list" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重命名清单" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除清单" })).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Todo list" }), { target: { value: "list-1" } });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Rename list" })).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Delete list" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "按清单筛选" }), { target: { value: "list-1" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "重命名清单" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "删除清单" })).toBeInTheDocument();
   });
 
   it("creates a list from the manager panel", async () => {
@@ -134,7 +148,7 @@ describe("TodoTool", () => {
       return Promise.resolve(undefined);
     });
     render(<TodoTool />);
-    await screen.findByRole("combobox", { name: "Todo list" });
+    await screen.findByRole("combobox", { name: "按清单筛选" });
     fireEvent.click(screen.getByRole("button", { name: "管理清单" }));
 
     const nameInput = screen.getByPlaceholderText("新建清单");
@@ -154,19 +168,19 @@ describe("TodoTool", () => {
     render(<TodoTool />);
     await waitFor(() => expect(screen.getByRole("option", { name: "工作" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "管理清单" }));
-    fireEvent.change(screen.getByRole("combobox", { name: "Todo list" }), { target: { value: "list-1" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "按清单筛选" }), { target: { value: "list-1" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "Rename list" }));
-    const renameInput = screen.getByLabelText("Edit list name");
+    fireEvent.click(screen.getByRole("button", { name: "重命名清单" }));
+    const renameInput = screen.getByLabelText("编辑清单名称");
     fireEvent.change(renameInput, { target: { value: "项目" } });
     fireEvent.keyDown(renameInput, { key: "Enter" });
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("update_todo_list", { id: "list-1", input: { name: "项目" } }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete list" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm delete list" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除清单" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除清单" }));
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("delete_todo_list", { id: "list-1" }));
     // 清单没了，筛选项要退回「全部任务」，不能停在已删除的 id 上
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Todo list" })).toHaveValue(""));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "按清单筛选" })).toHaveValue(""));
   });
 
   it("adds the task to the selected list when one is chosen", async () => {
@@ -177,7 +191,7 @@ describe("TodoTool", () => {
     });
     render(<TodoTool />);
     await waitFor(() => expect(screen.getByRole("option", { name: "工作" })).toBeInTheDocument());
-    fireEvent.change(screen.getByRole("combobox", { name: "Todo list" }), { target: { value: "list-1" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "按清单筛选" }), { target: { value: "list-1" } });
 
     const input = screen.getByPlaceholderText("添加任务...");
     fireEvent.change(input, { target: { value: "写周报" } });
@@ -518,6 +532,46 @@ describe("TodoTool", () => {
     fireEvent.click(screen.getByLabelText("添加任务"));
 
     expect(await screen.findByText("请输入任务标题")).toBeInTheDocument();
+  });
+
+  it("提示几秒后自动收起，不需要手动关闭", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<TodoTool />);
+      await act(async () => { await Promise.resolve(); });
+
+      fireEvent.click(screen.getByLabelText("添加任务"));
+      expect(screen.getByText("请输入任务标题")).toBeInTheDocument();
+
+      await act(async () => { vi.advanceTimersByTime(5000); });
+
+      expect(screen.queryByText("请输入任务标题")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * 成功与失败以前共用一套灰字，用户看不出差别；现在靠 is-success / is-error 区分。
+   */
+  it("成功与失败提示使用不同样式", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_todos") return Promise.resolve([]);
+      if (command === "export_todos") return Promise.resolve(true);
+      return Promise.resolve(undefined);
+    });
+
+    render(<TodoTool />);
+    await act(async () => { await Promise.resolve(); });
+
+    fireEvent.click(screen.getByLabelText("添加任务"));
+    expect(screen.getByText("请输入任务标题").closest(".todo-io-toast")).toHaveClass("is-error");
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+    fireEvent.click(screen.getByRole("button", { name: /导出任务/ }));
+
+    const success = await screen.findByText("导出成功");
+    expect(success.closest(".todo-io-toast")).toHaveClass("is-success");
   });
 
   it("清空回收站必须二次确认，确认前不发永久删除请求", async () => {

@@ -1,47 +1,5 @@
 use super::*;
 
-/// 显示滚动导航独立窗口。
-///
-/// `async` + `spawn_blocking`：抓目标窗口要轮询前台窗口（最多 12×10ms）并访问 Win32，
-/// 同步命令跑在事件循环主线程上会连带冻结所有窗口（见 `scroll_navigation.rs` 模块注释）。
-#[tauri::command]
-pub async fn start_scroll_navigation(
-    app: tauri::AppHandle,
-) -> Result<crate::scroll_navigation::ScrollNavigationState, String> {
-    // The palette owns focus while its tool button is being activated. Hide it
-    // before capturing the target so the previous application becomes the
-    // foreground window again instead of Levitaire's own palette HWND.
-    // 捕获 + 状态探测都在阻塞任务里完成（探测也是一次跨进程 UIA 遍历）。
-    let capture_app = app.clone();
-    let state = tokio::task::spawn_blocking(move || {
-        if let Some(palette) = capture_app.get_webview_window("palette") {
-            if palette.is_visible().unwrap_or(false) {
-                let _ = palette.hide();
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-        }
-        crate::scroll_navigation::capture_current_target(&capture_app);
-        crate::scroll_navigation::state()
-    })
-    .await
-    .map_err(|error| format!("目标窗口捕获失败: {error}"))?;
-
-    let window = app
-        .get_webview_window("scroll-navigator-overlay")
-        .ok_or_else(|| "滚动导航窗口尚未创建".to_string())?;
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())?;
-    Ok(state)
-}
-
-#[tauri::command]
-pub fn hide_scroll_navigation(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("scroll-navigator-overlay") {
-        window.hide().map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn start_utility_hub(app: tauri::AppHandle) -> Result<(), String> {
     // Capture the user's application before showing the always-on-top hub.
@@ -211,7 +169,7 @@ pub async fn recapture_scroll_target(
         Vec<&'static str>,
         crate::scroll_navigation::ScrollNavigationState,
     ) = tokio::task::spawn_blocking(move || {
-        let restore: Vec<&'static str> = ["utility-hub-overlay", "scroll-navigator-overlay"]
+        let restore: Vec<&'static str> = ["utility-hub-overlay"]
             .into_iter()
             .filter(|label| {
                 capture_app

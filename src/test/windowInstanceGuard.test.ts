@@ -107,8 +107,8 @@ describe("窗口实例取值约定（防自激渲染循环）", () => {
  * 320→380、监控切 full、便签加行、面板换页、工具栏弹出二维码预览）会有一部分跑到
  * 工作区外 —— 这些都是无边框置顶窗、没有滚动条，出屏的部分直接看不到也点不到。
  *
- * 反例（不在此清单，因为它们不需要）：`LongCaptureControls` 放大后紧跟 `center()`
- * 已居中；`toolWindows.ts` 的 `setSize` 是**创建**窗口时按显示器尺寸设的全屏遮罩。
+ * 反例（不在此清单，因为它们不需要）：`toolWindows.ts` 的 `setSize` 是**创建**
+ * 窗口时按显示器尺寸设的全屏遮罩。
  * 新增「尺寸随内容变化」的浮窗时必须一并调用 `clampWindowToWorkArea`，并加进本清单。
  */
 const CLAMPED_WINDOW_COMPONENTS = [
@@ -119,7 +119,7 @@ const CLAMPED_WINDOW_COMPONENTS = [
   "src/tools/sticky-note/StickyNoteManager.tsx",
   "src/components/ToolPalette.tsx",
   "src/tools/utility-hub/UtilityHub.tsx",
-  "src/tools/scroll-navigator/ScrollNavigator.tsx",
+  "src/tools/screenshot/LongCaptureControls.tsx",
   "src/tools/todo/TodoTool.tsx",
 ];
 

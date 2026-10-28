@@ -614,6 +614,9 @@ function FloatingToolbar() {
         hideToolbar();
       } catch (err) {
         console.error("Failed to copy:", err);
+        // 复制可能因焦点丢失或系统拒绝而失败，需给出可见反馈，否则用户会误以为成功。
+        // 选区也可能是图片，兜底文案不用「文本」以免误导。
+        showError(toErrorMessage(err, "复制失败，请重新选中内容"));
       }
     }
   };
@@ -626,6 +629,8 @@ function FloatingToolbar() {
         hideToolbar();
       } catch (err) {
         console.error("Failed to open search:", err);
+        // 后台日志之外必须有可见反馈：静默失败会让用户以为已经打开
+        showError(toErrorMessage(err, "打开浏览器失败，请检查默认浏览器设置"));
       }
     }
   };

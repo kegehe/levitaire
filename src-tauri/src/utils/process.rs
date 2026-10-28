@@ -711,7 +711,6 @@ mod tests {
     fn scan_skips_only_known_test_only_module_files() {
         const KNOWN: &[&str] = &[
             "ocr/accuracy_test.rs",
-            "ocr/windows_ocr.rs",
             // 系统清理工具的用例与源码守卫：三个文件都只由 `#[cfg(test)] mod` 引入
             "disk_cleanup/safety/safety_test.rs",
             "disk_cleanup/delete/delete_test.rs",
@@ -817,7 +816,7 @@ mod tests {
 
     #[test]
     fn strip_test_modules_keeps_production_code_between_test_modules() {
-        // `ocr/mod.rs` 的真实形状：开头就有 `#[cfg(test)] mod xxx;`，中间还有生产代码。
+        // 类似 `ocr/mod.rs` 的多段形状：多个 `#[cfg(test)] mod xxx;` 之间夹着生产代码。
         let source = r#"
 #[cfg(test)]
 mod accuracy_test;

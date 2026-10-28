@@ -178,8 +178,8 @@ describe("UtilityHub", () => {
   });
 
   it("keeps the added scroll-nav controls on the hub's compact scale", () => {
-    // 通用工具是滚动导航唯一的使用场景，面板宽 216px；而 ScrollNavigator.css 里那套尺寸
-    // 是给独立窗口（248px）写的。新增的滚动导航控件必须在 UtilityHub.css 补一份紧凑覆盖，
+    // 通用工具是滚动导航唯一的使用场景，面板宽 216px；而 ScrollNavigator.css 的基础尺寸
+    // 是 248px。新增的滚动导航控件必须在 UtilityHub.css 补一份紧凑覆盖，
     // 漏补就会在这里按大一号渲染（旧实现只覆盖了原有的百分比 / 预设那几块）。
     const hubCss = readHubCss();
     const declsOf = (selector: string) => {

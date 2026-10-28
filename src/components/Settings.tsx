@@ -608,6 +608,29 @@ function Settings() {
    */
   const [watchNotice, setWatchNotice] = useState<string | null>(null);
   const [watchBusy, setWatchBusy] = useState(false);
+  /**
+   * 看门狗状态是**长驻后台任务**的对外快照（上次检查时间 / 当前告警 / 最近错误），
+   * 会随后台周期检查自己变化。所有写回都带序号：只有最新一次来源（后台事件或主动读取）
+   * 能落到 state —— 否则「进入页签时发出的读取」晚于事件返回，就会用旧快照把新结果盖回去，
+   * 然后一直停在那儿，直到下一次周期检查（默认一天）才纠正。
+   */
+  const watchStatusSeqRef = useRef(0);
+  /** 写回看门狗状态，并作废仍在路上的旧读取。 */
+  const applyWatchStatus = useCallback((status: WatchStatus) => {
+    watchStatusSeqRef.current += 1;
+    setWatchStatus(status);
+  }, []);
+  /** 重新读取看门狗状态（进入页签 / 窗口重新聚焦时用）。 */
+  const refreshWatchStatus = useCallback(async () => {
+    const seq = ++watchStatusSeqRef.current;
+    try {
+      const status = await invoke<WatchStatus>("disk_cleanup_watch_status");
+      if (seq !== watchStatusSeqRef.current) return;
+      setWatchStatus(status);
+    } catch {
+      // 读不到就等下一次事件或下次进入页签，不在这里打扰用户
+    }
+  }, []);
   const [settingsAuditConfirm, setSettingsAuditConfirm] = useState(false);
   const [settingsAuditMessage, setSettingsAuditMessage] = useState<string | null>(null);
   const [timerEnabled, setTimerEnabled] = useState(false);
@@ -868,7 +891,7 @@ function Settings() {
           minAgeDays: patch.minAgeDays ?? watchStatus.minAgeDays,
         },
       });
-      setWatchStatus(status);
+      applyWatchStatus(status);
     } catch (error) {
       setWatchError(String(error));
     } finally {
@@ -884,7 +907,7 @@ function Settings() {
     setWatchNotice(null);
     try {
       const status = await invoke<WatchStatus | null>("disk_cleanup_watch_add_directory");
-      if (status) setWatchStatus(status);
+      if (status) applyWatchStatus(status);
     } catch (error) {
       setWatchError(String(error));
     } finally {
@@ -919,7 +942,7 @@ function Settings() {
     setWatchNotice(null);
     try {
       const status = await invoke<WatchStatus>("disk_cleanup_watch_remove_directory", { index });
-      setWatchStatus(status);
+      applyWatchStatus(status);
     } catch (error) {
       setWatchError(String(error));
     } finally {
@@ -1317,12 +1340,6 @@ function Settings() {
           },
         );
         break;
-      case "system-cleaner":
-        // 看门狗设置是长驻后台任务的配置，不在工具开关快照里，单独拉一次
-        invoke<WatchStatus>("disk_cleanup_watch_status")
-          .then((status) => setWatchStatus(status))
-          .catch(() => {});
-        break;
       case "monitor":
         // 工具启用/自动打开状态由进入页签时的快照刷新统一处理（见 refreshToolEnableSnapshot）
         fetchSystemMonitorConfig()
@@ -1400,6 +1417,32 @@ function Settings() {
         break;
     }
   }, [activeTab]);
+
+  // 看门狗状态来自**长驻后台任务**：周期检查（以及「立即检查」）跑完都会推一条全量快照。
+  // 只在进页签时读一次的话，设置页一直开着也看不到新的「上次检查 / 告警 / 最近错误」，
+  // 而后台检查的间隔可能是好几天 —— 用户会一直盯着一份过期副本。
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let cancelled = false;
+    listen<WatchStatus>("disk-cleanup-watchdog", (event) => {
+      if (cancelled) return;
+      applyWatchStatus(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else un = fn;
+    });
+    return () => {
+      cancelled = true;
+      if (un) un();
+    };
+  }, [applyWatchStatus]);
+
+  // 每次进入系统清理页都重读一次看门狗状态：它不受 loadedTabsRef（会话内只读一次）
+  // 约束 —— 后台任务的状态没有别的快照入口，切走再回来必须是新的。
+  useEffect(() => {
+    if (activeTab !== "system-cleaner") return;
+    void refreshWatchStatus();
+  }, [activeTab, refreshWatchStatus]);
 
   // 「启动时自动打开」勾选框依赖工具启用状态（系统监控/时间工具/待办）。
   // 这些开关可在悬浮球面板等外部入口被改动，而设置窗口隐藏后组件仍挂载，
@@ -1484,6 +1527,9 @@ function Settings() {
           // 重新聚焦即视为新一轮窗口会话：使快照失效，确保再进入相关页签时取到最新状态
           toolSnapshotLoadedRef.current = false;
           if (activeTabRef.current === "quick-input") void refreshQiHistory();
+          // 看门狗是后台任务：窗口隐藏期间可能已经跑过好几轮，重新聚焦时重读一次，
+          // 否则「上次检查 / 告警 / 最近错误」会停在打开窗口那一刻的副本上。
+          if (activeTabRef.current === "system-cleaner") void refreshWatchStatus();
           if (
             activeTabRef.current === "monitor" ||
             activeTabRef.current === "system-cleaner" ||
@@ -1508,12 +1554,24 @@ function Settings() {
       if (closeTimerRef.current !== null) globalThis.clearTimeout(closeTimerRef.current);
       unlisten?.();
     };
-  }, [refreshQiHistory, refreshToolEnableSnapshot]);
+  }, [refreshQiHistory, refreshToolEnableSnapshot, refreshWatchStatus]);
 
   // 切换到快速输入页时主动刷新，保证用户看到的是当前后端历史。
   useEffect(() => {
     if (activeTab === "quick-input") void refreshQiHistory();
   }, [activeTab, refreshQiHistory]);
+
+  /**
+   * 离开系统清理页即撤销「清空审计日志」的确认状态。
+   *
+   * 两步确认的全部意义在于「点第二下时你仍然看着这个按钮」。旧实现把
+   * settingsAuditConfirm 一直挂在组件上，切走页签也不会复位 —— 隔一段时间回来，
+   * 按钮已经停在「确认清空？」上，再点一下就真的删了。审计日志是清理出事后
+   * 唯一的取证依据，这种「第二下被跳过」的路径必须堵死。
+   */
+  useEffect(() => {
+    if (activeTab !== "system-cleaner") setSettingsAuditConfirm(false);
+  }, [activeTab]);
 
   // 快捷键录入：聚焦时捕获按键组合
   const handleHotkeyKeyDown = (e: React.KeyboardEvent) => {
@@ -2782,9 +2840,18 @@ function Settings() {
                     </span>
                   )}
                   {updater.status === "upToDate" && (
-                    <span className="settings-hint">
-                      <Icon name="Check" size={14} /> 已是最新版本
-                    </span>
+                    <div className="settings-updater-available">
+                      <span className="settings-hint">
+                        <Icon name="Check" size={14} /> 已是最新版本
+                      </span>
+                      <button
+                        className="settings-updater-recheck"
+                        onClick={updater.checkForUpdate}
+                        title="再次检查更新"
+                      >
+                        <Icon name="RefreshCw" size={14} /> 再次检查
+                      </button>
+                    </div>
                   )}
                   {updater.status === "downloading" && (
                     <span className="settings-hint">

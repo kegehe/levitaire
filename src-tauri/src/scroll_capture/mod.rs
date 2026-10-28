@@ -264,6 +264,15 @@ impl LongCaptureState {
             .unwrap_or(false)
     }
 
+    /// 当前会话的抓取区域。控制条要按它重新定位（尺寸变了之后），
+    /// 没有活动会话时返回 None。
+    pub fn active_region(&self) -> Option<CaptureRegion> {
+        self.active
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|active| active.region))
+    }
+
     pub fn owns_result(&self, result_id: u64) -> bool {
         self.active
             .lock()

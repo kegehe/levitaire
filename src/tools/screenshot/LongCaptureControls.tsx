@@ -5,6 +5,7 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import Icon from "../../components/Icon";
+import { clampWindowToWorkArea } from "../../utils/panelWindow";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
@@ -23,6 +24,9 @@ type CaptureStatus = {
 
 type View = { kind: "capturing"; result: CaptureStatus } | { kind: "preview"; result: CaptureStatus; preview: string };
 
+/** 控制条窗口宽度（与 utils/toolWindows.ts 创建窗口时的宽度保持一致） */
+const CONTROLS_WIDTH = 300;
+
 function LongCaptureControls() {
   // ⚠️ 必须 memo 化：getCurrentWebviewWindow() 每次返回**新对象**。capturing 阶段
   // 每 350ms 轮询一次状态（setView 新对象）→ 渲染 → win 变化 → 依赖 [win] 的监听
@@ -32,6 +36,10 @@ function LongCaptureControls() {
   const [warning, setWarning] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const viewRef = useRef<View | null>(null);
+  const controlsRef = useRef<HTMLDivElement | null>(null);
+  /** 上一次下发给原生窗口的「宽:高」，重复尺寸不再下发（避免反复重排窗口）。 */
+  const lastSizeRef = useRef("");
+  const measuredResultIdRef = useRef<number | null>(null);
   const actionPending = useRef(false);
   // Invalidates preview loads that finish after the capture was cancelled,
   // closed, or replaced by a newer capture session.
@@ -70,6 +78,8 @@ function LongCaptureControls() {
       if (requestId !== previewRequestRef.current) return;
       await win.setSize(new LogicalSize(760, 560));
       await win.center();
+      // 居中是相对当前显示器算的；屏幕比预览窗还小时仍会露出工作区，再夹一次
+      clampWindowToWorkArea(760, 560);
     } catch (error) {
       console.error("long capture preview failed", error);
     }
@@ -136,9 +146,60 @@ function LongCaptureControls() {
     };
   }, [win]);
 
+  const capturingResultId = view?.kind === "capturing" ? view.result.resultId : null;
+
+  /**
+   * 控制条窗口高度随内容走。
+   *
+   * 进行中的控制条原来被钉死在 64px，标题 / 操作说明 / 帧数进度已经占满三行；
+   * 「部分结果」「滚动过快」这类警告是第四行，一定会被窗口下沿裁掉 —— 用户恰恰
+   * 看不到「这张长图可能不完整」。改成：警告独占一行，窗口高度按实测内容下发。
+   *
+   * 面板自身必须是 height: auto（见 CSS）：一旦撑满窗口，量到的就是窗口高度，
+   * 窗口只会越调越大。用 ResizeObserver 而不是只跟着 warning 变化跑一次：警告
+   * 文案长短不同、换行数不同都会改高度。
+   */
+  useLayoutEffect(() => {
+    if (capturingResultId === null) return;
+    const panel = controlsRef.current;
+    if (!panel) return;
+    // 新一轮会话的窗口已被 toolWindows 复位成紧凑高度，旧的去重值不能再用。
+    if (measuredResultIdRef.current !== capturingResultId) {
+      measuredResultIdRef.current = capturingResultId;
+      lastSizeRef.current = "";
+    }
+    const resizeToContent = () => {
+      // 用 offsetHeight 而不是只读 rect：入场动画（long-capture-enter）带 scale，
+      // rect 会把高度量小 1~2px，进而把窗口也设小。rect 只作为无布局环境的兜底。
+      const height = Math.max(
+        panel.offsetHeight,
+        Math.ceil(panel.getBoundingClientRect().height),
+      );
+      // 0 = 还没布局（测试环境不做布局），此时下发会把窗口压成一条
+      if (height <= 0) return;
+      const size = `${CONTROLS_WIDTH}:${height}`;
+      if (size === lastSizeRef.current) return;
+      lastSizeRef.current = size;
+      // 长截图是 BitBlt 抓屏：控制条摆在选区上方时，往下长会压进选区并被截进成片。
+      // 后端按"新高度"重新摆位（上方就从下沿往上顶），所以必须在改尺寸之前发出去 ——
+      // 顺序反过来，中间会有一帧压在选区上。
+      void invoke("reposition_long_capture_controls", { height }).catch(() => {});
+      win
+        .setSize(new LogicalSize(CONTROLS_WIDTH, height))
+        .catch((error) => console.error("调整长截图控制条尺寸失败:", error));
+      // 控制条贴在选区下沿/屏幕底部时，变高后必须夹回工作区（约定：每次 setSize 后 clamp）
+      clampWindowToWorkArea(CONTROLS_WIDTH, height);
+    };
+    resizeToContent();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(resizeToContent);
+    observer.observe(panel);
+    return () => observer.disconnect();
+    // warning 也在依赖里：ResizeObserver 缺失时（老 WebView）只有它变化能触发重新量高。
+  }, [capturingResultId, warning, win]);
+
   // 只在 resultId 变化时重建轮询。依赖整个 view 会让每次状态回写都拆掉并重开
   // 一个 interval（周期被拉长到 350ms + IPC + 渲染）；inFlight 再挡掉慢 IPC 的叠加。
-  const capturingResultId = view?.kind === "capturing" ? view.result.resultId : null;
   useEffect(() => {
     if (capturingResultId === null) return;
     let inFlight = false;
@@ -255,25 +316,32 @@ function LongCaptureControls() {
   const result = view.result;
   if (view.kind === "capturing") {
     return (
-      <div className="long-capture-controls" role="toolbar" aria-label="长截图控制">
-        <span className="long-capture-dot" />
-        <span className="long-capture-count" title={result.message ?? undefined}>
-          <strong>正在截长图</strong>
-          <span className="long-capture-instruction">滚动页面后点击完成</span>
-        <span className="long-capture-progress">
-          {result.status === "partial" ? "部分结果 · " : ""}
-          {result.frameCount} 帧 · {result.height}px
+      <div ref={controlsRef} className="long-capture-controls" role="toolbar" aria-label="长截图控制">
+        <div className="long-capture-main">
+          <span className="long-capture-dot" />
+          <span className="long-capture-count" title={result.message ?? undefined}>
+            <strong>正在截长图</strong>
+            <span className="long-capture-instruction">滚动页面后点击完成</span>
+            <span className="long-capture-progress">
+              {result.status === "partial" ? "部分结果 · " : ""}
+              {result.frameCount} 帧 · {result.height}px
+            </span>
           </span>
-        {warning && <span className="long-capture-warning">{warning}</span>}
-        </span>
-        <button className="long-capture-action" onClick={stop} title="完成长截图" aria-label="完成长截图">
-          <Icon name="Check" size={15} />
-          <span>完成</span>
-        </button>
-        <button className="long-capture-action" onClick={cancel} title="取消长截图" aria-label="取消长截图">
-          <Icon name="X" size={15} />
-          <span>取消</span>
-        </button>
+          <button className="long-capture-action" onClick={stop} title="完成长截图" aria-label="完成长截图">
+            <Icon name="Check" size={15} />
+            <span>完成</span>
+          </button>
+          <button className="long-capture-action" onClick={cancel} title="取消长截图" aria-label="取消长截图">
+            <Icon name="X" size={15} />
+            <span>取消</span>
+          </button>
+        </div>
+        {/* 警告独占一行：塞进上面那三行文案里的话，它必然是第四行，会被窗口下沿裁掉 */}
+        {warning && (
+          <div className="long-capture-warning" role="status">
+            {warning}
+          </div>
+        )}
       </div>
     );
   }

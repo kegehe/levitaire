@@ -202,7 +202,7 @@ unsafe fn capture_screen_region(
 }
 
 /* Legacy Windows OCR implementation retained below only for historical tests.
-Runtime OCR always goes through OcrService/PaddleOCR. */
+Runtime OCR goes through OcrService (PaddleOCR, falling back to Windows OCR). */
 #[cfg(test)]
 unsafe fn legacy_ocr_from_bgra_pixels(
     pixels: &[u8],
@@ -317,7 +317,7 @@ struct IMemoryBufferByteAccess_Vtbl {
 }
 
 /// 对给定的 BGRA 像素执行 OCR 识别（公开入口，供截图工具的 OCR 按钮调用）。
-/// 委托给全局 OCR 服务（OcrService）；若服务未注册（如在测试中）则回退到旧路径。
+/// 委托给全局 OCR 服务（OcrService）；服务无法初始化（如锁中毒）时返回错误。
 #[allow(dead_code)] // Compatibility entry point for screenshot OCR consumers.
 pub fn recognize_bgra(
     bgra: &[u8],

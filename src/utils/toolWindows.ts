@@ -30,7 +30,6 @@ type ToolWindowLabel =
   | "time-overlay"
   | "todo-overlay"
   | "sketch-overlay"
-  | "scroll-navigator-overlay"
   | "utility-hub-overlay"
   | "sticky-notes-manager"
   | "system-cleaner-overlay";
@@ -584,8 +583,10 @@ export async function ensureLongCaptureControlsWindow(): Promise<WebviewWindowIn
   const existing = await WebviewWindow.getByLabel("long-capture-controls");
   if (existing) {
     // A completed capture resizes this window to the preview dimensions. Put
-    // it back to the compact toolbar size before the next session.
-    await existing.setSize(new LogicalSize(300, 64)).catch(() => {});
+    // it back to the compact toolbar size before the next session. 72 只是
+    // 「标题 + 说明 + 进度」三行的占位高度：真正的尺寸由 LongCaptureControls
+    // 量完内容（含可能出现的警告行）下发，这里只求复位后第一帧不裁字。
+    await existing.setSize(new LogicalSize(300, 72)).catch(() => {});
     await existing.hide().catch(() => {});
     await waitForLongCaptureControlsWindowReady();
     return existing;
@@ -594,7 +595,8 @@ export async function ensureLongCaptureControlsWindow(): Promise<WebviewWindowIn
   const window = await createToolWindow("long-capture-controls", {
     title: "Levitaire Long Screenshot",
     width: 300,
-    height: 64,
+    // 三行文案的占位高度，实际高度随内容（警告行）变化
+    height: 72,
     resizable: false,
     transparent: true,
     decorations: false,
@@ -914,26 +916,6 @@ export async function ensureTodoWindow(): Promise<WebviewWindowInstance> {
   } finally {
     todoCreatePromise = undefined;
   }
-}
-
-export async function ensureScrollNavigatorWindow(): Promise<WebviewWindowInstance> {
-  const existing = await WebviewWindow.getByLabel("scroll-navigator-overlay");
-  if (existing) return existing;
-  return createToolWindow("scroll-navigator-overlay", {
-    title: "Levitaire Scroll Navigator",
-    width: 260,
-    height: 190,
-    resizable: false,
-    transparent: true,
-    decorations: false,
-    shadow: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    focusable: true,
-    x: 120,
-    y: 120,
-    backgroundColor: [0, 0, 0, 0],
-  });
 }
 
 export async function ensureUtilityHubWindow(): Promise<WebviewWindowInstance> {

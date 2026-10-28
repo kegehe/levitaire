@@ -7,15 +7,12 @@ import {
   type CSSProperties,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { LogicalSize } from "@tauri-apps/api/dpi";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
 import {
   applyThemePreferences,
   getStoredThemePreferences,
   subscribeThemePreferences,
 } from "../../styles/themePreferences";
-import { clampWindowToWorkArea, panelWindowSize } from "../../utils/panelWindow";
 import "./ScrollNavigator.css";
 
 interface ScrollNavigationState {
@@ -38,14 +35,13 @@ const EMPTY_STATE: ScrollNavigationState = {
  */
 const POLL_INTERVAL_MS = 2000;
 
-function ScrollNavigator({ embedded = false }: { embedded?: boolean }) {
+function ScrollNavigator() {
   const [state, setState] = useState<ScrollNavigationState>(EMPTY_STATE);
   const [draft, setDraft] = useState("0");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // 轮询回调要读最新的忙碌状态，但不能因此重建定时器 → 用 ref 镜像。
   const busyRef = useRef(false);
-  const navRef = useRef<HTMLElement>(null);
 
   const markBusy = (value: boolean) => {
     busyRef.current = value;
@@ -58,17 +54,7 @@ function ScrollNavigator({ embedded = false }: { embedded?: boolean }) {
     document.body.style.background = "transparent";
     document.body.style.margin = "0";
     document.body.style.overflow = "hidden";
-    if (embedded) return;
-    // 独立窗口：四周留出投影留白（见 utils/panelWindow.ts）。留白仍属于本窗口，
-    // 原生层不会把点击透给桌面，所以顺带把它接到拖拽面上 —— Tauri 的 drag region
-    // 只认命中元素自身，挂在 body 上正好只覆盖留白，不会波及面板内部控件。
-    document.body.classList.add("scroll-nav-window");
-    document.body.setAttribute("data-tauri-drag-region", "");
-    return () => {
-      document.body.classList.remove("scroll-nav-window");
-      document.body.removeAttribute("data-tauri-drag-region");
-    };
-  }, [embedded]);
+  }, []);
 
   useEffect(() => {
     const unlisten = subscribeThemePreferences();
@@ -132,32 +118,6 @@ function ScrollNavigator({ embedded = false }: { embedded?: boolean }) {
     };
   }, [refresh]);
 
-  useLayoutEffect(() => {
-    if (embedded) return;
-    const nav = navRef.current;
-    if (!nav) return;
-
-    const resizeToContent = () => {
-      const bounds = nav.getBoundingClientRect();
-      const width = Math.ceil(bounds.width);
-      const height = Math.ceil(bounds.height);
-      if (!width || !height) return;
-      // 窗口 = 面板 + 四周投影留白：窗口尺寸等于面板尺寸时，投影没有任何展开空间，
-      // 只在面板圆角的「缺口」里露出一小块，被窗口边界硬切成四角的直角残影。
-      const size = panelWindowSize(width, height);
-      getCurrentWebviewWindow()
-        .setSize(new LogicalSize(size.width, size.height))
-        .catch(() => {});
-      clampWindowToWorkArea(size.width, size.height);
-    };
-
-    resizeToContent();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(resizeToContent);
-    observer.observe(nav);
-    return () => observer.disconnect();
-  }, [embedded, error]);
-
   const setPercent = async (value: number) => {
     if (!state.precise || busy) return;
     const percent = Math.round(Math.max(0, Math.min(100, value)));
@@ -215,43 +175,9 @@ function ScrollNavigator({ embedded = false }: { embedded?: boolean }) {
   // 不是「能不能用」的开关 —— 实测浏览器 / Electron / 资源管理器根本拿不到 UIA 滚动器，
   // 旧版在这里整块 disabled，等于对它们彻底不可用（详见 docs/滚动导航问题分析.md）。
   const relativeReady = state.fallbackAvailable && !busy;
-  const statusLabel = !state.fallbackAvailable
-    ? "未绑定目标"
-    : state.precise
-      ? "精准定位"
-      : "快捷滚动";
 
   return (
-    <main ref={navRef} className="scroll-nav" aria-label="滚动导航">
-      {!embedded && (
-        <header className="scroll-nav-header" data-tauri-drag-region>
-          <div className="scroll-nav-title" data-tauri-drag-region>
-            <span className={`scroll-nav-status ${state.precise ? "is-precise" : ""}`} />
-            <span>{statusLabel}</span>
-          </div>
-          <div className="scroll-nav-header-actions">
-            <button
-              className="scroll-nav-icon-button"
-              type="button"
-              onClick={() => void refresh()}
-              aria-label="刷新"
-              data-tooltip="刷新"
-            >
-              <Icon name="RefreshCw" size={14} />
-            </button>
-            <button
-              className="scroll-nav-icon-button"
-              type="button"
-              onClick={() => void invoke("hide_scroll_navigation")}
-              aria-label="关闭"
-              data-tooltip="关闭"
-            >
-              <Icon name="X" size={15} />
-            </button>
-          </div>
-        </header>
-      )}
-
+    <main className="scroll-nav" aria-label="滚动导航">
       <section className="scroll-nav-body">
         <div className="scroll-nav-endpoints" aria-label="快速滚动">
           <button

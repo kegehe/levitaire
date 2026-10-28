@@ -54,7 +54,7 @@ fn run_test(svc: &OcrService, label: &str, expected: &str, left: i32, top: i32, 
 #[ignore]
 fn ocr_acc_cn() {
     run_test(
-        &OcrService::new(None, None),
+        &OcrService::new(None),
         "中文",
         "这是一段用于测试OCR识别准确性的中文短文。OCR技术能将图片中的文字转换为可编辑的文本。",
         18,
@@ -68,7 +68,7 @@ fn ocr_acc_cn() {
 #[ignore]
 fn ocr_acc_en() {
     run_test(
-        &OcrService::new(None, None),
+        &OcrService::new(None),
         "英文",
         "Hello World! This is an OCR test with English and Chinese mixed text.",
         18,
@@ -82,7 +82,7 @@ fn ocr_acc_en() {
 #[ignore]
 fn ocr_acc_num() {
     run_test(
-        &OcrService::new(None, None),
+        &OcrService::new(None),
         "数字",
         "数字测试：1+1=2  3.14159  2024/01/01  100%  温度：25°C  ￥99.99  (555)123-4567",
         18,
@@ -96,7 +96,7 @@ fn ocr_acc_num() {
 #[ignore]
 fn ocr_acc_sym() {
     run_test(
-        &OcrService::new(None, None),
+        &OcrService::new(None),
         "符号",
         "符号测试：@ # $ % ^ & * ( ) _ + - = [ ] { } < > ? / ! ~",
         18,
@@ -110,7 +110,7 @@ fn ocr_acc_sym() {
 #[ignore]
 fn ocr_acc_mix() {
     run_test(
-        &OcrService::new(None, None),
+        &OcrService::new(None),
         "中英混排",
         "中英混排：Levitaire service 是一个 Windows 桌面悬浮窗工具，支持 AI、OCR、TTS、STT 等功能。",
         18,
@@ -130,7 +130,7 @@ Hello World! This is an OCR test with English and Chinese mixed text.\n\
 符号测试：@ # $ % ^ & * ( ) _ + - = [ ] { } < > ? / ! ~\n\
 中英混排：Levitaire service 是一个 Windows 桌面悬浮窗工具，支持 AI、OCR、TTS、STT 等功能。";
     run_test(
-        &OcrService::new(None, None),
+        &OcrService::new(None),
         "全部5行",
         expected,
         18,
@@ -143,7 +143,7 @@ Hello World! This is an OCR test with English and Chinese mixed text.\n\
 #[test]
 #[ignore]
 fn ocr_acc_stable() {
-    let svc = OcrService::new(None, None);
+    let svc = OcrService::new(None);
     println!("\n═══ 稳定性 (10次连续) ═══");
     let bgra = crate::screenshot::capture_screen_region(18, 55, 1280, 28).expect("截屏失败");
     let mut texts = Vec::new();

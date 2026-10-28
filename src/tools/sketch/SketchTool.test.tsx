@@ -478,6 +478,39 @@ describe("SketchTool drawing lifecycle", () => {
     toDataUrl.mockRestore();
   });
 
+  it("shows the backend message when saving fails with a string rejection", async () => {
+    vi.mocked(invoke).mockImplementationOnce(() => Promise.reject("写入文件失败: 磁盘已满"));
+    const toDataUrl = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,preview");
+    const { container, unmount } = render(<SketchTool />);
+    const canvas = container.querySelector("canvas")!;
+    fireEvent.pointerDown(canvas, { clientX: 40, clientY: 40, pointerId: 9 });
+    fireEvent.pointerMove(canvas, { clientX: 140, clientY: 120, pointerId: 9 });
+    fireEvent.pointerUp(canvas, { clientX: 140, clientY: 120, pointerId: 9 });
+    fireEvent.click(container.querySelector(".sketch-save")!);
+    fireEvent.click(container.querySelector(".sketch-preview-confirm")!);
+    await waitFor(() => expect(container.querySelector(".sketch-save-error")?.textContent).toBe("写入文件失败: 磁盘已满"));
+    expect(container.querySelector(".sketch-preview")).toBeTruthy();
+    unmount();
+    localStorage.clear();
+    toDataUrl.mockRestore();
+  });
+
+  it("falls back to a readable message when the save rejection is not an Error", async () => {
+    vi.mocked(invoke).mockImplementationOnce(() => Promise.reject(undefined));
+    const toDataUrl = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,preview");
+    const { container, unmount } = render(<SketchTool />);
+    const canvas = container.querySelector("canvas")!;
+    fireEvent.pointerDown(canvas, { clientX: 40, clientY: 40, pointerId: 10 });
+    fireEvent.pointerMove(canvas, { clientX: 140, clientY: 120, pointerId: 10 });
+    fireEvent.pointerUp(canvas, { clientX: 140, clientY: 120, pointerId: 10 });
+    fireEvent.click(container.querySelector(".sketch-save")!);
+    fireEvent.click(container.querySelector(".sketch-preview-confirm")!);
+    await waitFor(() => expect(container.querySelector(".sketch-save-error")?.textContent).toBe("保存失败，请重试"));
+    unmount();
+    localStorage.clear();
+    toDataUrl.mockRestore();
+  });
+
   it("blocks closing while a background capture is in flight", async () => {
     let resolveBackground: ((value: string) => void) | undefined;
     vi.mocked(currentMonitor).mockResolvedValueOnce({ position: { x: 0, y: 0 }, size: { width: 100, height: 100 } } as never);

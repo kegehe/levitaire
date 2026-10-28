@@ -994,3 +994,266 @@ describe("Settings 系统监控配置必须跟随浮窗改动", () => {
     expect(screen.getByText("迷你模式形态固定，切回标准后生效")).toBeInTheDocument();
   });
 });
+
+describe("Settings 审计日志清空确认", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    localStorage.clear();
+    mockInvoke.mockResolvedValue("");
+  });
+
+  /** 切到某个页签并等待懒加载的 invoke 落定 */
+  async function openTab(label: string) {
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  it("离开系统清理页签后撤销「确认清空？」，回来后必须重新点「我要清空…」", async () => {
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await openTab("系统清理");
+    // 未确认时主按钮是禁用的「清空审计日志」，破坏性动作不能一步可达
+    expect(screen.getByRole("button", { name: "清空审计日志" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "我要清空…" }));
+    expect(screen.getByRole("button", { name: "确认清空？" })).toBeEnabled();
+
+    // 切走再回来：确认状态必须已经复位，否则第二下确认等于被跳过
+    await openTab("系统监控");
+    await openTab("系统清理");
+
+    expect(screen.queryByRole("button", { name: "确认清空？" })).toBeNull();
+    expect(screen.getByRole("button", { name: "清空审计日志" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "我要清空…" })).toBeInTheDocument();
+    // 全程不应真的调用清空动作
+    expect(mockInvoke).not.toHaveBeenCalledWith("disk_cleanup_audit_clear");
+  });
+
+  it("清空失败后也复位确认状态，不会留下可再点一次的「确认清空？」", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "disk_cleanup_audit_clear") return Promise.reject("磁盘只读");
+      return Promise.resolve("");
+    });
+
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await openTab("系统清理");
+    fireEvent.click(screen.getByRole("button", { name: "我要清空…" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "确认清空？" }));
+      await Promise.resolve();
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("disk_cleanup_audit_clear");
+    expect(screen.getByRole("button", { name: "清空审计日志" })).toBeDisabled();
+  });
+});
+
+describe("Settings 看门狗状态跟随后台检查结果", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    localStorage.clear();
+    mockInvoke.mockResolvedValue("");
+  });
+
+  /** 后端 `WatchStatus` 的最小快照（字段为 camelCase） */
+  function watchStatus(patch: Partial<Record<string, unknown>> = {}) {
+    return {
+      enabled: true,
+      intervalHours: 24,
+      minBytes: 1024,
+      minDeltaBytes: 1024,
+      minAgeDays: 7,
+      targets: ["C:\\"],
+      lastRunAt: null as string | null,
+      lastError: null as string | null,
+      current: null,
+      dirsVisited: 0,
+      alerts: [] as unknown[],
+      ...patch,
+    };
+  }
+
+  async function openTab(label: string) {
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  it("后台检查推来的事件会刷新「上次检查」与告警条数", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "disk_cleanup_watch_status")
+        return Promise.resolve(watchStatus({ lastRunAt: "2026-10-01T09:00:00+08:00" }));
+      return Promise.resolve("");
+    });
+
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await openTab("系统清理");
+
+    expect(screen.getByText("上次检查：2026-10-01T09:00:00+08:00")).toBeInTheDocument();
+    expect(screen.queryByText(/条失控告警/)).toBeNull();
+
+    // 后台周期检查跑完，后端推一条全量快照
+    await act(async () => {
+      emitMockEvent(
+        "disk-cleanup-watchdog",
+        watchStatus({
+          lastRunAt: "2026-10-28T09:00:00+08:00",
+          alerts: [{ path: "C:\Temp", bytes: 4096, deltaBytes: 2048, deltaDays: 3 }],
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("上次检查：2026-10-28T09:00:00+08:00")).toBeInTheDocument();
+    expect(screen.getByText(/当前有 1 条失控告警/)).toBeInTheDocument();
+  });
+
+  it("切走再回到系统清理页时会重读看门狗状态", async () => {
+    let reads = 0;
+    mockInvoke.mockImplementation((command) => {
+      if (command === "disk_cleanup_watch_status") {
+        reads += 1;
+        return Promise.resolve(
+          watchStatus({ lastRunAt: `2026-10-0${reads}T09:00:00+08:00` }),
+        );
+      }
+      return Promise.resolve("");
+    });
+
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await openTab("系统清理");
+    expect(screen.getByText("上次检查：2026-10-01T09:00:00+08:00")).toBeInTheDocument();
+
+    // 页面开着的时候后台又跑了一轮，切走再回来必须读到新的时间
+    await openTab("系统监控");
+    await openTab("系统清理");
+
+    expect(reads).toBe(2);
+    expect(screen.getByText("上次检查：2026-10-02T09:00:00+08:00")).toBeInTheDocument();
+  });
+
+  it("窗口重新聚焦时重读看门狗状态", async () => {
+    let lastRunAt = "2026-10-01T09:00:00+08:00";
+    mockInvoke.mockImplementation((command) => {
+      if (command === "disk_cleanup_watch_status")
+        return Promise.resolve(watchStatus({ lastRunAt }));
+      return Promise.resolve("");
+    });
+
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await openTab("系统清理");
+    expect(screen.getByText("上次检查：2026-10-01T09:00:00+08:00")).toBeInTheDocument();
+
+    lastRunAt = "2026-10-28T09:00:00+08:00";
+    await act(async () => {
+      emitMockFocus(false);
+      emitMockFocus(true);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("上次检查：2026-10-28T09:00:00+08:00")).toBeInTheDocument();
+  });
+
+  it("较晚返回的旧读取不会把后台事件的新结果盖回去", async () => {
+    // 进入页签的那次读取先挂起、后台事件先到 —— 「谁后返回谁说了算」最容易在这里翻车
+    let resolveRead: (status: unknown) => void = () => {};
+    mockInvoke.mockImplementation((command) => {
+      if (command === "disk_cleanup_watch_status")
+        return new Promise((resolve) => {
+          resolveRead = resolve;
+        });
+      return Promise.resolve("");
+    });
+
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await openTab("系统清理");
+
+    await act(async () => {
+      emitMockEvent(
+        "disk-cleanup-watchdog",
+        watchStatus({ lastRunAt: "2026-10-28T09:00:00+08:00" }),
+      );
+      await Promise.resolve();
+    });
+    expect(screen.getByText("上次检查：2026-10-28T09:00:00+08:00")).toBeInTheDocument();
+
+    // 挂起的那次读取现在才返回，手里是更早的快照：不能再覆盖已显示的新结果
+    await act(async () => {
+      resolveRead(watchStatus({ lastRunAt: "2026-10-01T09:00:00+08:00" }));
+      await Promise.resolve();
+    });
+    expect(screen.getByText("上次检查：2026-10-28T09:00:00+08:00")).toBeInTheDocument();
+    expect(screen.queryByText("上次检查：2026-10-01T09:00:00+08:00")).toBeNull();
+  });
+});
+
+describe("Settings 在线更新", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    localStorage.clear();
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "get_update_status" || command === "check_for_updates") {
+        return Promise.resolve({
+          version: null,
+          notes: "",
+          phase: "idle",
+          received: 0,
+          total: null,
+          error: null,
+        });
+      }
+      return Promise.resolve("");
+    });
+  });
+
+  it("已是最新版本时仍保留再次检查入口", async () => {
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("已是最新版本")).toBeInTheDocument();
+
+    // 上一轮检查结束后按钮不能消失，否则本窗口里无法再发起一次检查
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "再次检查" }));
+      await Promise.resolve();
+    });
+
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "check_for_updates"),
+    ).toHaveLength(2);
+    expect(screen.getByText("已是最新版本")).toBeInTheDocument();
+  });
+});

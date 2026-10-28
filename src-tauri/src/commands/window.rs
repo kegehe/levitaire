@@ -278,6 +278,35 @@ pub fn set_qrcode_preview(active: bool) {
     crate::hooks::mouse::set_qrcode_preview(active);
 }
 
+/// 单条快捷键的检查结论。
+///
+/// 顺序有意义：**先看工具是否启用**。禁用的工具热键已被反注册，
+/// `registered == false` 是它的预期状态，据此判成「被其他程序占用」是误报。
+/// 同理，冲突判定也只在启用中的工具之间成立——没注册的键不可能冲突。
+fn classify_hotkey_status(
+    enabled: bool,
+    registered: bool,
+    internal_conflict: Option<&str>,
+) -> (&'static str, String) {
+    if !enabled {
+        return ("disabled", "工具未启用，快捷键未占用".to_string());
+    }
+    if let Some(label) = internal_conflict {
+        return (
+            "internal-conflict",
+            format!("与其他 Levitaire 功能冲突（{}）", label),
+        );
+    }
+    if registered {
+        ("available", "快捷键可用".to_string())
+    } else {
+        (
+            "external-conflict",
+            "快捷键可能已被其他程序占用".to_string(),
+        )
+    }
+}
+
 /// 检查所有可配置的全局快捷键当前是否成功注册。
 /// Windows RegisterHotKey 能判断是否被占用，但不会暴露占用者进程名称。
 #[tauri::command]
@@ -285,45 +314,51 @@ pub fn check_hotkey_conflicts(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<Vec<HotkeyConflictResult>, String> {
     let config = config_manager.get_startup_config()?;
+    // 第四项是工具启用状态：禁用的工具不占用热键（注册会被释放），
+    // 不能因为「没注册」就报成被外部程序占用。
     let entries = [
         (
             "screenshot",
             "截图",
             crate::hooks::hotkey::HotkeySlotId::Screenshot,
+            config.screenshot_enabled,
             config.screenshot_hotkey,
         ),
         (
             "sketch",
             "屏幕草稿",
             crate::hooks::hotkey::HotkeySlotId::Sketch,
+            config.sketch_enabled,
             config.sketch_hotkey,
         ),
         (
             "recording",
             "录屏",
             crate::hooks::hotkey::HotkeySlotId::Recording,
+            config.recording_enabled,
             config.recording_hotkey,
         ),
         (
             "todo-quick-add",
             "待办快速添加",
             crate::hooks::hotkey::HotkeySlotId::TodoQuickAdd,
+            config.todo_enabled,
             config.todo_quick_add_hotkey,
         ),
     ];
     let mut results = Vec::with_capacity(entries.len() + 1);
     let parsed_entries: Vec<_> = entries
         .iter()
-        .map(|(id, label, _slot, hotkey)| {
+        .map(|(id, label, _slot, enabled, hotkey)| {
             (
                 *id,
                 *label,
-                hotkey.trim().to_string(),
+                *enabled,
                 crate::hooks::hotkey::parse_hotkey(hotkey),
             )
         })
         .collect();
-    for (id, _label, slot, hotkey) in entries.iter() {
+    for (id, _label, slot, enabled, hotkey) in entries.iter() {
         let trimmed = hotkey.trim().to_string();
         if trimmed.is_empty() {
             results.push(HotkeyConflictResult {
@@ -344,34 +379,24 @@ pub fn check_hotkey_conflicts(
             });
             continue;
         }
-        let conflict_label =
-            parsed_entries
-                .iter()
-                .find_map(|(other_id, other_label, _, other_parsed)| {
-                    (*other_id != *id && *other_parsed == parsed).then_some(*other_label)
-                });
-        if let Some(conflict_label) = conflict_label {
-            results.push(HotkeyConflictResult {
-                id: (*id).into(),
-                hotkey: trimmed,
-                status: "internal-conflict".into(),
-                message: format!("与其他 Levitaire 功能冲突（{}）", conflict_label),
-            });
-        } else if crate::hooks::hotkey::is_registered(*slot) {
-            results.push(HotkeyConflictResult {
-                id: (*id).into(),
-                hotkey: trimmed,
-                status: "available".into(),
-                message: "快捷键可用".into(),
-            });
-        } else {
-            results.push(HotkeyConflictResult {
-                id: (*id).into(),
-                hotkey: trimmed,
-                status: "external-conflict".into(),
-                message: "快捷键可能已被其他程序占用".into(),
-            });
-        }
+        // 只有启用中的其他工具才会真正注册热键，禁用的工具不能作为冲突来源。
+        let conflict_label = parsed_entries.iter().find_map(
+            |(other_id, other_label, other_enabled, other_parsed)| {
+                (*other_id != *id && *other_enabled && *other_parsed == parsed)
+                    .then_some(*other_label)
+            },
+        );
+        let (status, message) = classify_hotkey_status(
+            *enabled,
+            crate::hooks::hotkey::is_registered(*slot),
+            conflict_label,
+        );
+        results.push(HotkeyConflictResult {
+            id: (*id).into(),
+            hotkey: trimmed,
+            status: status.into(),
+            message,
+        });
     }
 
     let quick_input_enabled = config.quick_input_enabled;
@@ -389,9 +414,14 @@ pub fn check_hotkey_conflicts(
             message: "快速输入未启用".into(),
         });
     } else if let Some(trigger_vk) = crate::quick_input::parse_trigger_key(&quick_input_hotkey) {
-        let conflict_label = parsed_entries.iter().find_map(|(_, label, _, parsed)| {
-            parsed.filter(|(_, vk)| *vk == trigger_vk).map(|_| *label)
-        });
+        let conflict_label = parsed_entries
+            .iter()
+            .find_map(|(_, label, enabled, parsed)| {
+                // 只和启用中的工具比较：关闭的工具热键已反注册，按键撞上也无实际冲突
+                parsed
+                    .filter(|(_, vk)| *enabled && *vk == trigger_vk)
+                    .map(|_| *label)
+            });
         results.push(HotkeyConflictResult {
             id: "quick-input-trigger".into(),
             hotkey: quick_input_hotkey,
@@ -752,79 +782,6 @@ pub fn reset_window_position(
     .map_err(|e| e.to_string())
 }
 
-// ─── OCR 引擎管理 ─────────────────────────────────────────────────
-
-/// 获取可用 OCR 引擎列表及当前激活引擎
-/// async：懒加载在 spawn_blocking 阻塞池执行，避免首次打开设置页时阻塞 UI 主线程
-#[tauri::command]
-pub async fn get_ocr_engines() -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(|| {
-        let svc = crate::ocr::ensure_ocr_service().ok_or("OCR 服务初始化失败")?;
-        let guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
-        let engines: Vec<&str> = guard
-            .available_engines()
-            .iter()
-            .map(|e| e.as_str())
-            .collect();
-        Ok(serde_json::json!({
-            "active": guard.active_engine_name(),
-            "available": engines,
-        }))
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {}", e))?
-}
-
-/// 切换 OCR 引擎，并将用户偏好持久化到配置（重启后保持所选引擎）
-#[tauri::command]
-pub async fn set_ocr_engine(
-    engine: String,
-    config_manager: State<'_, ConfigManager>,
-) -> Result<(), String> {
-    let id = crate::ocr::EngineId::from_str(&engine)
-        .ok_or_else(|| format!("无效的引擎标识: {}", engine))?;
-    if id != crate::ocr::EngineId::Paddle {
-        return Err("OCR 已固定使用 PaddleOCR".into());
-    }
-
-    // 在阻塞池切换引擎（加载模型/初始化可能耗时）。
-    // 返回切换前的激活引擎，供持久化失败时回滚，保证内存引擎与 UI 显示一致。
-    let previous = tokio::task::spawn_blocking(move || -> Result<crate::ocr::EngineId, String> {
-        let svc = crate::ocr::ensure_ocr_service().ok_or("OCR 服务初始化失败")?;
-        let mut guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
-        let previous = guard.active_engine;
-        if !guard.switch_engine(id) {
-            return Err(format!("引擎 '{}' 不可用", id.as_str()));
-        }
-        Ok(previous)
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {}", e))??;
-
-    // 持久化用户偏好（写入规范化引擎 ID）；失败时回滚内存引擎，避免 UI 显示与实际引擎脱节
-    if let Err(error) = config_manager.update_ocr_engine(id.as_str().to_string()) {
-        let rollback = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let svc = crate::ocr::ensure_ocr_service().ok_or("OCR 服务初始化失败")?;
-            let mut guard = svc.lock().map_err(|e| format!("OCR 服务锁失败: {}", e))?;
-            // 仅当内存引擎仍是我这次设置的才回滚，避免覆盖并发更新的引擎选择
-            if guard.active_engine == id {
-                let _ = guard.switch_engine(previous);
-            }
-            Ok(())
-        })
-        .await;
-        if let Err(rollback_err) = rollback {
-            crate::utils::logger::log(
-                "ocr",
-                &format!("OCR 引擎持久化失败后回滚出错: {}", rollback_err),
-            );
-        }
-        return Err(error);
-    }
-
-    Ok(())
-}
-
 /// 打开文件夹选择对话框，返回用户选择的目录路径；取消返回 null
 #[tauri::command]
 pub async fn pick_folder() -> Result<Option<String>, String> {
@@ -897,4 +854,46 @@ pub fn clamp_window_to_workarea(
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_hotkey_status;
+
+    #[test]
+    fn test_disabled_tool_is_not_reported_as_external_conflict() {
+        // 工具关闭后热键被反注册，未注册是预期状态，不能报成被其他程序占用
+        let (status, message) = classify_hotkey_status(false, false, None);
+        assert_eq!(status, "disabled");
+        assert_eq!(message, "工具未启用，快捷键未占用");
+    }
+
+    #[test]
+    fn test_disabled_tool_wins_over_internal_conflict() {
+        // 关闭的工具不注册热键，与其他功能的按键重合也不构成现实冲突
+        let (status, _) = classify_hotkey_status(false, false, Some("截图"));
+        assert_eq!(status, "disabled");
+    }
+
+    #[test]
+    fn test_enabled_unregistered_tool_is_external_conflict() {
+        let (status, message) = classify_hotkey_status(true, false, None);
+        assert_eq!(status, "external-conflict");
+        assert_eq!(message, "快捷键可能已被其他程序占用");
+    }
+
+    #[test]
+    fn test_enabled_registered_tool_is_available() {
+        let (status, message) = classify_hotkey_status(true, true, None);
+        assert_eq!(status, "available");
+        assert_eq!(message, "快捷键可用");
+    }
+
+    #[test]
+    fn test_internal_conflict_precedes_registration_state() {
+        // 内部冲突的提示要落实到具体功能名上，而不是笼统的「可能被占用」
+        let (status, message) = classify_hotkey_status(true, true, Some("录屏"));
+        assert_eq!(status, "internal-conflict");
+        assert!(message.contains("录屏"));
+    }
 }

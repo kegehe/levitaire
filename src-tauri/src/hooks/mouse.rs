@@ -802,13 +802,7 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     // 否则隐藏窗口仍保留最后的屏幕矩形，会让该区域内的正常拖选被误排除。
                     // 置于 text_toolbar_enabled 检查之后：开关关闭时选区检测本就跳过，无需查询。
                     let down_in_own_window = down_valid
-                        && [
-                            "settings",
-                            "scroll-navigator-overlay",
-                            "utility-hub-overlay",
-                        ]
-                        .iter()
-                        .any(|label| {
+                        && ["settings", "utility-hub-overlay"].iter().any(|label| {
                             app.get_webview_window(label).is_some_and(|win| {
                                 win.is_visible().unwrap_or(false)
                                     && win
@@ -1665,6 +1659,19 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
         if let Some(sender) = STATE.sender.get() {
             match msg {
                 _ if msg == WM_LBUTTONUP => {
+                    // 原生选区层的兜底收口：正常路径是前端 pointerup → selector_end，
+                    // 但前端若因为重载/异常错过了这次抬起，原生层会继续跟着光标画。
+                    // 这里在钩子内直接结束（end 幂等，前端随后再调一次也不出错）。
+                    if crate::screenshot::selector::is_tracking() {
+                        let hook = lparam.0
+                            as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                        if !hook.is_null() {
+                            let event = &*hook;
+                            let _ = crate::screenshot::selector::finish_at(event.pt.x, event.pt.y);
+                        } else {
+                            let _ = crate::screenshot::selector::end();
+                        }
+                    }
                     // Consume the release that belongs to a sampled click as
                     // well. This keeps a multi-pick session isolated from the
                     // normal selection/drag handling while it remains armed.
@@ -1757,6 +1764,17 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                                 y: event.pt.y,
                             });
                         }
+                    }
+                }
+                // 原生选区层：区域框选进行中时，坐标直接喂给原生层（不经过 WebView）。
+                // 刻意排在悬浮球热区之前：拖框时光标必然扫过球的位置，那条分支会做
+                // GetWindowRect 之类的判定，没必要在拖框热路径上多走一遍。
+                _ if msg == WM_MOUSEMOVE && crate::screenshot::selector::is_tracking() => {
+                    let hook =
+                        lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+                    if !hook.is_null() {
+                        let event = &*hook;
+                        crate::screenshot::selector::feed_cursor(event.pt.x, event.pt.y);
                     }
                 }
                 // 悬浮球热区进出判定。放在各模式分支之后：截图/转盘等模式有自己的

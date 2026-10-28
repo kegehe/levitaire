@@ -187,9 +187,6 @@ pub struct AppConfig {
     /// 贴图窗口边框粗细（像素），范围 1-8
     #[serde(default = "default_pin_border_width")]
     pub pin_border_width: u32,
-    /// 旧版 OCR 引擎偏好字段。当前版本统一使用内置 PaddleOCR 模型。
-    #[serde(default)]
-    pub ocr_engine: String,
     /// 自启动工具 ID 列表（应用启动时自动打开窗口的工具，如 ["system-monitor"]）
     #[serde(default)]
     pub tools_autostart: Vec<String>,
@@ -423,7 +420,6 @@ impl Default for AppConfig {
             screenshot_save_path: String::new(),
             pin_border_color: default_pin_border_color(),
             pin_border_width: default_pin_border_width(),
-            ocr_engine: String::new(),
             tools_autostart: Vec::new(),
             window_positions: HashMap::new(),
             quick_input_enabled: default_quick_input_enabled(),
@@ -1506,18 +1502,6 @@ impl ConfigManager {
         Ok(())
     }
 
-    /// 更新 OCR 识别引擎偏好并持久化
-    pub fn update_ocr_engine(&self, engine: String) -> Result<(), String> {
-        {
-            let mut config = self
-                .config
-                .lock()
-                .map_err(|e| format!("获取配置锁失败: {}", e))?;
-            config.ocr_engine = engine;
-        }
-        self.save_config()
-    }
-
     /// 获取自启动工具 ID 列表
     pub fn get_tools_autostart(&self) -> Result<Vec<String>, String> {
         self.config
@@ -1843,6 +1827,16 @@ fn quote_exe_path_wide(exe_path: &[u16]) -> Vec<u16> {
     quoted
 }
 
+/// 构建注册表 Run 键的 REG_SZ 数据（UTF-16，末尾含 NUL 终止符）
+///
+/// REG_SZ 必须以 NUL 结尾：缺少终止符时部分系统组件与安全软件会把数据当成
+/// 不完整路径，导致重启后不会自动启动。
+fn build_auto_start_value(exe_path: &[u16]) -> Vec<u16> {
+    let mut data = quote_exe_path_wide(exe_path);
+    data.push(0);
+    data
+}
+
 /// 查询开机自启动状态
 pub fn get_auto_start() -> bool {
     let key_path = to_pcwstr(REG_RUN_PATH);
@@ -1897,13 +1891,12 @@ pub fn set_auto_start(enable: bool) -> Result<(), String> {
 
         if enable {
             let exe_path = get_exe_path_wide()?;
-            // 双引号包裹完整路径，避免安装目录含空格时注册表 Run 键启动失败
-            let quoted_path = quote_exe_path_wide(&exe_path);
+            // 双引号包裹完整路径，避免安装目录含空格时注册表 Run 键启动失败；
+            // 末尾补 NUL 以满足 REG_SZ 的字符串结束约定
+            let value_data = build_auto_start_value(&exe_path);
             // REG_SZ 数据：UTF-16 含 null 终止符，字节切片
-            let data = std::slice::from_raw_parts(
-                quoted_path.as_ptr() as *const u8,
-                quoted_path.len() * 2,
-            );
+            let data =
+                std::slice::from_raw_parts(value_data.as_ptr() as *const u8, value_data.len() * 2);
             let result = RegSetValueExW(
                 hkey,
                 windows::core::PCWSTR(value_name.as_ptr()),
@@ -1964,6 +1957,23 @@ mod tests {
         assert_eq!(
             String::from_utf16(&quote_exe_path_wide(&empty)).unwrap(),
             "\"\""
+        );
+    }
+
+    #[test]
+    fn test_build_auto_start_value_is_nul_terminated() {
+        // REG_SZ 必须以 NUL 结尾，否则系统/安全软件可能读成不完整路径
+        let path: Vec<u16> = "C:\\Program Files\\Levitaire\\levitaire.exe"
+            .encode_utf16()
+            .collect();
+        let value = build_auto_start_value(&path);
+
+        assert_eq!(value.last(), Some(&0u16));
+        assert_eq!(value.iter().filter(|&&c| c == 0).count(), 1);
+        // 去掉终止符后即为加引号的路径
+        assert_eq!(
+            String::from_utf16(&value[..value.len() - 1]).unwrap(),
+            "\"C:\\Program Files\\Levitaire\\levitaire.exe\""
         );
     }
 

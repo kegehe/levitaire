@@ -408,6 +408,8 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
     // 强制弹出（托盘「显示/隐藏浮球」与清理逻辑相互矛盾）。
     // 用会话活跃标记区分「正在清理会话」与「空闲清理」（如仅关闭工具开关），
     // 空闲清理不应动 orb。必须在 set_screenshot_mode(false) 之前读取。
+    // 原生选区层必须先拆：它是全屏置顶窗，残留下来会一直压着桌面且拿不到鼠标事件。
+    crate::screenshot::selector::dispose();
     let session_active = CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst);
     let long_capture_was_active = app
         .try_state::<crate::scroll_capture::LongCaptureState>()
@@ -540,7 +542,6 @@ pub const OWN_WINDOW_LABELS: &[&str] = &[
     "todo-overlay",
     "sketch-overlay",
     "utility-hub-overlay",
-    "scroll-navigator-overlay",
     "sticky-notes-manager",
     "system-cleaner-overlay",
 ];

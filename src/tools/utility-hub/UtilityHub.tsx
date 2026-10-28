@@ -293,7 +293,7 @@ function UtilityHub() {
           )}
         </section>
       )}
-      {mode === "scroll" && <ScrollNavigator embedded />}
+      {mode === "scroll" && <ScrollNavigator />}
       {mode === "pin" && <WindowPinPanel />}
       {message && (
         <p className="utility-hub-message" role="status">

@@ -11,9 +11,6 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { ensureSketchWindow, ensureTodoWindow } from "./utils/toolWindows";
-import RecordingControls from "./tools/recording/RecordingControls";
-import LongCaptureControls from "./tools/screenshot/LongCaptureControls";
-import LongCaptureFrame from "./tools/screenshot/LongCaptureFrame";
 
 // 按窗口 label 懒加载，每个窗口只加载对应 chunk，减少资源占用
 const TextToolbar = lazy(() => import("./tools/text-toolbar/TextToolbar"));
@@ -33,8 +30,10 @@ const UpdatePrompt = lazy(() => import("./components/UpdatePrompt"));
 const ContextMenu = lazy(() => import("./components/ContextMenu"));
 const PinOcrResult = lazy(() => import("./tools/screenshot/PinOcrResult"));
 const SketchTool = lazy(() => import("./tools/sketch/SketchTool"));
-const ScrollNavigator = lazy(() => import("./tools/scroll-navigator/ScrollNavigator"));
 const UtilityHub = lazy(() => import("./tools/utility-hub/UtilityHub"));
+const RecordingControls = lazy(() => import("./tools/recording/RecordingControls"));
+const LongCaptureControls = lazy(() => import("./tools/screenshot/LongCaptureControls"));
+const LongCaptureFrame = lazy(() => import("./tools/screenshot/LongCaptureFrame"));
 
 /** screenshot-overlay 窗口的模式切换器 */
 function OverlaySwitcher() {
@@ -414,8 +413,6 @@ function App() {
     content = <PinOcrResult />;
   } else if (windowLabel === "sketch-overlay") {
     content = <SketchTool />;
-  } else if (windowLabel === "scroll-navigator-overlay") {
-    content = <ScrollNavigator />;
   } else if (windowLabel === "utility-hub-overlay") {
     content = <UtilityHub />;
   } else {

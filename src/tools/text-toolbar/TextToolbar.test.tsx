@@ -295,7 +295,7 @@ describe("FloatingToolbar 搜索功能", () => {
 
   // ── 错误处理 ──────────────────────────────────────────────
 
-  it("open_url 失败时工具栏不隐藏（catch 分支）", async () => {
+  it("open_url 失败时显示可见的错误提示（catch 分支）", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_ai_config") {
         return Promise.resolve({
@@ -321,10 +321,32 @@ describe("FloatingToolbar 搜索功能", () => {
     });
     await flush();
 
-    // console.error 被调用
-    expect(consoleSpy).toHaveBeenCalledWith("Failed to open search:", expect.anything());
-    // 工具栏仍然可见（searchBtn 还在 DOM 中）
-    expect(screen.getByRole("button", { name: "搜索" })).toBeInTheDocument();
+    // 失败必须可见：进入错误态并展示后端返回的原因，而不是只写一行日志
+    expect(screen.getByRole("alert")).toHaveTextContent("浏览器打开失败");
+    // 工具栏仍然可见（错误提示渲染在工具栏内，可用「返回」回到默认态）
+    expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
+
+    consoleSpy.mockRestore();
+  });
+
+  it("copy_selection 失败时显示可见的错误提示", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "copy_selection") {
+        return Promise.reject(new Error("复制失败"));
+      }
+      return Promise.resolve();
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<FloatingToolbar />);
+    await showToolbar("test");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "复制" }));
+    });
+    await flush();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("复制失败");
 
     consoleSpy.mockRestore();
   });

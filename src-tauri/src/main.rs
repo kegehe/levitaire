@@ -3,25 +3,41 @@
 
 // ONNX Runtime DLL 加载：开发模式在仓库 libs/ 目录，发布模式在 exe 同目录（由 tauri resources 打包）。
 // ort 的 load-dynamic feature 在首次调用 ort::api() 时自动加载 DLL，
-// 查找优先级: ORT_DYLIB_PATH 环境变量 > 当前目录 onnxruntime.dll > exe 同目录。
+// 查找优先级: ORT_DYLIB_PATH 环境变量 > 仓库 libs/（开发模式）> exe 同目录 > exe/resources。
 fn init_ort_dylib() {
     use std::path::PathBuf;
     let candidates: &[fn() -> Option<PathBuf>] = &[
         // 1. ORT_DYLIB_PATH 环境变量（用户显式指定，最高优先级）
         || {
-            std::env::var("ORT_DYLIB_PATH")
+            let raw = std::env::var("ORT_DYLIB_PATH").ok()?;
+            if raw.is_empty() {
+                return None;
+            }
+            let path = PathBuf::from(raw);
+            // 必须是文件：指向目录时 ort 依然加载失败，不能当作已找到
+            if path.is_absolute() {
+                return path.is_file().then_some(path);
+            }
+            // 与 ort 的解析保持一致：相对路径优先按 exe 同目录解析，其次当前工作目录。
+            // 只按当前目录判断会把 exe 旁边的有效 DLL 误判为缺失。
+            let exe_relative = std::env::current_exe()
                 .ok()
-                .map(PathBuf::from)
-                .filter(|p| p.exists())
+                .and_then(|exe| exe.parent().map(|dir| dir.join(&path)));
+            if let Some(candidate) = exe_relative {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            path.is_file().then_some(path)
         },
         // 2. 仓库 libs/ 目录（开发模式 cargo tauri dev）
         || {
             let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("libs")
                 .join("onnxruntime.dll");
-            p.exists().then_some(p)
+            p.is_file().then_some(p)
         },
-        // Tauri 发布包的 resource_dir 通常位于 exe 同级 resources/。
+        // 3. 发布包：DLL 可能在 exe 同目录，也可能被 Tauri 放到 exe/resources/。
         || {
             let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
             [
@@ -29,7 +45,7 @@ fn init_ort_dylib() {
                 exe_dir.join("resources").join("onnxruntime.dll"),
             ]
             .into_iter()
-            .find(|p| p.exists())
+            .find(|p| p.is_file())
         },
     ];
     for candidate in candidates {
@@ -39,8 +55,11 @@ fn init_ort_dylib() {
             return;
         }
     }
-    // 未找到本地 DLL，ort 将在首次调用时尝试当前目录/exe 同目录加载
-    crate::utils::logger::log("ort", "未找到本地 onnxruntime.dll，运行时将搜索默认路径");
+    // 未找到本地 DLL。ort 在 load-dynamic 模式下遇到缺失的 DLL 会 panic 或卡在
+    // 系统加载器里（例如命中系统目录中版本不兼容的 onnxruntime.dll），不会返回 Err，
+    // 因此显式告知 OCR 模块跳过 PaddleOCR，让 Windows 内置 OCR 兜底生效。
+    crate::utils::logger::log("ort", "未找到本地 onnxruntime.dll，OCR 将跳过 PaddleOCR");
+    crate::ocr::mark_ort_dylib_missing();
 }
 
 mod ai;
@@ -72,175 +91,6 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
-
-// Retained for compatibility with older callers; native surfaces now use the
-// bundled app icon below instead of drawing a preference-dependent tray glyph.
-#[allow(dead_code)]
-const TRAY_ICON_CENTER: f32 = 16.0;
-#[allow(dead_code)]
-const TRAY_ICON_SCALE: f32 = 1.25;
-
-#[allow(dead_code)]
-fn tray_coord(value: i32) -> i32 {
-    ((value as f32 - TRAY_ICON_CENTER) * TRAY_ICON_SCALE + TRAY_ICON_CENTER).round() as i32
-}
-
-#[allow(dead_code)]
-fn tray_pixel(raw: &mut [u8], x: i32, y: i32, color: [u8; 4]) {
-    if !(0..32).contains(&x) || !(0..32).contains(&y) {
-        return;
-    }
-    let i = ((y * 32 + x) * 4) as usize;
-    raw[i..i + 4].copy_from_slice(&color);
-}
-
-#[allow(dead_code)]
-fn tray_line(raw: &mut [u8], mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: [u8; 4]) {
-    x0 = tray_coord(x0);
-    y0 = tray_coord(y0);
-    let x1 = tray_coord(x1);
-    let y1 = tray_coord(y1);
-    let dx = (x1 - x0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let dy = -(y1 - y0).abs();
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-    loop {
-        tray_pixel(raw, x0, y0, color);
-        tray_pixel(raw, x0 + 1, y0, color);
-        tray_pixel(raw, x0, y0 + 1, color);
-        if x0 == x1 && y0 == y1 {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y0 += sy;
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn tray_circle(raw: &mut [u8], cx: i32, cy: i32, r: i32, color: [u8; 4], fill: bool) {
-    let cx = tray_coord(cx);
-    let cy = tray_coord(cy);
-    let r = (r as f32 * TRAY_ICON_SCALE).round() as i32;
-    for y in (cy - r)..=(cy + r) {
-        for x in (cx - r)..=(cx + r) {
-            let d = (x - cx) * (x - cx) + (y - cy) * (y - cy);
-            if (fill && d <= r * r) || (!fill && d <= r * r && d >= (r - 2) * (r - 2)) {
-                tray_pixel(raw, x, y, color);
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn tray_accent_color(accent: &str, hover: bool) -> [u8; 4] {
-    let (normal, highlighted) = match accent {
-        "cyan" => ([8, 145, 178], [14, 184, 214]),
-        "teal" => ([10, 127, 117], [16, 164, 150]),
-        "green" => ([22, 145, 88], [34, 181, 115]),
-        "indigo" => ([79, 70, 190], [103, 92, 232]),
-        "violet" => ([123, 88, 189], [151, 114, 220]),
-        _ => ([37, 99, 210], [59, 130, 246]),
-    };
-    let rgb = if hover { highlighted } else { normal };
-    [rgb[0], rgb[1], rgb[2], 255]
-}
-
-#[allow(dead_code)]
-pub(crate) fn tray_orb_image(id: &str, hover: bool, accent: &str) -> tauri::image::Image<'static> {
-    let mut raw = vec![0u8; 32 * 32 * 4];
-    let fg = tray_accent_color(accent, hover);
-    match id {
-        "ufo" => {
-            tray_line(&mut raw, 7, 16, 25, 16, fg);
-            tray_line(&mut raw, 11, 13, 21, 13, fg);
-            tray_line(&mut raw, 13, 13, 14, 10, fg);
-            tray_line(&mut raw, 14, 10, 18, 10, fg);
-            tray_line(&mut raw, 18, 10, 19, 13, fg);
-        }
-        "butterfly" => {
-            tray_line(&mut raw, 16, 13, 16, 24, fg);
-            tray_circle(&mut raw, 11, 12, 4, fg, false);
-            tray_circle(&mut raw, 21, 12, 4, fg, false);
-            tray_circle(&mut raw, 12, 19, 3, fg, false);
-            tray_circle(&mut raw, 20, 19, 3, fg, false);
-        }
-        "balloon" => {
-            tray_circle(&mut raw, 16, 12, 7, fg, false);
-            tray_line(&mut raw, 16, 19, 16, 23, fg);
-            tray_line(&mut raw, 12, 24, 20, 24, fg);
-        }
-        "rocket" => {
-            tray_line(&mut raw, 16, 7, 22, 19, fg);
-            tray_line(&mut raw, 22, 19, 10, 19, fg);
-            tray_line(&mut raw, 10, 19, 16, 7, fg);
-            tray_circle(&mut raw, 16, 13, 2, fg, false);
-            tray_line(&mut raw, 12, 19, 9, 23, fg);
-            tray_line(&mut raw, 20, 19, 23, 23, fg);
-        }
-        "cloud" => {
-            tray_circle(&mut raw, 11, 17, 5, fg, false);
-            tray_circle(&mut raw, 17, 14, 7, fg, false);
-            tray_circle(&mut raw, 22, 18, 4, fg, false);
-            tray_line(&mut raw, 8, 21, 24, 21, fg);
-        }
-        "plane" => {
-            tray_line(&mut raw, 25, 8, 7, 16, fg);
-            tray_line(&mut raw, 7, 16, 14, 18, fg);
-            tray_line(&mut raw, 14, 18, 17, 24, fg);
-            tray_line(&mut raw, 17, 24, 25, 8, fg);
-            tray_line(&mut raw, 14, 18, 20, 13, fg);
-        }
-        "dandelion" => {
-            tray_line(&mut raw, 16, 13, 16, 25, fg);
-            for (x, y) in [
-                (16, 7),
-                (10, 10),
-                (22, 10),
-                (8, 15),
-                (24, 15),
-                (12, 6),
-                (20, 6),
-            ] {
-                tray_line(&mut raw, 16, 14, x, y, fg);
-                tray_circle(&mut raw, x, y, 1, fg, true);
-            }
-        }
-        "kite" => {
-            tray_line(&mut raw, 16, 6, 23, 14, fg);
-            tray_line(&mut raw, 23, 14, 16, 22, fg);
-            tray_line(&mut raw, 16, 22, 9, 14, fg);
-            tray_line(&mut raw, 9, 14, 16, 6, fg);
-            tray_line(&mut raw, 16, 6, 16, 22, fg);
-            tray_line(&mut raw, 9, 14, 23, 14, fg);
-            tray_line(&mut raw, 16, 22, 19, 26, fg);
-        }
-        "bubble" => {
-            tray_circle(&mut raw, 16, 15, 8, fg, false);
-            tray_circle(&mut raw, 11, 11, 2, fg, false);
-            tray_circle(&mut raw, 12, 12, 1, fg, true);
-        }
-        "jellyfish" => {
-            tray_circle(&mut raw, 16, 13, 8, fg, false);
-            tray_line(&mut raw, 9, 15, 23, 15, fg);
-            for x in [10, 14, 18, 22] {
-                tray_line(&mut raw, x, 16, x - 1, 24, fg);
-            }
-        }
-        _ => {
-            tray_circle(&mut raw, 16, 16, 8, fg, false);
-            tray_circle(&mut raw, 16, 16, 2, fg, true);
-        }
-    }
-    tauri::image::Image::new_owned(raw, 32, 32)
-}
 
 const APP_ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
 
@@ -314,29 +164,29 @@ fn main() {
                 startup_config.sketch_enabled,
             );
             let startup_sketch_hotkey = startup_config.sketch_hotkey.clone();
-            std::thread::spawn(move || {
-                for _ in 0..40 {
-                    if startup_sketch_hotkey.is_empty() {
-                        break;
-                    }
-                    match hooks::hotkey::register_hotkey(
-                        hooks::hotkey::HotkeySlotId::Sketch,
-                        &startup_sketch_hotkey,
-                    ) {
-                        Ok(_) => break,
-                        Err(error) if error == "热键线程未就绪" => {
-                            std::thread::sleep(std::time::Duration::from_millis(50))
+            // 草稿同样只在启用时注册（禁用时不占用组合键）
+            if startup_config.sketch_enabled && !startup_sketch_hotkey.is_empty() {
+                std::thread::spawn(move || {
+                    for _ in 0..40 {
+                        match hooks::hotkey::register_hotkey(
+                            hooks::hotkey::HotkeySlotId::Sketch,
+                            &startup_sketch_hotkey,
+                        ) {
+                            Ok(_) => break,
+                            Err(error) if error == "热键线程未就绪" => {
+                                std::thread::sleep(std::time::Duration::from_millis(50))
+                            }
+                            Err(error) => {
+                                crate::utils::logger::log(
+                                    "hotkey",
+                                    &format!("草稿快捷键注册失败: {}", error),
+                                );
+                                break;
+                            }
                         }
-                        Err(error) => {
-                            crate::utils::logger::log(
-                                "hotkey",
-                                &format!("草稿快捷键注册失败: {}", error),
-                            );
-                            break;
-                        }
                     }
-                }
-            });
+                });
+            }
             // 初始化文字工具栏启用标志（鼠标钩子选区检测时检查）
             hooks::mouse::set_text_toolbar_enabled(startup_config.text_toolbar_enabled);
 
@@ -649,8 +499,10 @@ fn main() {
             hooks::hotkey::start_hotkey_thread(app_handle_hk);
 
             // 启动时按配置注册截图热键（热键线程的消息窗口需先就绪）
+            // 工具已禁用就不注册：RegisterHotKey 是进程级独占，注册着就等于占住了
+            // 这个组合键，本进程不响应、别的程序也按不了。
             let startup_hotkey = startup_config.screenshot_hotkey;
-            if !startup_hotkey.is_empty() {
+            if startup_config.screenshot_enabled && !startup_hotkey.is_empty() {
                 std::thread::spawn(move || {
                     // 轮询等待热键线程就绪（最多约 2 秒）
                     for _ in 0..40 {
@@ -676,9 +528,9 @@ fn main() {
                 });
             }
 
-            // 启动时按配置注册录屏热键
+            // 启动时按配置注册录屏热键（禁用时不注册，理由同截图）
             let startup_recording_hotkey = startup_config.recording_hotkey;
-            if !startup_recording_hotkey.is_empty() {
+            if startup_config.recording_enabled && !startup_recording_hotkey.is_empty() {
                 std::thread::spawn(move || {
                     for _ in 0..40 {
                         match hooks::hotkey::register_hotkey(
@@ -794,8 +646,6 @@ fn main() {
             commands::write_client_log,
             commands::show_palette,
             commands::hide_palette,
-            commands::start_scroll_navigation,
-            commands::hide_scroll_navigation,
             commands::get_scroll_navigation_state,
             commands::set_scroll_navigation_percent,
             commands::recapture_scroll_target,
@@ -822,6 +672,10 @@ fn main() {
             commands::consume_todo_quick_add_pending,
             commands::mark_orb_ready,
             commands::cancel_screenshot,
+            commands::selector_prepare,
+            commands::selector_begin,
+            commands::selector_end,
+            commands::selector_dispose,
             commands::get_virtual_desktop_bounds,
             commands::get_screenshot_monitor_bounds,
             commands::get_screen_cache_png,
@@ -829,6 +683,7 @@ fn main() {
             commands::start_long_capture,
             commands::stop_long_capture,
             commands::cancel_long_capture,
+            commands::reposition_long_capture_controls,
             commands::get_long_capture_status,
             commands::get_long_capture_preview,
             commands::save_long_capture,
@@ -1012,8 +867,6 @@ fn main() {
             commands::restore_pinned_notes,
             commands::show_sticky_notes_manager,
             commands::hide_sticky_notes_manager,
-            commands::get_ocr_engines,
-            commands::set_ocr_engine,
             commands::start_recording_select,
             commands::start_recording,
             commands::show_recording_controls,

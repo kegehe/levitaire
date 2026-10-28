@@ -111,6 +111,13 @@ function widthMarkerSize(value: number, maximum = 20): number {
   return Math.min(maximum, Math.max(4, value + 3));
 }
 
+/** 保存失败的展示文案：Tauri 的 invoke 拒绝时抛的是后端字符串，不是 Error。 */
+function saveErrorMessage(error: unknown): string {
+  if (typeof error === "string" && error) return error;
+  const message = (error as { message?: string } | null)?.message;
+  return message && message.length > 0 ? message : "保存失败，请重试";
+}
+
 function colorInputValue(value: string): string {
   const match = /^#([\da-f]{3})$/i.exec(value);
   if (match) return `#${match[1].split("").map((part) => part + part).join("")}`;
@@ -702,7 +709,7 @@ function SketchTool() {
     } catch (error) {
       if (editVersionRef.current !== revision) return;
       setSaveState("error");
-      setSaveError(error instanceof Error ? error.message : "保存失败，请重试");
+      setSaveError(saveErrorMessage(error));
     }
   };
   const savePreview = async () => {
@@ -722,7 +729,7 @@ function SketchTool() {
     } catch (error) {
       if (editVersionRef.current !== currentPreview.revision) return;
       setSaveState("error");
-      setSaveError(error instanceof Error ? error.message : "淇濆瓨澶辫触锛岃閲嶈瘯");
+      setSaveError(saveErrorMessage(error));
     }
   };
   const close = () => {

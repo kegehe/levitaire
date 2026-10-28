@@ -499,6 +499,29 @@ pub fn unregister_hotkey(slot: HotkeySlotId) {
     }
 }
 
+/// 按工具启用状态同步热键的注册：启用时按配置注册，禁用时真正反注册。
+///
+/// 只翻 enabled 标志是不够的：RegisterHotKey 是进程级独占，热键一旦注册，
+/// 组合键就被本进程吃掉，别的程序也收不到——表现就是「应用没反应，别处也按不了」。
+/// 所以禁用必须 UnregisterHotKey 把键还给系统，重新启用时再注册回来。
+///
+/// 返回 Err 表示启用时注册失败（通常是被其他程序占用，内部已回滚到旧热键）。
+/// 只有「禁用」这一侧永不返回 Err：释放组合键不该因为任何原因被跳过。
+pub fn sync_registration_with_enabled(
+    slot: HotkeySlotId,
+    enabled: bool,
+    hotkey: &str,
+) -> Result<(), String> {
+    if !enabled {
+        unregister_hotkey(slot);
+        return Ok(());
+    }
+    if hotkey.trim().is_empty() {
+        return Ok(());
+    }
+    register_hotkey(slot, hotkey)
+}
+
 /// 设置某槽位启用状态（仅启用时热键才触发）
 pub fn set_slot_enabled(slot: HotkeySlotId, enabled: bool) {
     HOTKEY_STATE.slots[slot.index()]
@@ -670,6 +693,14 @@ mod tests {
         assert_eq!(HotkeySlotId::Recording.index(), 1);
         assert_eq!(HotkeySlotId::Sketch.index(), 2);
         assert_eq!(HotkeySlotId::TodoQuickAdd.index(), 3);
+    }
+
+    #[test]
+    fn test_sync_registration_disabled_never_errors() {
+        // 禁用时只反注册：热键线程未起也不该报错（unregister_hotkey 是空操作）
+        assert!(sync_registration_with_enabled(HotkeySlotId::Sketch, false, "Ctrl+Alt+Q").is_ok());
+        // 启用但没配快捷键：没有可注册的，同样不报错
+        assert!(sync_registration_with_enabled(HotkeySlotId::Sketch, true, "  ").is_ok());
     }
 
     #[test]

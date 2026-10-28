@@ -332,15 +332,33 @@ pub fn get_recording_enabled(config_manager: State<'_, ConfigManager>) -> Result
     config_manager.get_recording_enabled()
 }
 
-/// 设置录屏工具启用状态并持久化
+/// 设置录屏工具启用状态并持久化（禁用时反注册全局热键，把组合键还给系统）
 #[tauri::command]
 pub fn set_recording_enabled(
     enabled: bool,
     app: tauri::AppHandle,
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
-    config_manager.update_recording_enabled(enabled)?;
-    crate::hooks::hotkey::set_slot_enabled(crate::hooks::hotkey::HotkeySlotId::Recording, enabled);
+    let previous = config_manager.get_recording_enabled()?;
+    let slot = crate::hooks::hotkey::HotkeySlotId::Recording;
+    // 先动热键再落盘：禁用时反注册，把组合键还给系统；启用时按配置注册回来。
+    let hotkey = config_manager.get_recording_hotkey().unwrap_or_default();
+    if let Err(error) = crate::hooks::hotkey::sync_registration_with_enabled(slot, enabled, &hotkey)
+    {
+        // 热键注册失败（通常是被其他程序占用）不该拦住工具本身的启用：工具照常可用，
+        // 设置页的快捷键自检会把冲突标出来。
+        crate::utils::logger::log(
+            "hotkey",
+            &format!("更新录屏工具启用状态时同步快捷键失败: {}", error),
+        );
+    }
+    if let Err(error) = config_manager.update_recording_enabled(enabled) {
+        let _ = config_manager.update_recording_enabled(previous);
+        // 落盘失败则把热键回滚到切换前的状态
+        let _ = crate::hooks::hotkey::sync_registration_with_enabled(slot, previous, &hotkey);
+        return Err(error);
+    }
+    crate::hooks::hotkey::set_slot_enabled(slot, enabled);
     if !enabled {
         // 禁用时退出所有录制状态，包括独立控制窗和鼠标穿透 overlay。
         let state = app.state::<crate::recording::RecordingState>();
@@ -367,19 +385,23 @@ pub fn set_recording_hotkey(
     let trimmed = hotkey.trim().to_string();
     let slot = crate::hooks::hotkey::HotkeySlotId::Recording;
     let previous = config_manager.get_recording_hotkey()?;
+    // 工具已禁用时不注册：禁用意味着不占用该组合键，等启用时再注册。
+    let tool_enabled = config_manager.get_recording_enabled()?;
     if trimmed.is_empty() {
         crate::hooks::hotkey::unregister_hotkey(slot);
         if let Err(error) = config_manager.update_recording_hotkey(String::new()) {
-            if !previous.is_empty() {
+            if tool_enabled && !previous.is_empty() {
                 let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
             }
             return Err(error);
         }
         return Ok(());
     }
-    crate::hooks::hotkey::register_hotkey(slot, &trimmed)?;
+    if tool_enabled {
+        crate::hooks::hotkey::register_hotkey(slot, &trimmed)?;
+    }
     if let Err(error) = config_manager.update_recording_hotkey(trimmed) {
-        if previous.is_empty() {
+        if !tool_enabled || previous.is_empty() {
             crate::hooks::hotkey::unregister_hotkey(slot);
         } else {
             let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);

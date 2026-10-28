@@ -1,11 +1,5 @@
-/* 独立窗口（scroll-navigator-overlay）：四周留出投影留白。
-   见 utils/panelWindow.ts 的 PANEL_SHADOW_MARGIN —— 窗口尺寸由前端算成
-   「面板 + 2×留白」，留白供 .scroll-nav 的投影展开，否则投影会被窗口边界硬切，
-   在面板圆角处留下带直角的残影。嵌在通用工具面板内部时（embedded）不加这个类，
-   留白由 body.utility-hub-window 提供。 */
-body.scroll-nav-window {
-  padding: 20px;
-}
+/* 滚动导航面板。唯一宿主是通用工具面板（UtilityHub）：窗口留白由
+   body.utility-hub-window 提供，下面这套基础尺寸由 UtilityHub.css 按紧凑尺度覆盖。 */
 .scroll-nav {
   box-sizing: border-box;
   width: 248px;
@@ -20,46 +14,12 @@ body.scroll-nav-window {
   backdrop-filter: blur(28px) saturate(160%);
   font-family: inherit;
 }
-.scroll-nav-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 34px;
-  padding: 0 7px 0 10px;
-  border-bottom: 1px solid var(--palette-header-border);
-  cursor: grab;
-  user-select: none;
-}
-.scroll-nav-header:active {
-  cursor: grabbing;
-}
-.scroll-nav-title,
-.scroll-nav-header-actions,
 .scroll-nav-endpoints,
 .scroll-nav-percent-row,
 .scroll-nav-presets {
   display: flex;
   align-items: center;
 }
-.scroll-nav-title {
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-}
-.scroll-nav-status {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-fg-muted);
-}
-.scroll-nav-status.is-precise {
-  background: #2f9e78;
-  box-shadow: 0 0 0 3px rgb(47 158 120 / 0.16);
-}
-.scroll-nav-header-actions {
-  gap: 2px;
-}
-.scroll-nav-icon-button,
 .scroll-nav-endpoints button {
   position: relative;
   display: inline-flex;
@@ -70,21 +30,10 @@ body.scroll-nav-window {
   background: transparent;
   cursor: pointer;
 }
-.scroll-nav-icon-button {
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-}
-.scroll-nav-icon-button:hover,
 .scroll-nav-endpoints button:hover:not(:disabled) {
   color: var(--color-fg);
   background: var(--button-hover-bg);
 }
-.scroll-nav-header-actions .scroll-nav-icon-button[data-tooltip]::after {
-  top: calc(100% + 5px);
-  bottom: auto;
-}
-.scroll-nav-icon-button[data-tooltip]::after,
 .scroll-nav-endpoints button[data-tooltip]::after {
   content: attr(data-tooltip);
   position: absolute;
@@ -104,7 +53,6 @@ body.scroll-nav-window {
   transform: translateX(-50%);
   transition: opacity var(--transition-fast);
 }
-.scroll-nav-icon-button:hover::after,
 .scroll-nav-endpoints button:hover:not(:disabled)::after {
   opacity: 1;
 }

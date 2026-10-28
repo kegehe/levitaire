@@ -130,6 +130,9 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     hide: mockHide,
     show: vi.fn().mockResolvedValue(undefined),
     setSize: mockSetSize,
+    center: vi.fn().mockResolvedValue(undefined),
+    // 长截图控制条靠它拦截原生关闭（窗口一关就再也没有按钮能结束会话）
+    onCloseRequested: vi.fn(() => Promise.resolve(() => {})),
     setMinSize: vi.fn().mockResolvedValue(undefined),
     startDragging: mockStartDragging,
     startResizeDragging: mockStartResizeDragging,

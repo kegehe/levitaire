@@ -2,6 +2,7 @@
 //! 支持多显示器：overlay 覆盖整个虚拟桌面，capture 用 GetDC(None) 的虚拟桌面坐标系。
 
 pub mod pin;
+pub mod selector;
 pub mod target;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};

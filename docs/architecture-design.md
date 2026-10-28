@@ -383,7 +383,7 @@ Levitaire/
 | `monitor-overlay` / `time-overlay` / `todo-overlay` | 常驻系统工具浮窗（时间工具内含时钟 / 倒计时 / 番茄钟 / 秒表 / 日历页签） |
 | `sticky-notes-manager` | 便利贴管理窗（各便签为独立窗口） |
 | `quick-input-overlay` | 快速输入转盘 |
-| `sketch-overlay` / `utility-hub-overlay` / `scroll-navigator-overlay` | 屏幕草稿 / 通用工具 / 滚动导航 |
+| `sketch-overlay` / `utility-hub-overlay` | 屏幕草稿 / 通用工具（滚动导航嵌在通用工具面板内） |
 | `recording-controls` | 录屏控制条 |
 | `update-prompt` | 新版本提示窗 |
 

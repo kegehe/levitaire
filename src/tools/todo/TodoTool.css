@@ -66,7 +66,11 @@
 .todo-undo-toast { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid var(--color-border); border-radius: 7px; color: var(--color-fg); background: var(--color-bg-sunken); box-shadow: 0 4px 12px rgb(0 0 0 / 15%); }
 .todo-undo-toast button { padding: 3px 7px; border: 0; border-radius: 4px; color: var(--color-accent); background: transparent; cursor: pointer; font: inherit; font-weight: 600; }
 .todo-undo-toast button:hover { background: var(--button-hover-bg); }
-.todo-io-toast { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; border: 1px solid var(--color-border); border-radius: 7px; color: var(--color-fg-muted); background: var(--color-bg-sunken); }
+.todo-io-toast { display: flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid var(--color-border); border-radius: 7px; color: var(--color-fg-muted); background: var(--color-bg-sunken); }
+.todo-io-toast > svg { flex-shrink: 0; }
+.todo-io-toast-text { min-width: 0; flex: 1; }
+.todo-io-toast.is-success { border-color: var(--color-success); color: var(--color-success-fg); background: var(--color-success-subtle); }
+.todo-io-toast.is-error { border-color: var(--color-danger); color: var(--color-danger-fg); background: var(--color-danger-subtle); }
 .todo-io-toast button { display: inline-flex; padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; }
 .todo-reminder-toast { display: flex; flex-direction: column; gap: 5px; padding: 7px 9px; border: 1px solid var(--color-accent); border-radius: 7px; color: var(--color-fg); background: var(--color-bg-sunken); box-shadow: 0 4px 12px rgb(0 0 0 / 15%); }
 .todo-reminder-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }

@@ -33,15 +33,14 @@ pub fn set_screenshot_hotkey(
 ) -> Result<(), String> {
     let trimmed = hotkey.trim().to_string();
     let previous = config_manager.get_screenshot_hotkey()?;
+    let tool_enabled = config_manager.get_screenshot_enabled()?;
+    let slot = crate::hooks::hotkey::HotkeySlotId::Screenshot;
     if trimmed.is_empty() {
-        crate::hooks::hotkey::unregister_hotkey(crate::hooks::hotkey::HotkeySlotId::Screenshot);
+        crate::hooks::hotkey::unregister_hotkey(slot);
         if let Err(error) = config_manager.update_screenshot_hotkey(String::new()) {
             let _ = config_manager.update_screenshot_hotkey(previous.clone());
-            if !previous.is_empty() {
-                let _ = crate::hooks::hotkey::register_hotkey(
-                    crate::hooks::hotkey::HotkeySlotId::Screenshot,
-                    &previous,
-                );
+            if tool_enabled && !previous.is_empty() {
+                let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
             }
             return Err(error);
         }
@@ -49,26 +48,26 @@ pub fn set_screenshot_hotkey(
     }
     // 先注册（含冲突检测），成功后再持久化。
     // register_hotkey 内部会先反注册旧的再注册新的；若新的失败会尝试回滚恢复旧的，避免新旧皆失。
-    crate::hooks::hotkey::register_hotkey(
-        crate::hooks::hotkey::HotkeySlotId::Screenshot,
-        &trimmed,
-    )?;
+    // 工具已禁用时不注册：禁用意味着不占用该组合键，等启用时再注册。
+    if tool_enabled {
+        crate::hooks::hotkey::register_hotkey(slot, &trimmed)?;
+    }
     if let Err(error) = config_manager.update_screenshot_hotkey(trimmed) {
         let _ = config_manager.update_screenshot_hotkey(previous.clone());
-        if previous.is_empty() {
-            crate::hooks::hotkey::unregister_hotkey(crate::hooks::hotkey::HotkeySlotId::Screenshot);
+        if !tool_enabled || previous.is_empty() {
+            crate::hooks::hotkey::unregister_hotkey(slot);
         } else {
-            let _ = crate::hooks::hotkey::register_hotkey(
-                crate::hooks::hotkey::HotkeySlotId::Screenshot,
-                &previous,
-            );
+            let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
         }
         return Err(error);
     }
     Ok(())
 }
 
-/// 设置截图工具启用状态（仅启用时热键才触发），同时持久化到配置
+/// 设置截图工具启用状态并持久化。
+///
+/// 禁用时会真正反注册全局热键：RegisterHotKey 是进程级独占，留着不注销会让
+/// 这个组合键在本应用里没反应、别的程序也用不了。重新启用时再按配置注册回来。
 #[tauri::command]
 pub fn set_screenshot_enabled(
     enabled: bool,
@@ -76,8 +75,22 @@ pub fn set_screenshot_enabled(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     let previous = config_manager.get_screenshot_enabled()?;
+    let slot = crate::hooks::hotkey::HotkeySlotId::Screenshot;
+    // 先动热键再落盘：禁用时反注册，把组合键还给系统；启用时按配置注册回来。
+    let hotkey = config_manager.get_screenshot_hotkey().unwrap_or_default();
+    if let Err(error) = crate::hooks::hotkey::sync_registration_with_enabled(slot, enabled, &hotkey)
+    {
+        // 热键注册失败（通常是被其他程序占用）不该拦住工具本身的启用：工具照常可用，
+        // 设置页的快捷键自检会把冲突标出来。
+        crate::utils::logger::log(
+            "hotkey",
+            &format!("更新截图工具启用状态时同步快捷键失败: {}", error),
+        );
+    }
     if let Err(error) = config_manager.update_screenshot_enabled(enabled) {
         let _ = config_manager.update_screenshot_enabled(previous);
+        // 落盘失败则把热键回滚到切换前的状态
+        let _ = crate::hooks::hotkey::sync_registration_with_enabled(slot, previous, &hotkey);
         return Err(error);
     }
     crate::hooks::hotkey::set_screenshot_enabled(enabled);
@@ -562,4 +575,44 @@ pub fn set_pin_border_width(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     config_manager.update_pin_border_width(width)
+}
+
+// ─── 原生选区层（区域框选阶段的遮罩 / 选框） ──────────────────────
+//
+// 这三个命令只负责"什么时候画、画到哪一帧为止"，坐标由全局鼠标钩子直接喂给原生层，
+// 不经过 WebView。详见 screenshot/selector.rs 的模块注释。
+
+/// 进入区域框选模式：按虚拟桌面铺两扇原生窗（隐藏状态）。
+#[tauri::command]
+pub fn selector_prepare(app: tauri::AppHandle, r: u8, g: u8, b: u8) -> Result<(), String> {
+    let accent = (r as i32) | ((g as i32) << 8) | ((b as i32) << 16);
+    crate::screenshot::selector::prepare(&app, accent)
+}
+
+/// 按下：以物理坐标为锚点开始一次框选。
+///
+/// 失败（原生层没就绪）会让前端立刻退回 WebView 绘制，因此必须把错误抛回去，
+/// 不能静默吞掉 —— 那会表现为「这一拖整屏没有遮罩」。
+#[tauri::command]
+pub fn selector_begin(x: i32, y: i32) -> Result<(), String> {
+    crate::screenshot::selector::begin(x, y)
+}
+
+/// 抬起：隐藏原生层并返回"最后一帧真正画出来"的选区（物理像素）。
+#[tauri::command]
+pub fn selector_end() -> Option<serde_json::Value> {
+    crate::screenshot::selector::end().map(|rect| {
+        serde_json::json!({
+            "left": rect.left,
+            "top": rect.top,
+            "width": rect.right - rect.left,
+            "height": rect.bottom - rect.top,
+        })
+    })
+}
+
+/// 退出框选（切模式 / 取消 / 会话结束）：销毁原生层。
+#[tauri::command]
+pub fn selector_dispose() {
+    crate::screenshot::selector::dispose();
 }

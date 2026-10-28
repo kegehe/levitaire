@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -40,6 +40,9 @@ export default function PinOcrResult() {
   const [translating, setTranslating] = useState(false);
   const translatingRef = useRef(false);
   const textBeforeTranslateRef = useRef("");
+  // 翻译会话代次：窗口隐藏 / 新 OCR 文本到达时自增。用于让仍卡在配置查询
+  // 里的 handleTranslate 提前退出 —— 这类挂起调用不在 cancel() 的管辖范围内。
+  const sessionRef = useRef(0);
 
   // 主题接入：OCR 结果窗为常驻窗口，需在挂载时着色并订阅广播，
   // 否则主题在窗口创建后变更时不会刷新。
@@ -66,6 +69,17 @@ export default function PinOcrResult() {
   const { optimize, cancel, isLoading, optimizedText, errorMessage, checkAiConfig } =
     useAiOptimize();
 
+  // 中止翻译：复位本地状态并通知后端取消流式请求。
+  // 窗口关闭只是隐藏、组件并不卸载，不主动取消的话后台请求会继续跑完并消耗
+  // 接口额度（文字工具栏关闭时同样会 cancel）。
+  const abortTranslation = useCallback(() => {
+    sessionRef.current += 1;
+    if (!translatingRef.current) return;
+    translatingRef.current = false;
+    setTranslating(false);
+    cancel();
+  }, [cancel]);
+
   // 读取已配置的搜索引擎，并跟随设置窗口的变更（与文字工具栏保持一致）
   useEffect(() => {
     let disposed = false;
@@ -85,11 +99,7 @@ export default function PinOcrResult() {
     const show = listen<Payload>("pin-ocr-show", ({ payload }) => {
       // 新 OCR 结果到来时若有翻译仍在进行，先取消并复位其状态：
       // 否则旧请求完成时的 effect 会把刚展示的新 OCR 文本覆盖成旧翻译结果/旧原文。
-      if (translatingRef.current) {
-        translatingRef.current = false;
-        setTranslating(false);
-        cancel();
-      }
+      abortTranslation();
       setText(payload.text ?? "");
       setOcrError(payload.error ?? "");
       setActionError("");
@@ -100,7 +110,16 @@ export default function PinOcrResult() {
       show.then((fn) => fn());
       ready.then((fn) => fn());
     };
-  }, [cancel]);
+  }, [abortTranslation]);
+
+  // 原生标题栏的关闭按钮会销毁窗口，组件卸载后再取消就来不及了：
+  // 在 close-requested 里先取消翻译，避免窗口没了请求还在跑。
+  useEffect(() => {
+    const unlisten = win.onCloseRequested(() => abortTranslation());
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, [abortTranslation, win]);
 
   // 监听翻译进度与结果：流式过程实时更新 text，结束后落定最终结果或报错
   useEffect(() => {
@@ -154,7 +173,11 @@ export default function PinOcrResult() {
     }
     if (isLoading || !text.trim()) return;
     setActionError("");
+    const session = sessionRef.current;
     const config = await checkAiConfig();
+    // 等待配置查询期间窗口被关闭或来了新的 OCR 文本：这次翻译已经作废，
+    // 不能再发起请求（否则关窗后照样消耗额度）。
+    if (session !== sessionRef.current) return;
     if (!config || !config.api_key || !config.api_key.trim()) {
       setActionError("请先配置 AI 再进行翻译");
       return;
@@ -166,11 +189,17 @@ export default function PinOcrResult() {
     await optimize(text, TRANSLATE_MODE).catch(() => {});
   };
 
+  // 关闭窗口（仅隐藏）：先取消进行中的翻译，再隐藏。
+  const handleClose = useCallback(() => {
+    abortTranslation();
+    void win.hide().catch(() => {});
+  }, [abortTranslation, win]);
+
   return (
     <main className="pin-ocr-result" role="dialog" aria-label="OCR 结果">
       <header>
         <strong>OCR 结果</strong>
-        <button type="button" aria-label="关闭" onClick={() => void win.hide()}>
+        <button type="button" aria-label="关闭" onClick={handleClose}>
           <X size={16} />
         </button>
       </header>

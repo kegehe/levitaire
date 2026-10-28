@@ -16,6 +16,13 @@
   pointer-events: none;
 }
 
+/* 原生选区层接管（区域框选阶段）：这层遮罩/选框只占位、不绘制。
+   必须在契约上保留 DOM —— 选区状态、尺寸标签的定位、jsdom 测试都依赖这几个节点。 */
+.ss-overlay.ss-native-select .ss-mask,
+.ss-overlay.ss-native-select .ss-selection-box {
+  visibility: hidden;
+}
+
 .ss-selection-box {
   position: absolute;
   /* border-box 下 border 画在 width/height 内部边缘，四条边都在选区内侧，

@@ -13,21 +13,26 @@ pub fn set_sketch_hotkey(
     let trimmed = hotkey.trim().to_string();
     let previous = config_manager.get_sketch_hotkey()?;
     let slot = crate::hooks::hotkey::HotkeySlotId::Sketch;
+    // 工具已禁用时不注册：禁用意味着不占用该组合键，等启用时再注册。
+    let tool_enabled = config_manager.get_sketch_enabled()?;
     if trimmed.is_empty() {
         crate::hooks::hotkey::unregister_hotkey(slot);
         if let Err(error) = config_manager.update_sketch_hotkey(String::new()) {
-            if !previous.is_empty() {
+            if tool_enabled && !previous.is_empty() {
                 let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
             }
             return Err(error);
         }
         return Ok(());
     }
-    crate::hooks::hotkey::register_hotkey(slot, &trimmed)?;
+    if tool_enabled {
+        crate::hooks::hotkey::register_hotkey(slot, &trimmed)?;
+    }
     if let Err(error) = config_manager.update_sketch_hotkey(trimmed) {
         let _ = config_manager.update_sketch_hotkey(previous.clone());
-        crate::hooks::hotkey::unregister_hotkey(slot);
-        if !previous.is_empty() {
+        if !tool_enabled || previous.is_empty() {
+            crate::hooks::hotkey::unregister_hotkey(slot);
+        } else {
             let _ = crate::hooks::hotkey::register_hotkey(slot, &previous);
         }
         return Err(error);
@@ -90,11 +95,25 @@ pub fn set_sketch_enabled(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     let previous = config_manager.get_sketch_enabled()?;
+    let slot = crate::hooks::hotkey::HotkeySlotId::Sketch;
+    // 先动热键再落盘：禁用时反注册，把组合键还给系统；启用时按配置注册回来。
+    let hotkey = config_manager.get_sketch_hotkey().unwrap_or_default();
+    if let Err(error) = crate::hooks::hotkey::sync_registration_with_enabled(slot, enabled, &hotkey)
+    {
+        // 热键注册失败（通常是被其他程序占用）不该拦住工具本身的启用：工具照常可用，
+        // 设置页的快捷键自检会把冲突标出来。
+        crate::utils::logger::log(
+            "hotkey",
+            &format!("更新草稿工具启用状态时同步快捷键失败: {}", error),
+        );
+    }
     if let Err(error) = config_manager.update_sketch_enabled(enabled) {
         let _ = config_manager.update_sketch_enabled(previous);
+        // 落盘失败则把热键回滚到切换前的状态
+        let _ = crate::hooks::hotkey::sync_registration_with_enabled(slot, previous, &hotkey);
         return Err(error);
     }
-    crate::hooks::hotkey::set_slot_enabled(crate::hooks::hotkey::HotkeySlotId::Sketch, enabled);
+    crate::hooks::hotkey::set_slot_enabled(slot, enabled);
     if !enabled {
         SKETCH_VISIBLE_BEFORE_SESSION.store(false, Ordering::SeqCst);
         if let Some(window) = app.get_webview_window("sketch-overlay") {

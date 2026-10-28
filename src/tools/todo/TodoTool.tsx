@@ -31,6 +31,20 @@ interface TodoItem {
 interface TodoList { id: string; name: string; createdAt: string; updatedAt: string; }
 interface TodoFocusPayload { todoId?: string; itemId?: string; }
 /**
+ * 面板底部提示的语气。
+ *
+ * 以前成功与失败共用一套灰字，用户很难一眼分辨；现在靠颜色与图标区分。
+ */
+type TodoNoticeTone = "success" | "error";
+interface TodoNotice { text: string; tone: TodoNoticeTone; }
+/**
+ * 提示自动消失的时长。
+ *
+ * 失败要给用户留出读完的时间，成功只需确认一下。两者都不能太长 —— 面板是常驻桌面的
+ * 小窗，长期挂着一条提示会挤占列表高度。
+ */
+const IO_NOTICE_DURATION_MS: Record<TodoNoticeTone, number> = { success: 2600, error: 5000 };
+/**
  * 清单筛选里的伪选项：选中它时不做清单过滤，显示全部任务。
  *
  * 复用空串是因为它与「任务不属于任何清单」（`listId` 为空）取值一致 —— 两者都是
@@ -159,7 +173,7 @@ function TodoTool() {
   const [snoozeAt, setSnoozeAt] = useState("");
   const [activeFocusTodoId, setActiveFocusTodoId] = useState<string | null>(null);
   const [focusedTodoId, setFocusedTodoId] = useState<string | null>(null);
-  const [ioMessage, setIoMessage] = useState("");
+  const [ioNotice, setIoNotice] = useState<TodoNotice | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [dragOverBefore, setDragOverBefore] = useState(false);
@@ -380,11 +394,21 @@ function TodoTool() {
     if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current);
   }, []);
 
+  const showIoNotice = (text: string, tone: TodoNoticeTone) => setIoNotice({ text, tone });
+
+  // 提示几秒后自动收起：以前必须手动点关闭，失败提示会一直挂在面板底部。
+  // 依赖整个对象而不是文案 —— 连续两次触发同一句话时对象是新的，计时器会重置。
+  useEffect(() => {
+    if (!ioNotice) return;
+    const timer = setTimeout(() => setIoNotice(null), IO_NOTICE_DURATION_MS[ioNotice.tone]);
+    return () => clearTimeout(timer);
+  }, [ioNotice]);
+
   const addTodo = async () => {
     const value = title.trim();
     // 同 saveEditing：空标题给可见反馈，不要静默 return
     if (!value) {
-      setIoMessage("请输入任务标题");
+      showIoNotice("请输入任务标题", "error");
       inputRef.current?.focus();
       return;
     }
@@ -394,7 +418,7 @@ function TodoTool() {
       if (selectedListId) input.listId = selectedListId;
       await invoke("create_todo", { input });
       setTitle(""); setTags(""); setPriority("normal"); setRepeatRule("none"); setDueAt(""); setRemindAt(""); setShowAddOptions(false); inputRef.current?.focus();
-    } catch (error) { console.error("create todo failed", error); setIoMessage("添加任务失败"); }
+    } catch (error) { console.error("create todo failed", error); showIoNotice("添加任务失败", "error"); }
   };
 
   const createList = async () => {
@@ -404,34 +428,34 @@ function TodoTool() {
       const list = await invoke<TodoList>("create_todo_list", { input: { name } });
       setNewListName("");
       if (list?.id) setSelectedListId(list.id);
-    } catch (error) { console.error("create todo list failed", error); setIoMessage("创建清单失败"); }
+    } catch (error) { console.error("create todo list failed", error); showIoNotice("创建清单失败", "error"); }
   };
 
   const saveListName = async (id: string) => {
     const name = editListName.trim();
     if (!name) return;
     try { await invoke("update_todo_list", { id, input: { name } }); setEditingListId(null); }
-    catch (error) { console.error("update todo list failed", error); setIoMessage("重命名清单失败"); }
+    catch (error) { console.error("update todo list failed", error); showIoNotice("重命名清单失败", "error"); }
   };
 
   const deleteList = async (id: string) => {
     try { await invoke("delete_todo_list", { id }); setConfirmDeleteListId(null); setSelectedListId(ALL_LISTS_ID); }
-    catch (error) { console.error("delete todo list failed", error); setIoMessage("删除清单失败"); }
+    catch (error) { console.error("delete todo list failed", error); showIoNotice("删除清单失败", "error"); }
   };
 
   const purgeDeleted = async () => {
     try { await invoke("purge_deleted_todos"); }
-    catch (error) { console.error("purge deleted todos failed", error); setIoMessage("清空回收站失败"); }
+    catch (error) { console.error("purge deleted todos failed", error); showIoNotice("清空回收站失败", "error"); }
   };
 
   const exportTodos = async () => {
-    try { if (await invoke<boolean>("export_todos")) setIoMessage("导出成功"); }
-    catch (error) { console.error("export todos failed", error); setIoMessage("导出失败"); }
+    try { if (await invoke<boolean>("export_todos")) showIoNotice("导出成功", "success"); }
+    catch (error) { console.error("export todos failed", error); showIoNotice("导出失败", "error"); }
   };
 
   const importTodos = async () => {
-    try { if (await invoke<boolean>("import_todos")) { setIoMessage("导入成功"); } }
-    catch (error) { console.error("import todos failed", error); setIoMessage("导入失败"); }
+    try { if (await invoke<boolean>("import_todos")) { showIoNotice("导入成功", "success"); } }
+    catch (error) { console.error("import todos failed", error); showIoNotice("导入失败", "error"); }
   };
 
   // 拖拽排序依赖 items 的 sort_order 顺序（beforeId 取同组下一项），
@@ -516,7 +540,7 @@ function TodoTool() {
     }
     try {
       await invoke("move_todo", { id: draggedId, beforeId });
-    } catch (error) { console.error("move todo failed", error); setIoMessage("调整顺序失败"); refresh(); }
+    } catch (error) { console.error("move todo failed", error); showIoNotice("调整顺序失败", "error"); refresh(); }
   };
 
   const startFocus = async (id: string) => {
@@ -528,18 +552,18 @@ function TodoTool() {
       await ensureTimerWindow();
       await invoke("show_timer_window");
       await emit("timer-focus-pomodoro");
-    } catch (error) { console.error("start todo focus failed", error); setIoMessage("启动专注失败"); }
+    } catch (error) { console.error("start todo focus failed", error); showIoNotice("启动专注失败", "error"); }
   };
 
   const toggleTodo = async (item: TodoItem) => {
     try { await invoke("set_todo_completed", { id: item.id, completed: item.status !== "completed" }); }
-    catch (error) { console.error("update todo failed", error); setIoMessage("更新任务失败"); }
+    catch (error) { console.error("update todo failed", error); showIoNotice("更新任务失败", "error"); }
   };
 
   const removeTodo = async (id: string) => {
     const item = items.find((candidate) => candidate.id === id);
     try { await invoke("delete_todo", { id }); }
-    catch (error) { console.error("delete todo failed", error); setIoMessage("删除任务失败"); return; }
+    catch (error) { console.error("delete todo failed", error); showIoNotice("删除任务失败", "error"); return; }
     if (item) {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
       setUndoItem(item);
@@ -558,7 +582,7 @@ function TodoTool() {
     setUndoItem(null);
     undoTimerRef.current = null;
     try { await invoke("restore_todo", { id: item.id }); }
-    catch (error) { console.error("restore todo failed", error); setIoMessage("恢复任务失败"); }
+    catch (error) { console.error("restore todo failed", error); showIoNotice("恢复任务失败", "error"); }
   };
 
   // toast 停留期间任务可能已被标记完成：snooze_todo 后端会拒绝相对延后，
@@ -566,24 +590,24 @@ function TodoTool() {
   const isCompletedTodo = (id: string) => itemsRef.current.find((candidate) => candidate.id === id)?.status === "completed";
 
   const snoozeTodo = async (id: string, minutes: number) => {
-    if (isCompletedTodo(id)) { setIoMessage("已完成任务不能延后提醒"); return; }
+    if (isCompletedTodo(id)) { showIoNotice("已完成任务不能延后提醒", "error"); return; }
     try {
       await invoke("snooze_todo", { id, minutes });
       setLastReminder(null);
-    } catch (error) { console.error("snooze todo failed", error); setIoMessage("延后提醒失败"); }
+    } catch (error) { console.error("snooze todo failed", error); showIoNotice("延后提醒失败", "error"); }
   };
 
   // 绝对时间延后：update_todo 会把 remind_at 设为任意目标时间并重置已提醒标记，
   // 因此可支持“明天/后天/任意具体时刻”，不受 snooze_todo 1440 分钟上限约束。
   const snoozeTodoAt = async (id: string, local: string) => {
-    if (isCompletedTodo(id)) { setIoMessage("已完成任务不能延后提醒"); return; }
+    if (isCompletedTodo(id)) { showIoNotice("已完成任务不能延后提醒", "error"); return; }
     const iso = toIso(local);
-    if (!iso) { setIoMessage("请选择延后时间"); return; }
-    if (new Date(iso).getTime() <= Date.now()) { setIoMessage("延后时间需晚于当前时间"); return; }
+    if (!iso) { showIoNotice("请选择延后时间", "error"); return; }
+    if (new Date(iso).getTime() <= Date.now()) { showIoNotice("延后时间需晚于当前时间", "error"); return; }
     try {
       await invoke("update_todo", { id, input: { remindAt: iso } });
       setLastReminder(null);
-    } catch (error) { console.error("snooze todo failed", error); setIoMessage("延后提醒失败"); }
+    } catch (error) { console.error("snooze todo failed", error); showIoNotice("延后提醒失败", "error"); }
   };
 
   const openSnoozePicker = () => {
@@ -622,7 +646,7 @@ function TodoTool() {
     const value = editTitle.trim();
     // 空标题不能静默 return：用户点了「保存」却什么都没发生，会以为已经存住了。
     if (!value) {
-      setIoMessage("请输入任务标题");
+      showIoNotice("请输入任务标题", "error");
       return;
     }
     try {
@@ -632,7 +656,7 @@ function TodoTool() {
       });
       setEditingId(null);
       setExpandedId(null);
-    } catch (error) { console.error("edit todo failed", error); setIoMessage("保存任务失败"); }
+    } catch (error) { console.error("edit todo failed", error); showIoNotice("保存任务失败", "error"); }
   };
 
   const visibleItems = (filter === "trash" ? deletedItems : items).filter((item) => {
@@ -734,14 +758,14 @@ function TodoTool() {
           <div className="todo-meta-row"><select aria-label="任务优先级" value={priority} onChange={(event) => setPriority(event.target.value as TodoPriority)}><option value="normal">普通优先级</option><option value="low">低优先级</option><option value="high">高优先级</option><option value="urgent">紧急</option></select><input aria-label="任务标签" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="标签，用逗号分隔" /><select aria-label="任务重复" value={repeatRule} onChange={(event) => setRepeatRule(event.target.value as TodoRepeatRule)}><option value="none">不重复</option><option value="daily">每天</option><option value="weekly">每周</option><option value="workdays">工作日</option></select></div>
         </div>}
 
-        {filter !== "trash" && <div className="todo-list-bar"><select aria-label="Todo list" value={selectedListId} onChange={(event) => { setSelectedListId(event.target.value); setFilter("all"); }}><option value="">全部任务</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select><button className={`todo-list-manage-btn${showListManager ? " is-active" : ""}`} aria-label="管理清单" title="管理清单" onClick={() => setShowListManager((value) => !value)}><Icon name="ListOrdered" size={14} /></button></div>}
+        {filter !== "trash" && <div className="todo-list-bar"><select aria-label="按清单筛选" value={selectedListId} onChange={(event) => { setSelectedListId(event.target.value); setFilter("all"); }}><option value="">全部任务</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select><button className={`todo-list-manage-btn${showListManager ? " is-active" : ""}`} aria-label="管理清单" title="管理清单" onClick={() => setShowListManager((value) => !value)}><Icon name="ListOrdered" size={14} /></button></div>}
         {filter !== "trash" && showListManager && <div className="todo-list-manager">
-          <div className="todo-list-create"><input aria-label="New list name" value={newListName} onChange={(event) => setNewListName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void createList(); }} placeholder="新建清单" maxLength={80} /><button className="todo-list-action" aria-label="Create list" onClick={() => void createList()}><Icon name="Plus" size={14} /></button></div>
-          {selectedListId !== ALL_LISTS_ID && <div className="todo-list-edit"><span>{lists.find((list) => list.id === selectedListId)?.name}</span>{editingListId === selectedListId ? <><input aria-label="Edit list name" value={editListName} onChange={(event) => setEditListName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveListName(selectedListId); }} /><button className="todo-list-action" aria-label="Save list name" title="保存清单名称" onClick={() => void saveListName(selectedListId)}><Icon name="Check" size={14} /></button></> : <button className="todo-list-action" aria-label="Rename list" title="重命名清单" onClick={() => { setEditingListId(selectedListId); setEditListName(lists.find((list) => list.id === selectedListId)?.name ?? ""); }}><Icon name="Pencil" size={14} /></button>}{confirmDeleteListId === selectedListId ? <><button className="todo-list-action" aria-label="Confirm delete list" title="确认删除清单" onClick={() => void deleteList(selectedListId)}><Icon name="Check" size={14} /></button><button className="todo-list-action" aria-label="Cancel delete list" title="取消删除" onClick={() => setConfirmDeleteListId(null)}><Icon name="X" size={14} /></button></> : <button className="todo-list-action" aria-label="Delete list" title="删除清单" onClick={() => setConfirmDeleteListId(selectedListId)}><Icon name="Trash2" size={14} /></button>}</div>}
+          <div className="todo-list-create"><input aria-label="新建清单名称" value={newListName} onChange={(event) => setNewListName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void createList(); }} placeholder="新建清单" maxLength={80} /><button className="todo-list-action" aria-label="创建清单" onClick={() => void createList()}><Icon name="Plus" size={14} /></button></div>
+          {selectedListId !== ALL_LISTS_ID && <div className="todo-list-edit"><span>{lists.find((list) => list.id === selectedListId)?.name}</span>{editingListId === selectedListId ? <><input aria-label="编辑清单名称" value={editListName} onChange={(event) => setEditListName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveListName(selectedListId); }} /><button className="todo-list-action" aria-label="保存清单名称" title="保存清单名称" onClick={() => void saveListName(selectedListId)}><Icon name="Check" size={14} /></button></> : <button className="todo-list-action" aria-label="重命名清单" title="重命名清单" onClick={() => { setEditingListId(selectedListId); setEditListName(lists.find((list) => list.id === selectedListId)?.name ?? ""); }}><Icon name="Pencil" size={14} /></button>}{confirmDeleteListId === selectedListId ? <><button className="todo-list-action" aria-label="确认删除清单" title="确认删除清单" onClick={() => void deleteList(selectedListId)}><Icon name="Check" size={14} /></button><button className="todo-list-action" aria-label="取消删除清单" title="取消删除" onClick={() => setConfirmDeleteListId(null)}><Icon name="X" size={14} /></button></> : <button className="todo-list-action" aria-label="删除清单" title="删除清单" onClick={() => setConfirmDeleteListId(selectedListId)}><Icon name="Trash2" size={14} /></button>}</div>}
         </div>}
         {showSearch && <div className="todo-search"><Icon name="Search" size={14} /><input autoFocus aria-label="搜索任务" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务标题、备注或标签" /></div>}
 
-        {filter === "trash" ? <div className="todo-trash-state"><span><Icon name="Trash2" size={13} />回收站</span><button onClick={() => setFilter("all")}>返回待办</button></div> : <div className="todo-filters" role="tablist"><button className={filter === "all" ? "is-active" : ""} onClick={() => setFilter("all")}>待办</button><button className={filter === "today" ? "is-active" : ""} onClick={() => setFilter("today")}>今天</button><button className={filter === "completed" ? "is-active" : ""} onClick={() => setFilter("completed")}>已完成</button></div>}
+        {filter === "trash" ? <div className="todo-trash-state"><span><Icon name="Trash2" size={13} />回收站</span><button onClick={() => setFilter("all")}>返回待办</button></div> : <div className="todo-filters" role="tablist" aria-label="任务筛选"><button role="tab" aria-selected={filter === "all"} className={filter === "all" ? "is-active" : ""} onClick={() => setFilter("all")}>待办</button><button role="tab" aria-selected={filter === "today"} className={filter === "today" ? "is-active" : ""} onClick={() => setFilter("today")}>今天</button><button role="tab" aria-selected={filter === "completed"} className={filter === "completed" ? "is-active" : ""} onClick={() => setFilter("completed")}>已完成</button></div>}
         <div className="todo-tag-filter">
           <Icon name="ListFilter" size={13} />
           <select aria-label="按标签筛选" value={selectedTag} onChange={(event) => setSelectedTag(event.target.value)}>
@@ -761,7 +785,7 @@ function TodoTool() {
           ))}
           {visibleItems.length === 0 ? <div className="todo-empty">没有任务</div> : visibleItems.map((item) => (
             <div ref={(node) => { itemRefs.current[item.id] = node; }} className={`todo-item${item.status === "completed" ? " is-completed" : ""}${editingId === item.id ? " is-editing" : ""}${focusedTodoId === item.id ? " is-focused" : ""}${dragId === item.id ? " is-dragging" : ""}${dragOverId === item.id ? (dragOverBefore ? " is-drag-over-before" : " is-drag-over-after") : ""}`} key={item.id}>
-              <div className={`todo-item-row${canDrag ? " is-draggable" : ""}`} draggable={canDrag} onDragStart={(event) => handleDragStart(event, item.id)} onDragOver={(event) => handleDragOver(event, item.id)} onDragEnd={() => void handleDragEnd()}><button className="todo-check" aria-label={filter === "trash" ? "Restore task" : item.status === "completed" ? "取消完成" : "完成任务"} onClick={() => filter === "trash" ? void undoDelete(item) : void toggleTodo(item)}><Icon name="Check" size={13} /></button><button className="todo-item-main" onClick={() => { if (editingId !== item.id) setExpandedId(expandedId === item.id ? null : item.id); }}><span className="todo-item-title">{item.title}</span><span className="todo-item-summary">{item.priority && item.priority !== "normal" && <span className={`todo-priority priority-${item.priority}`}>{item.priority === "urgent" ? "紧急" : item.priority === "high" ? "高" : "低"}</span>}{item.dueAt && <span className={`todo-due${new Date(item.dueAt) < new Date() && item.status === "active" ? " is-overdue" : ""}`}>{formatDue(item.dueAt)}</span>}</span></button><div className="todo-item-actions">{filter === "trash" ? <button className="todo-edit" aria-label="Restore task" onClick={() => void undoDelete(item)}><Icon name="Undo2" size={13} /></button> : <><button className={`todo-edit${activeFocusTodoId === item.id ? " is-active-focus" : ""}`} aria-label="Start focus" onClick={() => void startFocus(item.id)}><Icon name="Timer" size={13} /></button><button className="todo-edit" aria-label="编辑任务" onClick={() => startEditing(item)}><Icon name="Pencil" size={13} /></button><button className="todo-delete" aria-label="删除任务" onClick={() => void removeTodo(item.id)}><Icon name="Trash2" size={14} /></button></>}</div></div>
+              <div className={`todo-item-row${canDrag ? " is-draggable" : ""}`} draggable={canDrag} onDragStart={(event) => handleDragStart(event, item.id)} onDragOver={(event) => handleDragOver(event, item.id)} onDragEnd={() => void handleDragEnd()}><button className="todo-check" aria-label={filter === "trash" ? "恢复任务" : item.status === "completed" ? "取消完成" : "完成任务"} onClick={() => filter === "trash" ? void undoDelete(item) : void toggleTodo(item)}><Icon name="Check" size={13} /></button><button className="todo-item-main" onClick={() => { if (editingId !== item.id) setExpandedId(expandedId === item.id ? null : item.id); }}><span className="todo-item-title">{item.title}</span><span className="todo-item-summary">{item.priority && item.priority !== "normal" && <span className={`todo-priority priority-${item.priority}`}>{item.priority === "urgent" ? "紧急" : item.priority === "high" ? "高" : "低"}</span>}{item.dueAt && <span className={`todo-due${new Date(item.dueAt) < new Date() && item.status === "active" ? " is-overdue" : ""}`}>{formatDue(item.dueAt)}</span>}</span></button><div className="todo-item-actions">{filter === "trash" ? <button className="todo-edit" aria-label="恢复任务" onClick={() => void undoDelete(item)}><Icon name="Undo2" size={13} /></button> : <><button className={`todo-edit${activeFocusTodoId === item.id ? " is-active-focus" : ""}`} aria-label="开始专注" onClick={() => void startFocus(item.id)}><Icon name="Timer" size={13} /></button><button className="todo-edit" aria-label="编辑任务" onClick={() => startEditing(item)}><Icon name="Pencil" size={13} /></button><button className="todo-delete" aria-label="删除任务" onClick={() => void removeTodo(item.id)}><Icon name="Trash2" size={14} /></button></>}</div></div>
               {expandedId === item.id && (editingId === item.id ? <div className="todo-item-details todo-edit-fields"><input aria-label="编辑任务标题" value={editTitle} onChange={(event) => setEditTitle(event.target.value)} maxLength={500} /><textarea aria-label="编辑任务备注" value={editNotes} onChange={(event) => setEditNotes(event.target.value)} maxLength={2000} placeholder="备注（可选）" /><div className="todo-edit-grid"><select aria-label="编辑任务优先级" value={editPriority} onChange={(event) => setEditPriority(event.target.value as TodoPriority)}><option value="normal">普通优先级</option><option value="low">低优先级</option><option value="high">高优先级</option><option value="urgent">紧急</option></select><select aria-label="编辑任务重复" value={editRepeatRule} onChange={(event) => setEditRepeatRule(event.target.value as TodoRepeatRule)}><option value="none">不重复</option><option value="daily">每天</option><option value="weekly">每周</option><option value="workdays">工作日</option></select><input aria-label="编辑任务标签" value={editTags} onChange={(event) => setEditTags(event.target.value)} placeholder="标签，用逗号分隔" /><select aria-label="编辑任务清单" value={editListId} onChange={(event) => setEditListId(event.target.value)}><option value="">无清单</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select></div><div className="todo-date-row">{renderDateField("截止", editDueAt, setEditDueAt)}{renderDateField("提醒", editRemindAt, setEditRemindAt)}</div><div className="todo-edit-buttons"><button onClick={() => void saveEditing(item.id)}>保存</button><button onClick={() => { setEditingId(null); setExpandedId(null); }}>取消</button></div></div> : <div className="todo-item-details">{item.notes && <div>{item.notes}</div>}{item.remindAt ? `提醒 ${formatDue(item.remindAt)}` : "未设置提醒"}</div>)}
             </div>
           ))}
@@ -784,7 +808,7 @@ function TodoTool() {
           </div>}
         </div>}
         {undoItem && <div className="todo-undo-toast" role="status"><span>任务已删除</span><button onClick={() => void undoDelete()}>撤销</button></div>}
-        {ioMessage && <div className="todo-io-toast" role="status">{ioMessage}<button aria-label="Dismiss message" onClick={() => setIoMessage("")}><Icon name="X" size={12} /></button></div>}
+        {ioNotice && <div className={`todo-io-toast is-${ioNotice.tone}`} role="status"><Icon name={ioNotice.tone === "error" ? "AlertCircle" : "Check"} size={13} /><span className="todo-io-toast-text">{ioNotice.text}</span><button aria-label="关闭提示" onClick={() => setIoNotice(null)}><Icon name="X" size={12} /></button></div>}
       </div>
     </div>
   );

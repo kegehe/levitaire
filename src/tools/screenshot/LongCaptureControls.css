@@ -18,13 +18,21 @@
   --lc-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
 }
 
+/* 高度不写死：警告出现时多一行，窗口高度由 LongCaptureControls 量完内容下发。
+   这里也不能用 height: 100% —— 那量到的就是窗口高度，窗口只会越调越大。 */
 .long-capture-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 300px;
+  padding: 8px 10px;
+}
+
+.long-capture-main {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 300px;
-  height: 64px;
-  padding: 8px 10px;
+  min-width: 0;
 }
 
 .long-capture-dot {
@@ -52,17 +60,22 @@
 }
 
 .long-capture-instruction,
-.long-capture-progress,
-.long-capture-warning {
+.long-capture-progress {
   color: var(--color-fg-muted);
   font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* 警告可能是一整句「滚动过快，未能识别相邻画面的重叠区域；请放慢滚动速度」，
+   在 300px 宽里必然换行 —— 允许换行并完整显示，不能沿用上面的单行省略号。 */
 .long-capture-warning {
   color: var(--color-danger-fg, #d63b51);
+  font-size: 11px;
   font-weight: 600;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .long-capture-controls button,

@@ -186,11 +186,48 @@ function adjustHandleStyle(sel: Selection, mode: AdjustMode): React.CSSPropertie
  *   否则它会吃掉本该落到选区调整层上的指针事件。
  * - `ss-adjusting`：正在拖动调整。遮罩要抬到 canvas 之上，挡住伸出新选区的旧底图。
  */
-function overlayClassName(mode: Mode, tool: ActiveTool, adjusting: boolean): string {
+function overlayClassName(
+  mode: Mode,
+  tool: ActiveTool,
+  adjusting: boolean,
+  nativeSelect: boolean,
+): string {
   const classes = ["ss-overlay"];
   if (mode === "annotating" && tool === "move") classes.push("ss-move-tool");
   if (adjusting) classes.push("ss-adjusting");
+  // 原生选区层接管期间，WebView 这套遮罩/选框只占位不绘制（DOM 保留：状态与测试都依赖它）
+  if (nativeSelect) classes.push("ss-native-select");
   return classes.join(" ");
+}
+
+/**
+ * 把主题的 --color-accent 换算成 RGB。
+ *
+ * 设计令牌用的是 oklch()，只有让浏览器自己解析才能得到 sRGB 分量：
+ * 往 1x1 画布上填一格再读回来。解析失败时 fillStyle 会停在 #000，
+ * 描边变黑显然不对，因此退回默认强调色。
+ */
+function accentRgb(): [number, number, number] {
+  const fallback: [number, number, number] = [139, 92, 246];
+  try {
+    const raw = getComputedStyle(document.documentElement)
+      .getPropertyValue("--color-accent")
+      .trim();
+    if (!raw) return fallback;
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return fallback;
+    ctx.fillStyle = "#000";
+    ctx.fillStyle = raw;
+    ctx.fillRect(0, 0, 1, 1);
+    const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+    if (r === 0 && g === 0 && b === 0 && raw !== "#000" && raw !== "black") return fallback;
+    return [r, g, b];
+  } catch {
+    return fallback;
+  }
 }
 
 /** 后端智能截图目标的映射，坐标为虚拟桌面绝对物理像素。 */
@@ -289,6 +326,8 @@ function ScreenshotTool() {
   const ocrTextRef = useRef<HTMLTextAreaElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const captureTabsRef = useRef<HTMLDivElement>(null);
+  // 模式栏实测尺寸（CSS px）。拖框时定位函数每帧都要用它，不能在热路径里读 offsetWidth
+  const captureTabsSizeRef = useRef({ width: 0, height: 0 });
   const monitorRequestRef = useRef(0);
   // 上次已下发的显示器工作区。IPC 每次都返回**新对象**，直接 setState 会让状态恒变，
   // 与「依赖 win 的 effect」叠加即自激；只在数值真的变化时才写状态（第二道保险：
@@ -349,6 +388,20 @@ function ScreenshotTool() {
     setToolbarAbove((current) => (current === shouldPlaceAbove ? current : shouldPlaceAbove));
   }, [mode, selection, image, busy, error]);
 
+  // 模式栏尺寸只在「模式切换 / 窗口尺寸变化」时量一次：它随按钮文案与换行变化，
+  // 但不随选区变化。量完缓存进 ref，拖框热路径只读缓存（见 updateCapturePanelPosition）。
+  useLayoutEffect(() => {
+    if (mode !== "selecting" || !ready) return;
+    const measure = () => {
+      const tabs = captureTabsRef.current;
+      if (!tabs) return;
+      captureTabsSizeRef.current = { width: tabs.offsetWidth, height: tabs.offsetHeight };
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [mode, ready, selectMode, captureKind]);
+
   // The overlay spans the virtual desktop, so 50% would place the controls at
   // the seam between monitors. Anchor them to the monitor active at startup,
   // then clamp using their measured size for mixed layouts and DPI scales.
@@ -358,6 +411,15 @@ function ScreenshotTool() {
     const updateCapturePanelPosition = () => {
       const tabs = captureTabsRef.current;
       if (!tabs) return;
+      // 尺寸走缓存：这个函数依赖 selection，拖框时每次移动都会跑一遍，
+      // 在里面读 offsetWidth 等于每帧强制一次同步布局。模式栏内容只在模式切换时变，
+      // 尺寸由下面的独立 effect 量一次即可（首帧还没量到时才现场量）。
+      let { width: tabsW, height: tabsH } = captureTabsSizeRef.current;
+      if (!tabsW || !tabsH) {
+        tabsW = tabs.offsetWidth;
+        tabsH = tabs.offsetHeight;
+        captureTabsSizeRef.current = { width: tabsW, height: tabsH };
+      }
       const scale = scaleRef.current || 1;
       const origin = originRef.current;
       const viewportWidth = window.innerWidth;
@@ -374,21 +436,21 @@ function ScreenshotTool() {
       const monitorBottom = (monitor.bottom - origin.y) / scale;
       const horizontalMin = Math.max(VIEWPORT_PADDING, monitorLeft + VIEWPORT_PADDING);
       const horizontalMax = Math.min(
-        viewportWidth - tabs.offsetWidth - VIEWPORT_PADDING,
-        monitorRight - tabs.offsetWidth - VIEWPORT_PADDING,
+        viewportWidth - tabsW - VIEWPORT_PADDING,
+        monitorRight - tabsW - VIEWPORT_PADDING,
       );
-      const centeredLeft = (monitorLeft + monitorRight - tabs.offsetWidth) / 2;
+      const centeredLeft = (monitorLeft + monitorRight - tabsW) / 2;
       const left =
         horizontalMax >= horizontalMin
           ? Math.max(horizontalMin, Math.min(centeredLeft, horizontalMax))
           : Math.max(
               VIEWPORT_PADDING,
-              Math.min(centeredLeft, viewportWidth - tabs.offsetWidth - VIEWPORT_PADDING),
+              Math.min(centeredLeft, viewportWidth - tabsW - VIEWPORT_PADDING),
             );
       const verticalMin = Math.max(VIEWPORT_PADDING, monitorTop + VIEWPORT_PADDING);
       const verticalMax = Math.min(
-        viewportHeight - tabs.offsetHeight - VIEWPORT_PADDING,
-        monitorBottom - tabs.offsetHeight - VIEWPORT_PADDING,
+        viewportHeight - tabsH - VIEWPORT_PADDING,
+        monitorBottom - tabsH - VIEWPORT_PADDING,
       );
       let top =
         verticalMax >= verticalMin
@@ -399,14 +461,14 @@ function ScreenshotTool() {
       // top area. Prefer below, then above, while retaining the monitor bounds.
       if (selection && selection.width > 0 && selection.height > 0) {
         const overlaps =
-          selection.left < left + tabs.offsetWidth &&
+          selection.left < left + tabsW &&
           selection.left + selection.width > left &&
-          selection.top < top + tabs.offsetHeight &&
+          selection.top < top + tabsH &&
           selection.top + selection.height > top;
         if (overlaps) {
           const below = selection.top + selection.height + 8;
-          const above = selection.top - tabs.offsetHeight - 8;
-          if (below + tabs.offsetHeight <= monitorBottom - VIEWPORT_PADDING) {
+          const above = selection.top - tabsH - 8;
+          if (below + tabsH <= monitorBottom - VIEWPORT_PADDING) {
             top = below;
           } else if (above >= verticalMin) {
             top = above;
@@ -421,8 +483,8 @@ function ScreenshotTool() {
         const bounds = {
           left: Math.round(left * scale + origin.x),
           top: Math.round(top * scale + origin.y),
-          width: Math.round(tabs.offsetWidth * scale),
-          height: Math.round(tabs.offsetHeight * scale),
+          width: Math.round(tabsW * scale),
+          height: Math.round(tabsH * scale),
         };
         const sent = smartControlsBoundsRef.current;
         if (
@@ -695,6 +757,66 @@ function ScreenshotTool() {
       root.style.overflow = "hidden";
     }
   }, [win, fetchReady, refreshMonitorWorkArea]);
+
+  /**
+   * 原生选区层（遮罩 + 选框）的接管开关。
+   *
+   * 区域框选阶段遮罩和选框必须"黏"着手走；WebView 那条
+   * pointermove → React → 合成 → 呈现 的队列实测就是 1 帧（60Hz 下 16.7ms，
+   * 再加呈现 1~2 帧 ⇒ 快拖时稳定落后 25~50px）。这一段交给 Rust 侧的 GDI 原生层，
+   * 坐标由全局鼠标钩子直接喂进去，完全不经过 React。详见 screenshot/selector.rs。
+   *
+   * prepare 是异步的（要走主线程建窗）：没就绪之前一律退回 WebView 绘制，
+   * 避免"WebView 遮罩已隐藏、原生层还没起来"的空窗期。
+   */
+  const [nativeSelector, setNativeSelector] = useState(false);
+  const nativeSelectorRef = useRef(false);
+  nativeSelectorRef.current = nativeSelector;
+
+  /**
+   * prepare / dispose 串行闸。
+   *
+   * 两者都要投递到主线程建/拆窗。若「上一轮会话的 dispose」迟于「这一轮的 prepare」
+   * 落地（IPC 命令在不同线程上执行，顺序没有保证），它会把刚建好的窗关掉 ——
+   * 而那时前端已经隐藏了自己的遮罩，整块屏幕就彻底没有遮罩了。串成一条链保证顺序
+   * 确定：本轮的 dispose 一定排在下一轮的 prepare 之前。
+   */
+  const selectorGateRef = useRef<Promise<unknown>>(Promise.resolve());
+  const gateSelector = useCallback((task: () => Promise<unknown>) => {
+    const next = selectorGateRef.current.then(task, task);
+    selectorGateRef.current = next.catch(() => undefined);
+    return next;
+  }, []);
+
+  useEffect(() => {
+    if (mode !== "selecting" || selectMode !== "region" || !ready) {
+      setNativeSelector(false);
+      return;
+    }
+    let disposed = false;
+    const [r, g, b] = accentRgb();
+    gateSelector(() => invoke("selector_prepare", { r, g, b }))
+      .then(() => {
+        if (disposed) return;
+        // 手速比建窗快：拖拽已经开始了。这一轮继续用 WebView 画到底，
+        // 否则会在拖到一半时把遮罩换成原生层 —— 原生层此时没有锚点（begin 没发过），
+        // 屏幕上会什么都没有。
+        if (dragStart.current) {
+          void gateSelector(() => invoke("selector_dispose")).catch(() => {});
+          return;
+        }
+        setNativeSelector(true);
+      })
+      .catch((error) => {
+        console.error("native selector prepare failed, falling back to webview mask:", error);
+        if (!disposed) setNativeSelector(false);
+      });
+    return () => {
+      disposed = true;
+      setNativeSelector(false);
+      void gateSelector(() => invoke("selector_dispose")).catch(() => {});
+    };
+  }, [mode, selectMode, ready, gateSelector]);
 
   // 智能截图模式：同步后端钩子状态；切回其他模式时清理旧状态
   useEffect(() => {
@@ -1000,6 +1122,21 @@ function ScreenshotTool() {
     const y = snap(e.clientY);
     dragStart.current = { x, y };
     setSelection({ left: x, top: y, width: 0, height: 0 });
+    // 原生选区层就绪时把锚点交出去（物理像素）：之后的坐标由全局鼠标钩子直接喂给原生层，
+    // 不再经过 React。prepare 失败时这里什么也不做，WebView 那套遮罩继续兜底。
+    if (nativeSelectorRef.current) {
+      const scale = scaleRef.current || 1;
+      const origin = originRef.current;
+      void invoke("selector_begin", {
+        x: Math.round(x * scale) + origin.x,
+        y: Math.round(y * scale) + origin.y,
+      }).catch((error) => {
+        // 原生层没接住这次按下：立刻退回 WebView 绘制，别让这一拖变成"没有遮罩"。
+        console.error("selector_begin failed, falling back to webview mask:", error);
+        nativeSelectorRef.current = false;
+        setNativeSelector(false);
+      });
+    }
     // 用 currentTarget（overlay 根 div，稳定存在）而非 target，避免重渲染替换子节点时丢失捕获
     e.currentTarget.setPointerCapture(e.pointerId);
   };
@@ -1023,23 +1160,39 @@ function ScreenshotTool() {
     dragStart.current = null;
     const cx = snap(e.clientX);
     const cy = snap(e.clientY);
-    const left = Math.min(start.x, cx);
-    const top = Math.min(start.y, cy);
-    const width = Math.abs(cx - start.x);
-    const height = Math.abs(cy - start.y);
+    let left = Math.min(start.x, cx);
+    let top = Math.min(start.y, cy);
+    let width = Math.abs(cx - start.x);
+    let height = Math.abs(cy - start.y);
+    const scale = scaleRef.current;
+    const origin = originRef.current;
+    // 以原生层最后画出来的那一帧为准：用户眼睛看到的是它，截出来的区域必须与它一致，
+    // 否则会出现「框到这里、截图差几像素」。取不到（原生层未启用/调用失败）时退回事件坐标。
+    const nativeRect = nativeSelectorRef.current
+      ? await invoke<{ left: number; top: number; width: number; height: number } | null>(
+          "selector_end",
+        ).catch(() => null)
+      : null;
+    let phys: Selection;
+    if (nativeRect && nativeRect.width > 0 && nativeRect.height > 0) {
+      phys = nativeRect;
+      left = (nativeRect.left - origin.x) / scale;
+      top = (nativeRect.top - origin.y) / scale;
+      width = nativeRect.width / scale;
+      height = nativeRect.height / scale;
+    } else {
+      phys = {
+        left: Math.round(left * scale) + origin.x,
+        top: Math.round(top * scale) + origin.y,
+        width: Math.round(width * scale),
+        height: Math.round(height * scale),
+      };
+    }
     if (width < 3 || height < 3) {
       // 选区过小，取消
       cancel();
       return;
     }
-    const scale = scaleRef.current;
-    const origin = originRef.current;
-    const phys: Selection = {
-      left: Math.round(left * scale) + origin.x,
-      top: Math.round(top * scale) + origin.y,
-      width: Math.round(width * scale),
-      height: Math.round(height * scale),
-    };
     setSelection({ left, top, width, height });
     setBusy("capture");
     if (captureKind === "long") {
@@ -1103,6 +1256,10 @@ function ScreenshotTool() {
       );
       setSelection(null);
       setMode("selecting");
+      // 原生层此时冻结在松手那一帧：截屏失败后 WebView 要重新接管，得先把它拆掉，
+      // 否则会留一个和状态脱节的框在屏幕上。
+      void invoke("selector_dispose").catch(() => {});
+      setNativeSelector(false);
     } finally {
       if (gen === genRef.current) {
         setBusy(null);
@@ -1544,10 +1701,17 @@ function ScreenshotTool() {
 
   return (
     <div
-      className={overlayClassName(mode, tool, adjustAnchor !== null)}
+      className={overlayClassName(mode, tool, adjustAnchor !== null, nativeSelector)}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      // 指针被系统取消（Alt+Tab、远程桌面断连等）时不会有 pointerup：
+      // 原生选区层是独立跟踪光标的，不在这里收口它会一直跟着鼠标画下去。
+      onPointerCancel={() => {
+        if (!dragStart.current) return;
+        dragStart.current = null;
+        cancel();
+      }}
     >
       {/* 顶部模式切换栏：区域拖框 / 窗口识别 */}
       {mode === "selecting" && (
