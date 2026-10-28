@@ -1,11 +1,11 @@
 {
-  "version": "0.1.8",
-  "notes": "系统清理面板改版：构成卡 + 索引行，标题与构成条同源；修复录制取消死锁、便利贴丢字、长截图丢行、GIF 常驻内存等一批发布前问题。Rust 1.89+。",
-  "pub_date": "2026-10-21T09:00:07.039Z",
+  "version": "0.1.9",
+  "notes": "截图选区改原生绘制（快速拖拽不再落后光标）；OCR 支持 Windows 内置引擎自动兜底；滚动导航并入工具面板；长截图控制条自适应、钉图 OCR 取消请求、设置页看门狗快照竞态等一批修复。",
+  "pub_date": "2026-10-28T07:43:17.372Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMDMvOEllMUlIOGl5SDhybVJ5aGY1ZVNYekN0WWNLb0cyaXJVamlrMmZndmIwdUZmdWF2VlpFbGk3NlpqakwrOUhwdGdiM0k5cjU2VmhRem9URWhzUWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNTczMjA2CWZpbGU6TGV2aXRhaXJlXzAuMS44X3g2NC1zZXR1cC5leGUKY1VuY0RmcVRkait6OGN6Q3FiM3BBUEtDdnVCdmFtU1R5dU1uSFBPUGtSVnUrMFhNQjFiaVFVcllMU0J0bitrOGJScGRPbWl5Z0oySmpKZXl1dnlVQVE9PQo=",
-      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.8/Levitaire_0.1.8_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVST1g5b1JFMEtyMHlrOElwSWZJSUlQaHV4R2k5WVBrUkJxS3JtRnovR0JqVGlna051a3F3Q05iZHRvTnJkSS9CUmRRaDFsK3pnZ1N6L2pPUCt5NUsyQkFESE9vUVJzU3c0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTczMzk3CWZpbGU6TGV2aXRhaXJlXzAuMS45X3g2NC1zZXR1cC5leGUKamZFdlExcTNLV3JGZlIyME01L2M1S0VGdktOQ090UGJqejlTSnZmQzBZU0trL3o2YjNuT2JLY3NhZm9pdlg4V05IN29PU1ZTVE9YM2daZWhHK3pvRGc9PQo=",
+      "url": "https://github.com/kegehe/levitaire/releases/download/v0.1.9/Levitaire_0.1.9_x64-setup.exe"
     }
   }
 }
