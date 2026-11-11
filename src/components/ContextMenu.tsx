@@ -8,6 +8,7 @@ import {
   Download,
   FlipHorizontal2,
   FlipVertical2,
+  FolderOpen,
   MonitorUp,
   RotateCcw,
   RotateCw,
@@ -108,6 +109,7 @@ export const CONTEXT_MENUS: Record<ContextMenuSource, ContextMenuItem[][]> = {
       { id: "copy", label: "复制到剪贴板", icon: Clipboard },
       { id: "ocr", label: "OCR", icon: ScanText },
       { id: "save", label: "下载图片", icon: Download },
+      { id: "shelf", label: "放入暂存架", icon: FolderOpen },
       { id: "close", label: "关闭贴图", icon: X, destructive: true },
     ],
     [
@@ -371,8 +373,14 @@ function ContextMenu() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // 「放入暂存架」是否渲染完全由 showContextMenu 随请求下发的开关决定：
+  // 窗口尺寸也是按同一份状态算的。缺字段（测试直接构造请求）按开启处理——
+  // 后端 shelf_pin 会再校验一次开关，多显示一条不会产生错误操作。
   const groups = useMemo(() => {
     if (!request) return [];
+    if (request.source === "pin" && request.shelfEnabled === false) {
+      return CONTEXT_MENUS.pin.map((group) => group.filter((item) => item.id !== "shelf"));
+    }
     if (request.source !== "tray") return CONTEXT_MENUS[request.source];
 
     const updateItem = buildTrayUpdateItem(traySnapshot, {

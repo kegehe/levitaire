@@ -310,6 +310,14 @@ pub async fn capture_region_live(
     Ok(serde_json::json!({ "pngBase64": b64, "width": w, "height": h }))
 }
 
+/// 标注文字输入框的输入状态：为 true 时全局 Esc 只取消这段文字，不结束整个截图会话。
+#[tauri::command]
+pub fn set_screenshot_text_editing(active: bool) {
+    // 忽略会话结束后迟到的 active=true，避免标记残留让下一次截图的 Esc 失效
+    let effective = active && CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst);
+    crate::hooks::mouse::set_screenshot_text_editing(effective);
+}
+
 #[tauri::command]
 pub fn set_smart_screenshot_mode(app: tauri::AppHandle, active: bool) -> Result<(), String> {
     let _overlay_guard = SMART_SCREENSHOT_OVERLAY_LOCK

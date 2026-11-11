@@ -202,6 +202,7 @@ const WINDOW_POSITION_TARGETS = [
   { id: "todo-overlay", label: "待办清单", icon: "ListFilter" as IconName },
   { id: "system-cleaner-overlay", label: "系统清理", icon: "Trash2" as IconName },
   { id: "sticky-notes-manager", label: "便利贴", icon: "StickyNote" as IconName },
+  { id: "file-shelf-overlay", label: "文件暂存架", icon: "FolderOpen" as IconName },
 ] as const;
 
 /** 说明文案的窗口清单从 WINDOW_POSITION_TARGETS 派生，避免工具合并/增删（如番茄钟并入时间工具）后文案再次过期 */
@@ -471,6 +472,10 @@ function Settings() {
   const [qiMode, setQiMode] = useState("click");
   const [qiModeStatus, setQiModeStatus] = useState<"idle" | "saved" | "error">("idle");
   const [qiSnippets, setQiSnippets] = useState<QuickInputSnippet[]>([]);
+  /** 最近一次发起保存时的列表快照，保存失败时据此回滚界面，避免界面与落库内容不一致 */
+  const qiSnippetsRef = useRef<QuickInputSnippet[]>([]);
+  /** 保存版本号：后发的保存会作废先前请求的提示与回滚，避免乱序响应覆盖新状态 */
+  const qiSnippetsSaveVersionRef = useRef(0);
   // 拖拽排序：当前正在拖拽的行索引（null=未拖拽），用于拖动中的行高亮样式
   const [qiDraggingIndex, setQiDraggingIndex] = useState<number | null>(null);
   /** 拖拽源项在当前列表中的实时索引，dragover 计算插入位置用（ref 避免闭包陈旧） */
@@ -1294,7 +1299,9 @@ function Settings() {
             if (mode.status === "fulfilled") setQiMode(mode.value === "hold" ? "hold" : "click");
             if (snippets.status === "fulfilled" && snippets.value) {
               try {
-                setQiSnippets(JSON.parse(snippets.value) as QuickInputSnippet[]);
+                const parsed = JSON.parse(snippets.value) as QuickInputSnippet[];
+                qiSnippetsRef.current = parsed;
+                setQiSnippets(parsed);
               } catch {
                 /* 忽略解析错误 */
               }
@@ -2011,17 +2018,50 @@ function Settings() {
     }
   };
 
-  const saveQiSnippets = async (next: QuickInputSnippet[]) => {
+  /**
+   * 保存预设词列表：先乐观更新界面，落库失败时回滚到本次保存前的列表，
+   * 避免「保存失败」提示旁仍展示未真正生效的内容。返回是否保存成功。
+   */
+  const saveQiSnippets = async (next: QuickInputSnippet[]): Promise<boolean> => {
+    const previous = qiSnippetsRef.current;
+    // 记录本次保存发起时的编辑目标（按引用），回滚后据此重新定位，
+    // 避免删除等操作已把编辑索引平移后，回滚列表导致编辑行指错行
+    const editingTarget = qiEditingIndex !== null ? qiSnippets[qiEditingIndex] : null;
+    const childTarget = qiChildEditorIndex !== null ? qiSnippets[qiChildEditorIndex] : null;
+    const version = ++qiSnippetsSaveVersionRef.current;
+    qiSnippetsRef.current = next;
     setQiSnippets(next);
     setQiSnippetsStatus("idle");
     try {
       await invoke("set_quick_input_snippets", { snippets: JSON.stringify(next) });
+      if (version !== qiSnippetsSaveVersionRef.current) return false;
       setQiSnippetsStatus("saved");
-      setTimeout(() => setQiSnippetsStatus("idle"), 2000);
+      // 提示定时器也按版本守卫，避免旧请求的计时器提前清掉新请求的提示
+      setTimeout(() => {
+        if (version === qiSnippetsSaveVersionRef.current) setQiSnippetsStatus("idle");
+      }, 2000);
+      return true;
     } catch (err) {
+      if (version !== qiSnippetsSaveVersionRef.current) return false;
       console.error("Failed to save quick input snippets:", err);
+      qiSnippetsRef.current = previous;
+      setQiSnippets(previous);
+      // 编辑态恢复到回滚后列表中的对应行；目标已不存在则退出编辑
+      setQiEditingIndex((cur) => {
+        if (!editingTarget) return cur;
+        const idx = previous.indexOf(editingTarget);
+        return idx >= 0 ? idx : null;
+      });
+      setQiChildEditorIndex((cur) => {
+        if (!childTarget) return cur;
+        const idx = previous.indexOf(childTarget);
+        return idx >= 0 ? idx : null;
+      });
       setQiSnippetsStatus("error");
-      setTimeout(() => setQiSnippetsStatus("idle"), 3000);
+      setTimeout(() => {
+        if (version === qiSnippetsSaveVersionRef.current) setQiSnippetsStatus("idle");
+      }, 3000);
+      return false;
     }
   };
 
@@ -2031,9 +2071,12 @@ function Settings() {
       ...qiSnippets,
       { label: qiNewLabel.trim() || qiNewText.slice(0, 20), text: qiNewText },
     ];
-    setQiNewLabel("");
-    setQiNewText("");
-    void saveQiSnippets(next);
+    // 保存成功后再清空输入，失败时保留用户输入便于重试
+    void saveQiSnippets(next).then((ok) => {
+      if (!ok) return;
+      setQiNewLabel("");
+      setQiNewText("");
+    });
   };
 
   const removeQiSnippet = (idx: number) => {
@@ -2142,8 +2185,10 @@ function Settings() {
         ? { ...s, label: qiEditLabel.trim() || qiEditText.slice(0, 20), text: qiEditText }
         : s,
     );
-    setQiEditingIndex(null);
-    void saveQiSnippets(next);
+    // 保存成功才退出编辑；失败时列表已回滚，保留编辑行让用户重试
+    void saveQiSnippets(next).then((ok) => {
+      if (ok) setQiEditingIndex(null);
+    });
   };
 
   const cancelEditQiSnippet = () => setQiEditingIndex(null);
@@ -2160,9 +2205,12 @@ function Settings() {
     const next = qiSnippets.map((s, i) =>
       i === parentIdx ? { ...s, children: [...(s.children ?? []), child] } : s,
     );
-    setQiNewChildLabel("");
-    setQiNewChildText("");
-    void saveQiSnippets(next);
+    // 保存成功后再清空子项输入，失败时保留内容便于重试
+    void saveQiSnippets(next).then((ok) => {
+      if (!ok) return;
+      setQiNewChildLabel("");
+      setQiNewChildText("");
+    });
   };
 
   /** 删除指定片段的一个子项；子项删空后移除 children 字段，条目退回普通片段 */

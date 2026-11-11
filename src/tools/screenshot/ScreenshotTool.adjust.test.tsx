@@ -484,6 +484,30 @@ describe("ScreenshotTool 选区调整", () => {
     expect(document.querySelector(".ss-adjust-body")).not.toBeNull();
   });
 
+  it("文字输入框聚焦时 Esc 只关闭输入框，不结束截图会话", async () => {
+    stubCanvas();
+    await enterAnnotating();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "文字" }));
+    });
+    const canvas = document.querySelector("canvas") as HTMLCanvasElement;
+    fireEvent.pointerDown(canvas, { clientX: 150, clientY: 130, pointerId: 9 });
+    const textarea = document.querySelector("textarea") as HTMLTextAreaElement;
+    expect(textarea).toBeTruthy();
+    fireEvent.change(textarea, { target: { value: "正在输入" } });
+
+    // keydown 先在 textarea 上触发，再冒泡到 window（真实浏览器的顺序）
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: "Escape" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 只关输入框：标注工具栏与会话仍在
+    expect(document.querySelector("textarea")).toBeNull();
+    expect(document.querySelector(".ss-annotate-toolbar")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "文字" })).toBeTruthy();
+  });
+
   /**
    * 连续移动后立即松手：必须以**最后一次**移动的坐标重截。
    *

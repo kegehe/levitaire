@@ -15,6 +15,7 @@ vi.mock("../utils/toolWindows", () => ({
   ensureTodoWindow: vi.fn(async () => ({})),
   ensureUtilityHubWindow: vi.fn(async () => ({})),
   ensureSystemCleanerWindow: vi.fn(async () => ({})),
+  ensureFileShelfWindow: vi.fn(async () => ({})),
   waitForNewMonitorWindowReady: vi.fn(async () => undefined),
 }));
 
@@ -119,8 +120,8 @@ describe("ToolPalette", () => {
   it("从部分启用状态可一键全部关闭", async () => {
     const { container } = render(<ToolPalette />);
     await act(flush);
-    // 挂载后端同步后所有 getter 都为 true → 11/11 全启用
-    expect(container.querySelector(".palette-count")!.textContent).toContain("11/11");
+    // 挂载后端同步后所有 getter 都为 true → 12/12 全启用
+    expect(container.querySelector(".palette-count")!.textContent).toContain("12/12");
 
     const buttons = Array.from(
       container.querySelectorAll<HTMLButtonElement>(".palette-all-group button"),
@@ -132,7 +133,7 @@ describe("ToolPalette", () => {
     fireEvent.click(disableAllBtn);
     await act(flush);
 
-    expect(container.querySelector(".palette-count")!.textContent).toContain("0/11");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("0/12");
     expect(disableAllBtn).toBeDisabled();
     expect(enableAllBtn).not.toBeDisabled();
     expect(mockInvoke).toHaveBeenCalledWith("set_timer_enabled", { enabled: false });
@@ -154,12 +155,12 @@ describe("ToolPalette", () => {
 
     fireEvent.click(disableAllBtn);
     await act(flush);
-    expect(container.querySelector(".palette-count")!.textContent).toContain("0/11");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("0/12");
 
     fireEvent.click(enableAllBtn);
     await act(flush);
 
-    expect(container.querySelector(".palette-count")!.textContent).toContain("11/11");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("12/12");
     expect(mockInvoke).toHaveBeenCalledWith("set_timer_enabled", { enabled: true });
     expect(mockInvoke).toHaveBeenCalledWith("set_utility_hub_enabled", { enabled: true });
     expect(
@@ -212,11 +213,11 @@ describe("ToolPalette", () => {
     expect(setCallCount()).toBe(1);
 
     // 逐项放行，直到全部下发完
-    for (let i = 0; i < 22 && setCallCount() < 11; i += 1) {
+    for (let i = 0; i < 24 && setCallCount() < 12; i += 1) {
       while (pending.length) pending.shift()!(true);
       await act(flush);
     }
-    expect(setCallCount()).toBe(11);
+    expect(setCallCount()).toBe(12);
   });
 
   it("「全部关闭」部分失败时汇总提示失败项，失败项回滚为启用且不影响其余项", async () => {
@@ -231,7 +232,7 @@ describe("ToolPalette", () => {
 
     const { container } = render(<ToolPalette />);
     await act(flush);
-    expect(container.querySelector(".palette-count")!.textContent).toContain("11/11");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("12/12");
 
     const disableAllBtn = Array.from(
       container.querySelectorAll<HTMLButtonElement>(".palette-all-group button"),
@@ -248,7 +249,7 @@ describe("ToolPalette", () => {
     expect(
       container.querySelector('[data-tool-id="timer"]')!.classList.contains("is-enabled"),
     ).toBe(false);
-    expect(container.querySelector(".palette-count")!.textContent).toContain("1/11");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("1/12");
 
     // 提示可点击消除；重试成功后不再出现
     fireEvent.click(banner);
@@ -259,7 +260,7 @@ describe("ToolPalette", () => {
     fireEvent.click(disableAllBtn);
     await act(flush);
     expect(container.querySelector(".palette-error")).toBeNull();
-    expect(container.querySelector(".palette-count")!.textContent).toContain("0/11");
+    expect(container.querySelector(".palette-count")!.textContent).toContain("0/12");
   });
 
   it("「全部开启 / 全部关闭」全部成功时不显示任何提示", async () => {

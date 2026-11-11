@@ -75,6 +75,7 @@ mod pomodoro;
 mod quick_input;
 mod recording;
 mod screenshot;
+mod shelf;
 mod scroll_capture;
 mod scroll_navigation;
 mod sound;
@@ -114,11 +115,12 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         // 单实例限制：第二个实例启动时直接退出，并激活已有实例
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // 第二个实例启动 = 用户想把已有实例叫出来。显隐必须走统一入口，
+            // 否则钩子热区会与真实可见性脱节（隐藏的球仍能被点到）。
+            utils::logger::log("lifecycle", "single-instance activation");
+            crate::commands::apply_orb_visibility(app, true);
             if let Some(window) = app.get_webview_window("orb") {
-                let _ = window.show();
                 let _ = window.set_focus();
-                // 单实例激活会强制显示 orb，需同步鼠标钩子可见状态
-                crate::hooks::set_orb_visible(true);
             }
         }))
         // 在线更新：由 tauri-plugin-updater 提供，版本检查 endpoint 与签名公钥
@@ -236,6 +238,8 @@ fn main() {
                 quick_input::set_history_limit(qi_history_limit);
                 quick_input::load_history();
                 let qi_enabled = config_manager.get_quick_input_enabled().unwrap_or(false);
+                // 工具停用时剪贴板监听不得记录历史；该值必须在监听线程启动前写入。
+                quick_input::set_tool_enabled(qi_enabled);
                 let qi_key = config_manager
                     .get_quick_input_trigger_key()
                     .unwrap_or_default();
@@ -312,6 +316,7 @@ fn main() {
 
             // 便利贴数据独立于 config.json，窗口按需创建/销毁，数据长期保留。
             app.manage(sticky_note::NoteStore::new());
+            app.manage(shelf::ShelfStore::load_default());
 
             // 初始化系统监控状态（采集线程随监控窗口开关启停，此处仅注册 state）
             app.manage(monitor::MonitorState::default());
@@ -396,14 +401,8 @@ fn main() {
                         "toggle_orb" => {
                             if crate::commands::is_orb_ready() {
                                 if let Some(window) = app.get_webview_window("orb") {
-                                    if window.is_visible().unwrap_or(false) {
-                                        let _ = window.hide();
-                                        crate::hooks::set_orb_visible(false);
-                                    } else {
-                                        let _ = window.show();
-                                        // 注意：orb 窗口是 setFocusable(false)，不调用 set_focus()
-                                        crate::hooks::set_orb_visible(true);
-                                    }
+                                    let visible = window.is_visible().unwrap_or(false);
+                                    crate::commands::apply_orb_visibility(app, !visible);
                                 }
                             }
                         }
@@ -418,6 +417,7 @@ fn main() {
                             });
                         }
                         "quit" => {
+                            utils::logger::log("lifecycle", "tray quit requested");
                             // 退出时取消正在跑的清理任务：半途被杀会留下「删了一半」的目录树
                             if let Some(state) = app.try_state::<disk_cleanup::CleanState>() {
                                 state.request_cancel();
@@ -464,14 +464,9 @@ fn main() {
                         let app = tray.app_handle();
                         if crate::commands::is_orb_ready() {
                             if let Some(window) = app.get_webview_window("orb") {
-                                if window.is_visible().unwrap_or(false) {
-                                    let _ = window.hide();
-                                    crate::hooks::set_orb_visible(false);
-                                } else {
-                                    let _ = window.show();
-                                    // 注意：orb 窗口是 setFocusable(false)，不调用 set_focus()
-                                    crate::hooks::set_orb_visible(true);
-                                }
+                                let visible = window.is_visible().unwrap_or(false);
+                                // 注意：orb 窗口是 setFocusable(false)，不要 set_focus()
+                                crate::commands::apply_orb_visibility(app, !visible);
                             }
                         }
                     }
@@ -656,6 +651,22 @@ fn main() {
             commands::hide_utility_hub,
             commands::get_utility_hub_enabled,
             commands::set_utility_hub_enabled,
+            commands::show_file_shelf,
+            commands::hide_file_shelf,
+            commands::get_file_shelf_enabled,
+            commands::set_file_shelf_enabled,
+            commands::shelf_list,
+            commands::shelf_add_paths,
+            commands::shelf_add_png,
+            commands::shelf_begin_drag,
+            commands::shelf_remove,
+            commands::shelf_reorder,
+            commands::shelf_clear,
+            commands::shelf_set_collapsed,
+            commands::shelf_reveal,
+            commands::shelf_open,
+            commands::shelf_paste,
+            commands::shelf_thumbnail,
             commands::start_utility_color_pick,
             commands::show_sketch_window,
             commands::hide_sketch_window,
@@ -888,6 +899,7 @@ fn main() {
             commands::capture_region_live,
             commands::set_smart_screenshot_mode,
             commands::set_smart_screenshot_controls_bounds,
+            commands::set_screenshot_text_editing,
             commands::get_recording_enabled,
             commands::set_recording_enabled,
             commands::get_recording_hotkey,
@@ -956,8 +968,14 @@ fn main() {
         // `std::process::exit(0)`（那条只能在 `updater::install_update` 里显式收尾）。
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|_app_handle, event| match event {
+            tauri::RunEvent::ExitRequested { .. } => {
+                crate::utils::logger::log("lifecycle", "exit requested");
+            }
+            tauri::RunEvent::Exit => {
+                // 退出日志是「到底退没退」的唯一事后证据：没有它，残留进程/多实例
+                // 只能靠 tasklist 现场判断。
+                crate::utils::logger::log("lifecycle", "exit");
                 // 退出时取消正在跑的清理任务：半途被杀会留下「删了一半」的目录树
                 if let Some(state) = _app_handle.try_state::<disk_cleanup::CleanState>() {
                     state.request_cancel();
@@ -966,5 +984,6 @@ fn main() {
                 crate::hooks::mouse::stop_window_pin();
                 crate::window_pin::cleanup();
             }
+            _ => {}
         });
 }

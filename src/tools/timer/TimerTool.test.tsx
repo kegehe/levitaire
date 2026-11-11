@@ -1046,12 +1046,20 @@ describe("TimerTool 面板宽度随内容走", () => {
     // 会把 179px 的面板撑到 700px+）。改了这些行的高度/换行方式时要连带检查这条不变式。
     for (const selector of [
       ".timer-label",
+      ".timer-countdown-label",
+      ".timer-countdown-name",
       ".timer-preset-chip > button:first-child",
       ".timer-pomodoro-focus",
       ".timer-my-presets",
     ]) {
       expect(cssRuleBody(css, selector), `${selector} 缺少 max-width`).toMatch(/max-width: \d+px/);
     }
+
+    // 8 个倒计时不能无限撑高面板（窗口只夹位置、不缩放内容）：列表必须限高滚动。
+    // 行内控件的提示已改用原生 title，不会被这个 overflow 容器裁掉。
+    const listRule = cssRuleBody(css, ".timer-countdown-list ul");
+    expect(listRule, "倒计时列表缺少 max-height").toMatch(/max-height: \d+px/);
+    expect(listRule).toContain("overflow-y: auto");
   });
 });
 
@@ -1098,6 +1106,20 @@ describe("TimerTool 拖窗区域", () => {
     expect(mockStartDragging).not.toHaveBeenCalled();
   });
 
+  // 列表行本身可点击切换当前倒计时。若不把列表加入拖窗豁免，mousedown 会先触发
+  // startDragging，真实窗口里随后的 click 不会到达行，切换和滚动都会失效。
+  it("在倒计时列表上一次按下不触发拖窗", async () => {
+    const { container } = render(<TimerTool />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("tab", { name: "倒计时" }));
+
+    fireEvent.mouseDown(container.querySelector(".timer-countdown-item")!, { button: 0 });
+    expect(mockStartDragging).not.toHaveBeenCalled();
+
+    fireEvent.mouseDown(container.querySelector(".timer-countdown-time")!, { button: 0 });
+    expect(mockStartDragging).not.toHaveBeenCalled();
+  });
+
   it("在输入框上按下不触发拖窗", async () => {
     render(<TimerTool />);
     await act(async () => { await Promise.resolve(); });
@@ -1122,5 +1144,428 @@ describe("TimerTool 拖窗区域", () => {
     await act(async () => { await Promise.resolve(); });
     fireEvent.mouseDown(container.querySelector(".timer-clock-view")!, { button: 2 });
     expect(mockStartDragging).not.toHaveBeenCalled();
+  });
+});
+
+describe("TimerTool 操作失败提示", () => {
+  const countdownFixture = {
+    id: "timer-1",
+    label: "倒计时",
+    kind: "countdown" as const,
+    durationSecs: 300,
+    remainingSecs: 300,
+    elapsedSecs: 0,
+    running: false,
+    completed: false,
+    startedUnixMs: null,
+    laps: [] as number[],
+  };
+
+  let consoleError: ReturnType<typeof vi.spyOn>;
+
+  /** 让指定命令失败，其余命令正常返回；timers 为挂载时后端持有的计时器清单 */
+  const mountWith = async (timers: unknown[], failCommand?: string) => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_timers") return Promise.resolve({ timers });
+      if (command === "get_timer_lunar_enabled") return Promise.resolve(true);
+      if (command === failCommand) return Promise.reject(new Error("backend failure"));
+      return Promise.resolve(undefined);
+    });
+    render(<TimerTool />);
+    await act(async () => { await Promise.resolve(); });
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+    // 失败路径会 console.error 上报，测试里静音以免污染输出
+    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleError.mockRestore();
+  });
+
+  it("倒计时开始失败时给出可见提示", async () => {
+    await mountWith([countdownFixture], "start_timer");
+    fireEvent.click(screen.getByRole("tab", { name: "倒计时" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("倒计时开始失败");
+  });
+
+  it("倒计时设定失败时给出可见提示（含快捷预设）", async () => {
+    await mountWith([countdownFixture], "set_timer_duration");
+    fireEvent.click(screen.getByRole("tab", { name: "倒计时" }));
+    fireEvent.click(screen.getByRole("button", { name: "10分" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("倒计时设置时长失败");
+  });
+
+  it("秒表重置失败时给出可见提示", async () => {
+    await mountWith([baseStopwatch], "reset_timer");
+    fireEvent.click(screen.getByRole("tab", { name: "秒表" }));
+    await screen.findByText("00:23");
+    fireEvent.click(screen.getByRole("button", { name: "重置秒表" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("秒表重置失败");
+  });
+
+  it("秒表创建失败时给出可见提示", async () => {
+    await mountWith([], "create_timer");
+    fireEvent.click(screen.getByRole("tab", { name: "秒表" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("创建秒表失败");
+  });
+
+  it("重试成功后撤掉上一条错误提示", async () => {
+    await mountWith([countdownFixture], "start_timer");
+    fireEvent.click(screen.getByRole("tab", { name: "倒计时" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
+    await screen.findByRole("alert");
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_timers") return Promise.resolve({ timers: [countdownFixture] });
+      if (command === "get_timer_lunar_enabled") return Promise.resolve(true);
+      return Promise.resolve(undefined);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("其他操作成功不会误清当前错误提示", async () => {
+    await mountWith([countdownFixture], "start_timer");
+    fireEvent.click(screen.getByRole("tab", { name: "倒计时" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
+    await screen.findByRole("alert");
+
+    // 加时成功与「开始」无关，不应把开始失败的提示顺带撤掉
+    fireEvent.click(screen.getByRole("button", { name: "增加一分钟" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("add_timer_seconds", { id: "timer-1", seconds: 60 }));
+    expect(screen.getByRole("alert")).toHaveTextContent("倒计时开始失败");
+  });
+
+  it("提示会自动消失，避免一直占着面板", async () => {
+    vi.useFakeTimers();
+    try {
+      await mountWith([countdownFixture], "start_timer");
+      fireEvent.click(screen.getByRole("tab", { name: "倒计时" }));
+      fireEvent.click(screen.getByRole("button", { name: "开始" }));
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.getByRole("alert")).toBeInTheDocument();
+      act(() => { vi.advanceTimersByTime(4000); });
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("TimerTool 多倒计时管理", () => {
+  const countdown = (overrides: Record<string, unknown> = {}) => ({
+    id: "timer-1",
+    label: "倒计时",
+    kind: "countdown" as const,
+    durationSecs: 300,
+    remainingSecs: 300,
+    elapsedSecs: 0,
+    running: false,
+    completed: false,
+    startedUnixMs: null,
+    laps: [] as number[],
+    ...overrides,
+  });
+  const study = countdown({ id: "timer-1", label: "学习", remainingSecs: 1500, durationSecs: 1500 });
+  const writing = countdown({ id: "timer-2", label: "写作", remainingSecs: 600, durationSecs: 600 });
+  const rest = countdown({ id: "timer-3", label: "休息", remainingSecs: 300, durationSecs: 300 });
+
+  /** 挂载并切到倒计时页签；create_timer 默认把新计时器追加在末尾 */
+  const mount = async (timers: unknown[], created?: unknown, deleted?: unknown) => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_timers") return Promise.resolve({ timers });
+      if (command === "create_timer") return Promise.resolve(created ?? { timers });
+      if (command === "delete_timer") return Promise.resolve(deleted ?? undefined);
+      if (command === "get_timer_lunar_enabled") return Promise.resolve(true);
+      return Promise.resolve(undefined);
+    });
+    render(<TimerTool />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("tab", { name: "倒计时" }));
+  };
+  const activeLabel = () =>
+    document.querySelector(".timer-countdown-item.is-active .timer-countdown-name-text")?.textContent;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearMockListeners();
+  });
+
+  it("列出全部倒计时，点击某一行即切换大数字显示的那个", async () => {
+    await mount([study, writing]);
+    const rows = document.querySelectorAll(".timer-countdown-item");
+    expect(rows).toHaveLength(2);
+    expect(activeLabel()).toBe("学习");
+    // 大数字与列表行同时显示 25:00
+    expect(screen.getAllByText("25:00").length).toBeGreaterThanOrEqual(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "写作" }));
+    expect(activeLabel()).toBe("写作");
+    expect(document.querySelector(".timer-primary-value")!.textContent).toBe("10:00");
+  });
+
+  it("新建倒计时后自动聚焦到新计时器", async () => {
+    const created = countdown({ id: "timer-3", label: "倒计时 3" });
+    await mount([study, writing], { timers: [study, writing, created] });
+    fireEvent.click(screen.getByRole("button", { name: "新建倒计时" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("create_timer", {
+      input: { kind: "countdown", label: "倒计时 3", durationSecs: 300 },
+    }));
+    await waitFor(() => expect(activeLabel()).toBe("倒计时 3"));
+  });
+
+  it("列表里的开始/暂停只作用于对应计时器", async () => {
+    await mount([{ ...study, running: true }, writing]);
+    fireEvent.click(screen.getByRole("button", { name: "暂停学习" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("pause_timer", { id: "timer-1" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "开始写作" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("start_timer", { id: "timer-2" }));
+  });
+
+  it("双击列表名称可重命名该倒计时", async () => {
+    await mount([study, writing]);
+    fireEvent.doubleClick(screen.getByRole("button", { name: "写作" }));
+    const input = screen.getByRole("textbox", { name: "重命名写作" });
+    fireEvent.change(input, { target: { value: "文案" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("rename_timer", { id: "timer-2", label: "文案" }));
+  });
+
+  it("删除指定倒计时后行消失，当前项回落到剩余第一条", async () => {
+    await mount([study, writing], undefined, { timers: [study] });
+    fireEvent.click(screen.getByRole("button", { name: "写作" }));
+    expect(activeLabel()).toBe("写作");
+
+    fireEvent.click(screen.getByRole("button", { name: "删除写作" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("delete_timer", { id: "timer-2" }));
+    await waitFor(() => expect(document.querySelectorAll(".timer-countdown-item")).toHaveLength(1));
+    expect(activeLabel()).toBe("学习");
+  });
+
+  it("删除后迟到的旧快照不会让该倒计时复活", async () => {
+    await mount([study, writing], undefined, { timers: [study] });
+    fireEvent.click(screen.getByRole("button", { name: "删除写作" }));
+    await waitFor(() => expect(document.querySelectorAll(".timer-countdown-item")).toHaveLength(1));
+
+    // 调度线程可能在删除前取好快照、删除后才投递：这份快照里还带着写作
+    act(() => emitMockEvent("timers-changed", { timers: [study, writing] }));
+    expect(document.querySelectorAll(".timer-countdown-item")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "写作" })).toBeNull();
+  });
+
+  it("同一删除按钮连点只发一次请求，请求期间按钮禁用", async () => {
+    let resolveDelete: (payload: { timers: unknown[] }) => void;
+    await mount([study, writing]);
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_timers") return Promise.resolve({ timers: [study, writing] });
+      if (command === "delete_timer") return new Promise((resolve) => { resolveDelete = resolve; });
+      if (command === "get_timer_lunar_enabled") return Promise.resolve(true);
+      return Promise.resolve(undefined);
+    });
+    const button = screen.getByRole("button", { name: "删除写作" });
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+
+    await act(async () => {
+      resolveDelete!({ timers: [study] });
+      await Promise.resolve();
+    });
+    const deleteCalls = mockInvoke.mock.calls.filter(([command]) => command === "delete_timer");
+    expect(deleteCalls).toHaveLength(1);
+  });
+
+  it("删除冷却窗挡住双击落到相邻行造成的误删", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      await mount([study, writing, rest]);
+      // 模拟第一下删除后下一行顶到同一坐标：两次点击落在不同行，但间隔为 0
+      fireEvent.click(screen.getByRole("button", { name: "删除写作" }));
+      fireEvent.click(screen.getByRole("button", { name: "删除休息" }));
+      const deleteCalls = mockInvoke.mock.calls.filter(([command]) => command === "delete_timer");
+      expect(deleteCalls).toHaveLength(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("初始页签是秒表且名额已满时，不自动创建也不再重复弹错", async () => {
+    localStorage.setItem("levitaire-timer-view", "stopwatch");
+    const eight = Array.from({ length: 8 }, (_, index) =>
+      countdown({ id: `timer-${index + 1}`, label: `倒计时 ${index + 1}` }));
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_timers") return Promise.resolve({ timers: eight });
+      if (command === "get_timer_lunar_enabled") return Promise.resolve(true);
+      return Promise.resolve(undefined);
+    });
+    render(<TimerTool />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(mockInvoke).not.toHaveBeenCalledWith("create_timer", expect.anything());
+    expect(await screen.findByRole("alert")).toHaveTextContent("最多只能创建 8 个计时器");
+    expect(screen.getByText(/秒表尚未创建/)).toBeInTheDocument();
+  });
+
+  it("点击整行任意位置都能切换当前倒计时", async () => {
+    await mount([study, writing]);
+    const time = document.querySelectorAll(".timer-countdown-item")[1].querySelector(".timer-countdown-time")!;
+    fireEvent.click(time);
+    expect(activeLabel()).toBe("写作");
+  });
+
+  it("非当前倒计时的剩余时间随 timers-changed 更新", async () => {
+    await mount([study, writing]);
+    act(() => emitMockEvent("timers-changed", {
+      timers: [study, { ...writing, remainingSecs: 500 }],
+    }));
+    // 列表行显示 08:20，大数字仍是选中项的 25:00
+    expect(screen.getAllByText("08:20")).toHaveLength(1);
+    expect(document.querySelector(".timer-primary-value")!.textContent).toBe("25:00");
+  });
+
+  it("当前倒计时被删除后自动回落到剩余的第一条", async () => {
+    await mount([study, writing]);
+    fireEvent.click(screen.getByRole("button", { name: "写作" }));
+    expect(activeLabel()).toBe("写作");
+
+    act(() => emitMockEvent("timers-changed", { timers: [study] }));
+    expect(activeLabel()).toBe("学习");
+    expect(document.querySelector(".timer-primary-value")!.textContent).toBe("25:00");
+  });
+
+  it("失焦也会提交重命名", async () => {
+    await mount([study, writing]);
+    fireEvent.doubleClick(screen.getByRole("button", { name: "写作" }));
+    const input = screen.getByRole("textbox", { name: "重命名写作" });
+    fireEvent.change(input, { target: { value: "文案" } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("rename_timer", { id: "timer-2", label: "文案" }));
+  });
+
+  it("输入法组合态下的 Enter/Escape 不提交也不取消重命名", async () => {
+    await mount([study, writing]);
+    fireEvent.doubleClick(screen.getByRole("button", { name: "写作" }));
+    const input = screen.getByRole("textbox", { name: "重命名写作" });
+    fireEvent.change(input, { target: { value: "会议" } });
+
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(mockInvoke).not.toHaveBeenCalledWith("rename_timer", expect.anything());
+    expect(screen.getByRole("textbox", { name: "重命名写作" })).toBeInTheDocument();
+
+    fireEvent.keyDown(input, { key: "Escape", isComposing: true });
+    expect(screen.getByRole("textbox", { name: "重命名写作" })).toBeInTheDocument();
+
+    // 部分输入法结束组合时 isComposing 已是 false，只上报兼容值 229
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    expect(mockInvoke).not.toHaveBeenCalledWith("rename_timer", expect.anything());
+    expect(screen.getByRole("textbox", { name: "重命名写作" })).toBeInTheDocument();
+  });
+
+  it("重命名为已有名称时拒绝并提示，不会产生两个同名行", async () => {
+    await mount([study, writing]);
+    fireEvent.doubleClick(screen.getByRole("button", { name: "写作" }));
+    const input = screen.getByRole("textbox", { name: "重命名写作" });
+    fireEvent.change(input, { target: { value: "学习" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(mockInvoke).not.toHaveBeenCalledWith("rename_timer", expect.anything());
+    expect(await screen.findByRole("alert")).toHaveTextContent("已有同名倒计时");
+    // 拒绝时保留编辑器与草稿，用户可以直接改正
+    const kept = screen.getByRole("textbox", { name: "重命名写作" }) as HTMLInputElement;
+    expect(kept.value).toBe("学习");
+  });
+
+  it("重命名请求失败时保留编辑器与草稿，可直接重试", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await mount([study, writing]);
+      mockInvoke.mockImplementation((command) => {
+        if (command === "get_timers") return Promise.resolve({ timers: [study, writing] });
+        if (command === "rename_timer") return Promise.reject(new Error("backend failure"));
+        if (command === "get_timer_lunar_enabled") return Promise.resolve(true);
+        return Promise.resolve(undefined);
+      });
+      fireEvent.doubleClick(screen.getByRole("button", { name: "写作" }));
+      const input = screen.getByRole("textbox", { name: "重命名写作" });
+      fireEvent.change(input, { target: { value: "文案" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("倒计时重命名失败");
+      expect((screen.getByRole("textbox", { name: "重命名写作" }) as HTMLInputElement).value).toBe("文案");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("记住上次选中的倒计时；存储里的 id 失效时回落到第一条", async () => {
+    localStorage.setItem("levitaire-timer-active-countdown", "timer-2");
+    await mount([study, writing]);
+    expect(activeLabel()).toBe("写作");
+    cleanup();
+
+    localStorage.setItem("levitaire-timer-active-countdown", "timer-99");
+    await mount([study, writing]);
+    expect(activeLabel()).toBe("学习");
+  });
+
+  it("重命名按 Escape 取消，不调用后端", async () => {
+    await mount([study, writing]);
+    fireEvent.doubleClick(screen.getByRole("button", { name: "写作" }));
+    const input = screen.getByRole("textbox", { name: "重命名写作" });
+    fireEvent.change(input, { target: { value: "文案" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(mockInvoke).not.toHaveBeenCalledWith("rename_timer", expect.anything());
+    expect(screen.getByRole("button", { name: "写作" })).toBeInTheDocument();
+  });
+
+  it("新建名称跳过已占用的序号，避免删除后再建出现重名", async () => {
+    const second = countdown({ id: "timer-2", label: "倒计时 2" });
+    const third = countdown({ id: "timer-3", label: "倒计时 3" });
+    await mount([second, third], { timers: [second, third] });
+    fireEvent.click(screen.getByRole("button", { name: "新建倒计时" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("create_timer", {
+      input: { kind: "countdown", label: "倒计时 4", durationSecs: 300 },
+    }));
+  });
+
+  it("名额被倒计时占满时，秒表页显示空态而不是无效控制条", async () => {
+    const eight = Array.from({ length: 8 }, (_, index) =>
+      countdown({ id: `timer-${index + 1}`, label: `倒计时 ${index + 1}` }));
+    await mount(eight);
+    fireEvent.click(screen.getByRole("tab", { name: "秒表" }));
+
+    expect(screen.getByText(/秒表尚未创建/)).toHaveTextContent("最多 8 个计时器");
+    expect(mockInvoke).not.toHaveBeenCalledWith("create_timer", expect.anything());
+    expect(screen.queryByRole("button", { name: "重置秒表" })).toBeNull();
+
+    // 空态给出可操作入口，而不是只留一个 4 秒后消失的提示
+    fireEvent.click(screen.getByRole("button", { name: "去倒计时列表管理" }));
+    expect(screen.getByRole("tab", { name: "倒计时" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("没有任何倒计时时不渲染无效的大数字与控制条", async () => {
+    const stopwatch = { ...countdown({ id: "timer-9" }), kind: "stopwatch" as const, label: "秒表" };
+    await mount([stopwatch]);
+    expect(screen.getByText("还没有倒计时")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建倒计时" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "开始" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重置倒计时" })).toBeNull();
+  });
+
+  it("只剩一个计时器时禁用删除，满 8 个时禁用新建", async () => {
+    await mount([study]);
+    expect(screen.getByRole("button", { name: "删除学习" })).toBeDisabled();
+    cleanup();
+
+    const eight = Array.from({ length: 8 }, (_, index) =>
+      countdown({ id: `timer-${index + 1}`, label: `倒计时 ${index + 1}` }));
+    await mount(eight);
+    expect(screen.getByRole("button", { name: "新建倒计时" })).toBeDisabled();
   });
 });

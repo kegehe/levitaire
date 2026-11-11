@@ -68,6 +68,11 @@ body.utility-hub-window {
   padding: 26px 20px 20px;
 }
 
+body.file-shelf-window {
+  overflow: hidden;
+  padding: 20px;
+}
+
 /* 设置窗口：滚动由内容面板内部处理 */
 body.settings-window {
   overflow: hidden;

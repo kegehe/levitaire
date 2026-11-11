@@ -44,6 +44,20 @@ function brush(): Annotation {
   };
 }
 
+function mosaic(): Annotation {
+  return {
+    id: "m",
+    kind: "mosaic",
+    color: "#000000",
+    strokeWidth: 20,
+    points: [
+      { x: 0, y: 0 },
+      { x: 100, y: 0 },
+    ],
+    blockSize: 10,
+  };
+}
+
 function text(): Annotation {
   return {
     id: "t",
@@ -285,5 +299,39 @@ describe("withStrokeWidth（滚轮调线宽用）", () => {
     expect(b.points).toHaveLength(2);
     const a = withStrokeWidth(arrow(), 6) as Extract<Annotation, { kind: "arrow" }>;
     expect(a).toMatchObject({ x1: 0, y1: 0, x2: 100, y2: 0, strokeWidth: 6 });
+  });
+});
+
+describe("马赛克（画笔式：沿路径打码，不再框选）", () => {
+  it("包围盒按笔迹 ± 半个涂抹直径", () => {
+    // 直径 20 → 上下各外扩 10；x 方向 0..100
+    expect(annotationBounds(mosaic())).toEqual({ x: -10, y: -10, w: 120, h: 20 });
+  });
+
+  it("命中的是笔迹带，而不是整块外包围盒", () => {
+    // 半宽 10 + 容差 6 = 16
+    expect(hitTestAnnotation(mosaic(), 50, 15, TOL)).toBe("body");
+    expect(hitTestAnnotation(mosaic(), 50, 18, TOL)).toBeNull();
+    expect(hitTestAnnotation(mosaic(), 50, -100, TOL)).toBeNull();
+  });
+
+  it("只画虚线包围盒（无拉伸手柄），只能整体平移", () => {
+    expect(handlePoints(mosaic())).toEqual([]);
+
+    const m = mosaic();
+    const moved = applyEditZone(m, "body", 5, -3, 4);
+    expect(moved).toMatchObject({
+      kind: "mosaic",
+      points: [
+        { x: 5, y: -3 },
+        { x: 105, y: -3 },
+      ],
+    });
+    // 边角 zone 对马赛克无效（没有手柄可拖）
+    expect(applyEditZone(m, "e", 5, 0, 4)).toBe(m);
+  });
+
+  it("滚轮改线宽改的就是涂抹直径", () => {
+    expect(withStrokeWidth(mosaic(), 24).strokeWidth).toBe(24);
   });
 });

@@ -52,21 +52,27 @@ pub fn start_long_capture(
         // The first frame must be captured after the overlay and all Levitaire
         // UI have disappeared; otherwise the selection mask becomes part of it.
         overlay.hide().map_err(|e| e.to_string())?;
+        // 原生选区层是全屏置顶窗：遮罩会把选区外压暗，2px 描边还压在选区边缘内侧，
+        // 而长截图随后用实时 BitBlt 抓帧 —— 不收掉就会把描边烙进每一帧，结束长截图后
+        // 遮罩也一直留在桌面上。它属于框选阶段，选区确定即应立刻销毁。
+        crate::screenshot::selector::dismiss();
         std::thread::sleep(std::time::Duration::from_millis(50));
         let toolbar_was_visible = app
             .get_webview_window("toolbar")
             .map(|window| window.is_visible().unwrap_or(false))
             .unwrap_or(false);
         TOOLBAR_VISIBLE_BEFORE_LONG_CAPTURE.store(toolbar_was_visible, Ordering::SeqCst);
-        if let Some(window) = app.get_webview_window("orb") {
-            let _ = window.hide();
-        }
+        apply_orb_visibility(&app, false);
         // 统一入口：隐藏 + 复位后端侧工具栏状态（qrcode_preview 残留会让下次弹出后关不掉）
         hide_toolbar_and_reset_state(&app);
         if let Some(window) = app.get_webview_window("time-overlay") {
             let _ = window.hide();
         }
         if let Some(window) = app.get_webview_window("todo-overlay") {
+            let _ = window.hide();
+        }
+        // 不重写 SHELF_VISIBLE_BEFORE_SESSION：标记在截图会话开始时已经记下。
+        if let Some(window) = app.get_webview_window("file-shelf-overlay") {
             let _ = window.hide();
         }
         if let Some(window) = app.get_webview_window("palette") {
@@ -291,11 +297,9 @@ pub fn stop_long_capture(
     if let Some(frame) = app.get_webview_window("long-capture-frame") {
         let _ = frame.hide();
     }
-    if let Some(orb) = app.get_webview_window("orb") {
-        if ORB_VISIBLE_BEFORE_SESSION.load(Ordering::SeqCst) {
-            let _ = orb.show();
-            let _ = orb.set_always_on_top(true);
-        }
+    // 会话前可见才恢复，并消费标记：与截图/录屏清理保持同一套「不强行弹出用户隐藏的球」语义。
+    if ORB_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        apply_orb_visibility(&app, true);
     }
     // 恢复会话前可见的浮窗；工具已被用户关掉时不再恢复（标记无条件消费），
     // 避免「全部关闭」之后又被长截图的收尾逻辑重新弹出来。
@@ -317,6 +321,13 @@ pub fn stop_long_capture(
     {
         if let Some(todo) = app.get_webview_window("todo-overlay") {
             let _ = todo.show();
+        }
+    }
+    if SHELF_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+        && tool_still_enabled(&app, "file-shelf")
+    {
+        if let Some(shelf) = app.get_webview_window("file-shelf-overlay") {
+            let _ = shelf.show();
         }
     }
     if let Some(cache) = app.try_state::<crate::screenshot::ScreenCache>() {

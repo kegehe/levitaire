@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mockIsVisible } from "../../test/tauri-mock";
 import ScrollNavigator from "./ScrollNavigator";
 
 const mockInvoke = vi.mocked(invoke);
@@ -37,6 +38,80 @@ describe("ScrollNavigator", () => {
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("set_scroll_navigation_percent", { percent: 75 }),
     );
+  });
+
+  it("后台轮询不覆盖用户正在输入 / 拖动的百分比", async () => {
+    // 回归：后台每 2s 探测一次真实位置，旧实现顺手把 percent 写回 draft，
+    // 用户数字输到一半、滑杆拖到一半就被弹回旧值。现在用户手动设定期间只更新真实状态，
+    // 不回写草稿；提交（松手 / 失焦）后恢复跟随真值。
+    let livePercent = 42;
+    mockInvoke.mockImplementation((command) => {
+      if (
+        command === "get_scroll_navigation_state" ||
+        command === "set_scroll_navigation_percent"
+      ) {
+        return Promise.resolve({ precise: true, percent: livePercent, fallbackAvailable: true });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    vi.useFakeTimers();
+    try {
+      render(<ScrollNavigator />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      const input = screen.getByRole("spinbutton", { name: "滚动百分比" });
+      expect(input).toHaveValue(42);
+
+      fireEvent.change(input, { target: { value: "70" } });
+      livePercent = 55; // 目标窗口在此期间被外部滚动了
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100);
+      });
+      expect(input).toHaveValue(70);
+      // 真实状态仍在刷新，只是不写回草稿
+      expect(screen.getByText("55%")).toBeInTheDocument();
+
+      const slider = screen.getByRole("slider", { name: "滚动位置" });
+      fireEvent.change(slider, { target: { value: "88" } });
+      livePercent = 12;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100);
+      });
+      expect(slider).toHaveValue("88");
+
+      // 松手提交后解除保护，界面重新跟随后端真值
+      fireEvent.pointerUp(slider);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(slider).toHaveValue("12");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("面板隐藏时不发探测请求，重新显示后立刻补刷一次", async () => {
+    // 原生 hide() 不会让 document.hidden 变 true（实测 WebView2 156），旧守卫因此失效：
+    // 面板关掉后仍每 2s 打一次跨进程 UIA。现在改为反问窗口可见性 —— 隐藏时不许探测，
+    // 重新显示后必须马上补一次，不能等下一个 2s 周期。
+    mockIsVisible.mockResolvedValue(false);
+    try {
+      render(<ScrollNavigator />);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      });
+      expect(mockInvoke).not.toHaveBeenCalledWith("get_scroll_navigation_state");
+
+      mockIsVisible.mockResolvedValue(true);
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("get_scroll_navigation_state"), {
+        timeout: 2000,
+      });
+    } finally {
+      mockIsVisible.mockResolvedValue(true);
+    }
   });
 
   it("keeps relative scrolling usable when the target has no precise scrollbar", async () => {

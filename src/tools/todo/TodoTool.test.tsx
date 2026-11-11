@@ -312,9 +312,9 @@ describe("TodoTool", () => {
     expect(rows[0].getAttribute("draggable")).toBe("true");
   });
 
-  // 「全部任务」视图里不同清单的任务是混排的，而后端 move_to 只按「清单 + 状态」分组重排：
-  // 若允许把行拖到别的清单的行上，本地重排结果与落库结果对不上，松手后行会跳回原处。
-  it("ignores cross-list drop targets in the all-tasks view", async () => {
+  // 跨清单拖动：前端不做本地重排，落点交给后端按目标清单分组重编号；
+  // 必须在 drop 时提交（拖到窗口外松手不应移动任务）。
+  it("moves a task to another list when dropped on one of its rows", async () => {
     const mixed = [
       { ...item, id: "todo-u1", title: "未归类一", sortOrder: 1 },
       { ...item, id: "todo-l1", title: "清单内任务", listId: "list-1", sortOrder: 2 },
@@ -334,13 +334,51 @@ describe("TodoTool", () => {
       .find((row) => row.querySelector(".todo-item-title")?.textContent === title) as HTMLElement;
     const titles = () => Array.from(document.querySelectorAll(".todo-item-title")).map((node) => node.textContent);
 
+    // 「全部任务」视图里行上要标出所属清单，跨清单拖拽才有可见的目标
+    await waitFor(() => expect(within(rowFor("清单内任务")).getByText("工作")).toBeInTheDocument());
+
     fireEvent.dragStart(rowFor("未归类一"), { dataTransfer });
     fireEvent.dragOver(rowFor("清单内任务"), { dataTransfer });
+    // 跨清单时本地顺序不动，等后端落库后 refresh
     expect(titles()).toEqual(["未归类一", "清单内任务", "未归类二"]);
 
+    fireEvent.drop(rowFor("清单内任务"), { dataTransfer });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("move_todo", {
+      id: "todo-u1",
+      beforeId: null,
+      listId: "list-1",
+    }));
     fireEvent.dragEnd(rowFor("未归类一"), { dataTransfer });
-    // 落点被拒 → 没有净位移 → 不能提交 move_todo
-    expect(mockInvoke).not.toHaveBeenCalledWith("move_todo", expect.anything());
+  });
+
+  it("inserts before the target row when dropped on its upper half in another list", async () => {
+    const mixed = [
+      { ...item, id: "todo-l1", title: "清单内任务", listId: "list-1", sortOrder: 1 },
+      { ...item, id: "todo-u1", title: "未归类一", sortOrder: 2 },
+    ];
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_todos") return Promise.resolve(mixed);
+      if (command === "get_todo_lists") {
+        return Promise.resolve([{ id: "list-1", name: "工作", createdAt: "", updatedAt: "" }]);
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<TodoTool />);
+    await screen.findByText("未归类一");
+    const dataTransfer = { effectAllowed: "", dropEffect: "", setData: vi.fn() };
+    const rowFor = (title: string) => Array.from(document.querySelectorAll(".todo-item-row"))
+      .find((row) => row.querySelector(".todo-item-title")?.textContent === title) as HTMLElement;
+
+    // 从下往上拖，无布局信息时按方向退化为「插到目标之前」
+    fireEvent.dragStart(rowFor("未归类一"), { dataTransfer });
+    fireEvent.dragOver(rowFor("清单内任务"), { dataTransfer });
+    fireEvent.drop(rowFor("清单内任务"), { dataTransfer });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("move_todo", {
+      id: "todo-u1",
+      beforeId: "todo-l1",
+      listId: "list-1",
+    }));
+    fireEvent.dragEnd(rowFor("未归类一"), { dataTransfer });
   });
 
   it("defaults to manual sort mode and reorders a row upward via drag", async () => {

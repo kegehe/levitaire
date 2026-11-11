@@ -22,11 +22,14 @@ interface Props {
   annotations: UseAnnotations;
   busy: string | null;
   error: string | null;
+  /** 成功提示，不走错误样式。 */
+  status?: string | null;
   ready: boolean; // 底图就绪，未就绪时禁用导出
   onCopy: () => void;
   onSave: () => void;
   onOcr: () => void;
   onPin: () => void;
+  onShelf?: () => void;
   onCancel: () => void;
   toolbarRef?: Ref<HTMLDivElement>;
   style?: CSSProperties;
@@ -67,11 +70,13 @@ function AnnotationToolbar(props: Props) {
     annotations,
     busy,
     error,
+    status,
     ready,
     onCopy,
     onSave,
     onOcr,
     onPin,
+    onShelf,
     onCancel,
     toolbarRef,
     style,
@@ -88,6 +93,7 @@ function AnnotationToolbar(props: Props) {
       ref={toolbarRef}
       style={style}
     >
+      {status && <div className="ss-note">{status}</div>}
       {error && <div className="ss-error">{error}</div>}
       <div className="ss-toolbar ss-annotate-toolbar">
         {/* 工具组：每个绘图工具的颜色/粗细作为它的「二级面板」挂在自己的按钮下，
@@ -110,62 +116,69 @@ function AnnotationToolbar(props: Props) {
 
               {showStylePanel && (
                 <div className="ss-tool-subpanel" role="group" aria-label={`${t.label}设置`}>
-                  {/* 颜色 */}
-                  <div className="ss-color-swatches">
-                    {PRESET_COLORS.map((c) => (
-                      <button
-                        key={c}
-                        className={`ss-color-swatch ${color === c ? "active" : ""}`}
-                        style={{ background: c }}
-                        onClick={() => setColor(c)}
-                        title={c}
-                        aria-label={`颜色 ${c}`}
-                        disabled={!!busy}
-                      />
-                    ))}
-                    {AUTO_COLOR_TOOLS.has(kind) && (
-                      <button
-                        className={`ss-color-swatch ss-color-auto ${color === COLOR_AUTO ? "active" : ""}`}
-                        onClick={() => setColor(COLOR_AUTO)}
-                        disabled={!!busy}
-                        title="自动"
-                        aria-label="自动配色"
-                      >
-                        A
-                      </button>
-                    )}
-                    <label className="ss-color-custom" title="自定义颜色" aria-label="自定义颜色">
-                      <input
-                        className="ss-color-custom-input"
-                        type="color"
-                        value={color === COLOR_AUTO ? DEFAULT_COLOR : color}
-                        onChange={(event) => setColor(event.target.value)}
-                        disabled={!!busy}
-                        aria-label="自定义颜色"
-                      />
-                      <span
-                        className={`ss-color-swatch ss-color-custom-swatch ${
-                          color !== COLOR_AUTO && !PRESET_COLORS.includes(color) ? "active" : ""
-                        }`}
-                        style={{ background: color === COLOR_AUTO ? DEFAULT_COLOR : color }}
-                        aria-hidden="true"
-                      />
-                    </label>
-                  </div>
+                  {/* 颜色：马赛克只打码不染色，给它是无效控件，故不渲染 */}
+                  {kind !== "mosaic" && (
+                    <>
+                      <div className="ss-color-swatches">
+                        {PRESET_COLORS.map((c) => (
+                          <button
+                            key={c}
+                            className={`ss-color-swatch ${color === c ? "active" : ""}`}
+                            style={{ background: c }}
+                            onClick={() => setColor(c)}
+                            title={c}
+                            aria-label={`颜色 ${c}`}
+                            disabled={!!busy}
+                          />
+                        ))}
+                        {AUTO_COLOR_TOOLS.has(kind) && (
+                          <button
+                            className={`ss-color-swatch ss-color-auto ${color === COLOR_AUTO ? "active" : ""}`}
+                            onClick={() => setColor(COLOR_AUTO)}
+                            disabled={!!busy}
+                            title="自动"
+                            aria-label="自动配色"
+                          >
+                            A
+                          </button>
+                        )}
+                        <label
+                          className="ss-color-custom"
+                          title="自定义颜色"
+                          aria-label="自定义颜色"
+                        >
+                          <input
+                            className="ss-color-custom-input"
+                            type="color"
+                            value={color === COLOR_AUTO ? DEFAULT_COLOR : color}
+                            onChange={(event) => setColor(event.target.value)}
+                            disabled={!!busy}
+                            aria-label="自定义颜色"
+                          />
+                          <span
+                            className={`ss-color-swatch ss-color-custom-swatch ${
+                              color !== COLOR_AUTO && !PRESET_COLORS.includes(color) ? "active" : ""
+                            }`}
+                            style={{ background: color === COLOR_AUTO ? DEFAULT_COLOR : color }}
+                            aria-hidden="true"
+                          />
+                        </label>
+                      </div>
+                      <span className="ss-sep" />
+                    </>
+                  )}
 
-                  <span className="ss-sep" />
-
-                  {/* 线宽：圆点 + 数值；悬停其上滚轮（或方向键）调节 */}
+                  {/* 线宽（马赛克即涂抹粗细）：圆点 + 数值；悬停其上滚轮（或方向键）调节 */}
                   <div
                     className="ss-width-dot"
                     role="spinbutton"
                     tabIndex={0}
-                    aria-label="线宽"
+                    aria-label={kind === "mosaic" ? "涂抹粗细" : "线宽"}
                     aria-valuemin={MIN_STROKE_WIDTH}
                     aria-valuemax={MAX_STROKE_WIDTH}
                     aria-valuenow={strokeWidth}
                     aria-disabled={!!busy}
-                    title="滚轮调节线宽"
+                    title={kind === "mosaic" ? "滚轮调节涂抹粗细" : "滚轮调节线宽"}
                     onWheel={(event) => {
                       if (busy) return;
                       // 只认纵向滚动：触控板横向滑动（deltaY=0）不该改线宽
@@ -233,6 +246,17 @@ function AnnotationToolbar(props: Props) {
         >
           <Icon name="Pin" size={16} />
         </button>
+        {onShelf && (
+          <button
+            className="ss-btn"
+            onClick={onShelf}
+            disabled={!!busy || !ready}
+            data-tooltip="放入暂存架"
+            aria-label="放入暂存架"
+          >
+            <Icon name="FolderOpen" size={16} />
+          </button>
+        )}
         <button
           className="ss-btn"
           onClick={onSave}

@@ -30,6 +30,8 @@ pub async fn set_quick_input_enabled(
     config: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     config.update_quick_input_enabled(enabled)?;
+    // 先同步运行时开关：剪贴板历史属于本工具，停用后监听线程要立即停止收集。
+    crate::quick_input::set_tool_enabled(enabled);
     // 启用时先确保转盘 overlay 窗口已创建（隐藏），再让触发键生效，
     // 避免「触发键已生效但窗口尚未建好」的窗口期内按下触发键时 begin_wheel
     // emit_to 静默失败且 QUICK_INPUT_ACTIVE 卡在 true（会导致鼠标点击被吞）。

@@ -88,6 +88,10 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-controls { justify-content: center; margin-top: 2px; }
 .timer-controls .timer-play { width: auto; padding: 0 12px; gap: 5px; color: var(--color-fg-on-accent); background: var(--color-accent); }
 .timer-controls .timer-play:hover { color: var(--color-fg-on-accent); background: var(--color-accent); filter: brightness(1.05); }
+/* 操作失败提示：只在出错时占一行。max-width + 换行保证长文案折行，
+   不会把 width: max-content 的面板撑过 360px 上限。 */
+.timer-error-notice { display: flex; align-items: center; justify-content: center; gap: 4px; max-width: 100%; margin: 6px 0 0; padding: 4px 7px; border: 1px solid var(--color-danger); border-radius: 5px; box-sizing: border-box; color: var(--color-danger-fg); background: var(--color-danger-subtle); font-size: 11px; line-height: 1.35; text-align: center; overflow-wrap: anywhere; }
+.timer-error-notice > svg { flex-shrink: 0; }
 .timer-ring-view { position: relative; width: 148px; height: 148px; }
 .timer-ring-view svg { width: 148px; height: 148px; transform: rotate(-90deg); }
 .timer-ring-bg, .timer-ring-fg { fill: none; stroke-width: 8; }
@@ -227,6 +231,10 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .calendar-selection span.note-festival { color: var(--color-danger-fg); font-weight: 600; }
 .calendar-selection span.note-term { color: var(--color-success-fg); }
 .timer-stopwatch-view { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding-top: 12px; }
+/* 秒表未创建时的空态说明：限宽与其它长文本一致，避免撑开面板 */
+.timer-stopwatch-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: 220px; margin: 8px 0 0; color: var(--color-fg-subtle); font-size: 11px; line-height: 1.5; text-align: center; }
+.timer-stopwatch-empty button { padding: 3px 8px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-fg-muted); background: var(--color-bg-sunken); font-size: 11px; cursor: pointer; }
+.timer-stopwatch-empty button:hover { color: var(--color-fg); background: var(--button-hover-bg); }
 /* ── 番茄钟页签 ──────────────────────────────────────────────
    计时状态在后端（专注/短休息/长休息自动循环），这里只渲染。
    进度环复用倒计时页签的 .timer-ring-view，两个页签的环完全等大，
@@ -288,6 +296,39 @@ body.timer-window, body.timer-window #root { height: auto; min-height: 0; }
 .timer-lap-index { color: var(--color-fg); }
 .timer-lap-interval { margin-left: auto; }
 .timer-lap-total { min-width: 56px; text-align: right; color: var(--color-fg-subtle); }
+/* ── 多倒计时列表 ──────────────────────────────────────────────
+   后端可同时推进最多 8 个倒计时；大数字只展示当前选中的那个，其余在列表里
+   各自显示剩余时间，并可直接开始/暂停、双击改名、删除。
+   固定 240px 宽（而非 max-width: 100%）与 .timer-my-presets 同理：行内文本长度
+   不可控，必须给面板宽度兜底，否则一个长名字会把窗口整体撑开。 */
+.timer-countdown-list { width: 240px; max-width: 100%; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--color-border); box-sizing: border-box; text-align: left; }
+/* 大数字上方的名称同样来自用户输入：不限宽时长标签会按 max-content 把面板撑到 360px 上限。
+   与列表行一致做单行省略，完整名称放在 title 里。 */
+.timer-countdown-label { max-width: 220px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.timer-countdown-list-head { display: flex; align-items: center; justify-content: space-between; gap: 4px; color: var(--color-fg-muted); font-size: 10px; }
+.timer-countdown-list-head button { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: 4px; color: var(--color-fg-muted); background: transparent; cursor: pointer; }
+.timer-countdown-list-head button:hover:not(:disabled) { color: var(--color-fg); background: var(--button-hover-bg); }
+.timer-countdown-list-head button:disabled { cursor: not-allowed; opacity: .4; }
+/* 限高 + 滚动：8 个倒计时全展开会把面板顶到小屏可用高度之外，而窗口只夹位置、
+   不缩放内容。行内控件因此改用原生 title 提示（原生 tooltip 不受 overflow 裁剪）；
+   列表整块已在 DRAG_EXEMPT_SELECTOR 里，拖滚动条不会误拖窗口。 */
+.timer-countdown-list ul { display: flex; flex-direction: column; gap: 2px; max-height: 156px; margin: 4px 0 0; padding: 0; list-style: none; overflow-y: auto; }
+.timer-countdown-item { display: flex; align-items: center; gap: 3px; padding: 1px 3px; border-radius: 5px; color: var(--color-fg-muted); font-size: 11px; cursor: pointer; }
+.timer-countdown-item.is-active { color: var(--color-fg); background: var(--color-accent-subtle); }
+.timer-countdown-name { display: inline-flex; align-items: center; min-width: 0; max-width: 104px; padding: 1px 3px; border: 0; border-bottom: 1px dashed transparent; border-radius: 4px; color: inherit; background: transparent; font-size: inherit; text-align: left; cursor: pointer; }
+.timer-countdown-name:hover { border-bottom-color: var(--color-border); }
+.timer-countdown-name-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.timer-countdown-input { width: 104px; min-width: 0; height: 20px; padding: 0 4px; border: 1px solid var(--color-accent); border-radius: 4px; color: var(--color-fg); background: var(--color-bg-sunken); font-size: 11px; outline: none; cursor: text; }
+.timer-countdown-time { margin-left: auto; color: var(--color-fg); font-variant-numeric: tabular-nums; }
+.timer-countdown-item.is-running .timer-countdown-time { color: var(--color-accent); }
+.timer-countdown-item .timer-countdown-time.is-complete { color: var(--color-danger-fg); }
+.timer-countdown-control { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: 4px; color: var(--color-fg-muted); background: transparent; cursor: pointer; }
+.timer-countdown-control:hover:not(:disabled) { color: var(--color-fg); background: var(--button-hover-bg); }
+.timer-countdown-control:disabled { cursor: not-allowed; opacity: .4; }
+.timer-countdown-empty { margin: 6px 0 0; color: var(--color-fg-subtle); font-size: 10px; text-align: center; }
+/* 列表在面板底部：tooltip 一律向上弹，向下会被 .timer-shell 的 overflow: hidden 裁掉 */
+.timer-countdown-list button[data-tooltip]::after { content: attr(data-tooltip); position: absolute; z-index: 5; top: auto; bottom: calc(100% + 4px); right: 0; padding: 3px 7px; white-space: nowrap; color: var(--tooltip-text); background: var(--tooltip-bg); border: 1px solid var(--tooltip-border); border-radius: 4px; opacity: 0; pointer-events: none; }
+.timer-countdown-list button[data-tooltip]:hover::after { opacity: 1; }
 
 /* 顶部页签/操作工具条默认收起（悬浮到工具区域或聚焦时展开，见 TimerTool 的
    .is-chrome-open）。收起后让内容区上移使用原工具条高度，避免常驻占用显示区域。

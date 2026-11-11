@@ -185,6 +185,8 @@ function TodoTool() {
   // 否则同一尺寸会被反复 setSize，窗口持续重排。
   const lastWindowSizeRef = useRef("");
   const collapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 收起判定在异步查询原生可见性之后才落定，卸载后不能再 setState。
+  const aliveRef = useRef(true);
   // 指针是否停在面板上。收起判定在 setSize/折叠之外还要用它：焦点离开面板时可能
   // 早已没有新的 mouseleave 可依赖（见 handlePanelBlur）。
   const pointerInsideRef = useRef(false);
@@ -198,6 +200,10 @@ function TodoTool() {
   // 拖拽期间标记：用于抑制 refresh 覆盖本地实时重排、判断是否产生净位移
   const dragIdRef = useRef<string | null>(null);
   const dragStartIndexRef = useRef(-1);
+  // 跨清单落点。跨清单不做本地重排（后端按目标分组整体重编号），只在 drop 时提交；
+  // 另记一个「已提交」标记，防止紧跟着的 dragEnd 又把之前的同清单重排再提交一次。
+  const crossListDropRef = useRef<{ targetId: string; before: boolean } | null>(null);
+  const crossListMovedRef = useRef(false);
   const setExpandedId = useCallback((value: string | null) => {
     const target = value ? itemsRef.current.find((item) => item.id === value) : undefined;
     if (target && !hasItemDetails(target)) return;
@@ -223,8 +229,9 @@ function TodoTool() {
       // 窗口若已被隐藏（点关闭 / 托盘收起 / 截图会话临时隐藏），**不要**进入折叠态：
       // 隐藏同样会让 WebView 收到 mouseleave，照常收起的话，下次点「待办」看到的就是
       // 一个只剩任务列表的小条 —— 用户点它是想用完整面板的。保持隐藏前的样子。
-      // 依据：`Window::set_visible` 会走到 WebView2 `SetIsVisible`，隐藏时页面确实被置为
-      // hidden（与 ScrollNavigator 靠 document.hidden 停轮询同源，见 docs/滚动导航问题分析.md）。
+      //
+      // 两道判据：老版本 WebView2 隐藏时 document.hidden 会变 true（同步、零成本）；
+      // 当前 WebView2（156）实测恒为 false，只能反问原生窗口（与 ScrollNavigator 同源）。
       if (document.hidden) return;
       // 有可输入元素还带着焦点时不收起：折叠会把输入框/下拉一起 display: none ——
       // 用户输入到一半去别处复制文字（指针离开窗口），回来时输入框和光标位置全没了。
@@ -233,9 +240,20 @@ function TodoTool() {
       // 拖拽排序进行中不收起：折叠会把列表上方的控件一起撤掉，正在拖的目标行
       // 跟着整体上移，落点直接跳掉（拖拽时指针本来就常常在窗口外）。
       if (dragIdRef.current) return;
-      setCollapsed(true);
+      void win
+        .isVisible()
+        .catch(() => true)
+        .then((visible) => {
+          if (!visible || !aliveRef.current) return;
+          // 查询期间状态可能已变（指针移回、弹层打开、开始拖拽），落定前再判一次。
+          if (pointerInsideRef.current) return;
+          if (autoCollapseBlockedRef.current) return;
+          if (isInputFocusedInPanel(panelRef.current)) return;
+          if (dragIdRef.current) return;
+          setCollapsed(true);
+        });
     }, COLLAPSE_DELAY_MS);
-  }, []);
+  }, [win]);
 
   /** 指针进入/离开面板：expandPanel/scheduleCollapse 之外还要记下指针位置，见 handlePanelBlur。 */
   const handlePointerEnter = useCallback(() => {
@@ -389,9 +407,13 @@ function TodoTool() {
     setSnoozeAt("");
   }, [lastReminder]);
 
-  useEffect(() => () => {
-    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-    if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+      if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current);
+    };
   }, []);
 
   const showIoNotice = (text: string, tone: TodoNoticeTone) => setIoNotice({ text, tone });
@@ -462,17 +484,26 @@ function TodoTool() {
   // 仅手动排序模式下 items 按 sort_order 排列，故优先级排序下禁用拖拽。
   const canDrag = filter !== "trash" && filter !== "today" && sortMode === "manual";
 
+  const isSameList = (a?: TodoItem, b?: TodoItem) => {
+    if (!a || !b) return false;
+    return (a.listId ?? ALL_LISTS_ID) === (b.listId ?? ALL_LISTS_ID);
+  };
+
+  /** 指针落在目标行上半区 → 插入其前；无布局信息（测试/无指针）时按拖拽方向退化。 */
+  const isPointerBeforeRow = (targetId: string, clientY: number, fallback: boolean) => {
+    const rowEl = itemRefs.current[targetId]?.querySelector<HTMLElement>(".todo-item-row");
+    if (!rowEl) return fallback;
+    const rect = rowEl.getBoundingClientRect();
+    const hasPointer = rect.height > 0 && Number.isFinite(clientY);
+    return hasPointer ? clientY < rect.top + rect.height / 2 : fallback;
+  };
+
   const getInsertion = (list: TodoItem[], fromId: string, targetId: string, clientY: number) => {
     const from = list.findIndex((item) => item.id === fromId);
     const to = list.findIndex((item) => item.id === targetId);
     if (from < 0 || to < 0 || from === to) return null;
-    const targetEl = itemRefs.current[targetId];
-    const rowEl = targetEl?.querySelector<HTMLElement>(".todo-item-row");
-    if (!rowEl) return null;
-    const rect = rowEl.getBoundingClientRect();
     // 用光标相对目标行的上下半区决定插前/插后；测试或无指针环境下退化为按拖拽方向判断。
-    const hasPointer = rect.height > 0 && Number.isFinite(clientY);
-    const before = hasPointer ? clientY < rect.top + rect.height / 2 : from > to;
+    const before = isPointerBeforeRow(targetId, clientY, from > to);
     const next = [...list];
     const [moved] = next.splice(from, 1);
     const targetPos = next.findIndex((item) => item.id === targetId);
@@ -488,32 +519,80 @@ function TodoTool() {
     event.dataTransfer.setData("text/plain", itemId);
     dragIdRef.current = itemId;
     dragStartIndexRef.current = items.findIndex((item) => item.id === itemId);
+    crossListDropRef.current = null;
+    crossListMovedRef.current = false;
     setDragId(itemId);
-  };
-
-  /**
-   * 两行是否属于同一个拖拽分组（清单 + 状态）。
-   *
-   * 后端 `move_to` 只按「清单 + 状态」分组重排，前端的落点判定必须用同一分组：
-   * 「全部任务」视图里不同清单的行是混排的，若允许把行拖到别的清单的行上，本地重排
-   * 的结果与落库结果对不上 —— 松手后该行会跳回自己分组里的位置。
-   */
-  const isSameDragGroup = (a?: TodoItem, b?: TodoItem) => {
-    if (!a || !b) return false;
-    return (a.listId ?? ALL_LISTS_ID) === (b.listId ?? ALL_LISTS_ID) && a.status === b.status;
   };
 
   const handleDragOver = (event: DragEvent, targetId: string) => {
     if (!canDrag || !dragId || dragId === targetId) return;
-    // 不 preventDefault：跨分组落点直接显示为「不可放置」，比拖完再跳回去直观。
-    if (!isSameDragGroup(items.find((candidate) => candidate.id === dragId), items.find((candidate) => candidate.id === targetId))) return;
+    const dragged = items.find((candidate) => candidate.id === dragId);
+    const target = items.find((candidate) => candidate.id === targetId);
+    // 状态不同（待办 / 已完成）不能互相拖动；清单可以。
+    if (!dragged || !target || dragged.status !== target.status) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     setDragOverId(targetId);
+    if (!isSameList(dragged, target)) {
+      // 跨清单：本地不做重排（落库后由后端按目标分组重编号），只标记插入位置，
+      // 真正提交放在 drop —— 拖到窗口外松手不应该把任务移走。
+      const before = isPointerBeforeRow(
+        targetId,
+        event.clientY,
+        items.findIndex((candidate) => candidate.id === dragId) > items.findIndex((candidate) => candidate.id === targetId),
+      );
+      crossListDropRef.current = { targetId, before };
+      setDragOverBefore(before);
+      return;
+    }
+    crossListDropRef.current = null;
     const result = getInsertion(items, dragId, targetId, event.clientY);
     if (!result) return;
     setDragOverBefore(result.before);
     setItems(result.next);
+  };
+
+  /** 跨清单落点提交：目标清单 + 目标分组中的插入锚点交给后端，由后端整体重排。 */
+  const handleDrop = async (event: DragEvent, targetId: string) => {
+    const pending = crossListDropRef.current;
+    crossListDropRef.current = null;
+    const draggedId = dragId;
+    if (!canDrag || !draggedId) return;
+    // 阻止浏览器把拖拽当成文本投放；同清单的落点已经由 dragover 实时重排，无需额外处理。
+    event.preventDefault();
+    if (!pending || pending.targetId !== targetId) return;
+    const dragged = items.find((candidate) => candidate.id === draggedId);
+    const target = items.find((candidate) => candidate.id === targetId);
+    if (!dragged || !target || isSameList(dragged, target)) return;
+    const targetListId = target.listId ?? ALL_LISTS_ID;
+    let beforeId: string | null = null;
+    if (pending.before) {
+      beforeId = target.id;
+    } else {
+      // 插到目标之后：同组下一项才是锚点（数组里可能夹着别的清单的任务）。
+      const targetIndex = items.findIndex((candidate) => candidate.id === targetId);
+      for (let i = targetIndex + 1; i < items.length; i++) {
+        const candidate = items[i];
+        if ((candidate.listId ?? ALL_LISTS_ID) === targetListId && candidate.status === target.status) {
+          beforeId = candidate.id;
+          break;
+        }
+      }
+    }
+    crossListMovedRef.current = true;
+    try {
+      await invoke("move_todo", { id: draggedId, beforeId, listId: targetListId });
+    } catch (error) {
+      crossListMovedRef.current = false;
+      console.error("move todo to another list failed", error);
+      showIoNotice("移动到清单失败", "error");
+    } finally {
+      dragIdRef.current = null;
+      dragStartIndexRef.current = -1;
+      setDragId(null);
+      setDragOverId(null);
+      refresh();
+    }
   };
 
   const handleDragEnd = async () => {
@@ -521,6 +600,12 @@ function TodoTool() {
     setDragId(null);
     setDragOverId(null);
     dragIdRef.current = null;
+    crossListDropRef.current = null;
+    // 跨清单移动已在 drop 中提交，这里只收尾，避免重复提交同清单的重排结果。
+    if (crossListMovedRef.current) {
+      crossListMovedRef.current = false;
+      return;
+    }
     if (!draggedId) return;
     const finalIndex = items.findIndex((item) => item.id === draggedId);
     const target = items.find((item) => item.id === draggedId);
@@ -688,6 +773,13 @@ function TodoTool() {
     return [...tagsByNormalizedValue.values()].sort((a, b) => a.localeCompare(b));
   }, [deletedItems, filter, items, selectedListId]);
 
+  // 「全部任务」视图里不同清单的任务混排，行上必须能看出归属 —— 否则跨清单拖拽
+  // 的目标清单是不可见的，用户只能盲拖。
+  const listNamesById = useMemo(() => new Map(lists.map((list) => [list.id, list.name])), [lists]);
+  const listNameOf = (item: TodoItem) => (selectedListId === ALL_LISTS_ID && filter !== "trash"
+    ? listNamesById.get(item.listId ?? "")
+    : undefined);
+
   useEffect(() => {
     if (selectedTag && !availableTags.some((tag) => normalizeTagForComparison(tag) === normalizeTagForComparison(selectedTag))) {
       setSelectedTag("");
@@ -785,7 +877,7 @@ function TodoTool() {
           ))}
           {visibleItems.length === 0 ? <div className="todo-empty">没有任务</div> : visibleItems.map((item) => (
             <div ref={(node) => { itemRefs.current[item.id] = node; }} className={`todo-item${item.status === "completed" ? " is-completed" : ""}${editingId === item.id ? " is-editing" : ""}${focusedTodoId === item.id ? " is-focused" : ""}${dragId === item.id ? " is-dragging" : ""}${dragOverId === item.id ? (dragOverBefore ? " is-drag-over-before" : " is-drag-over-after") : ""}`} key={item.id}>
-              <div className={`todo-item-row${canDrag ? " is-draggable" : ""}`} draggable={canDrag} onDragStart={(event) => handleDragStart(event, item.id)} onDragOver={(event) => handleDragOver(event, item.id)} onDragEnd={() => void handleDragEnd()}><button className="todo-check" aria-label={filter === "trash" ? "恢复任务" : item.status === "completed" ? "取消完成" : "完成任务"} onClick={() => filter === "trash" ? void undoDelete(item) : void toggleTodo(item)}><Icon name="Check" size={13} /></button><button className="todo-item-main" onClick={() => { if (editingId !== item.id) setExpandedId(expandedId === item.id ? null : item.id); }}><span className="todo-item-title">{item.title}</span><span className="todo-item-summary">{item.priority && item.priority !== "normal" && <span className={`todo-priority priority-${item.priority}`}>{item.priority === "urgent" ? "紧急" : item.priority === "high" ? "高" : "低"}</span>}{item.dueAt && <span className={`todo-due${new Date(item.dueAt) < new Date() && item.status === "active" ? " is-overdue" : ""}`}>{formatDue(item.dueAt)}</span>}</span></button><div className="todo-item-actions">{filter === "trash" ? <button className="todo-edit" aria-label="恢复任务" onClick={() => void undoDelete(item)}><Icon name="Undo2" size={13} /></button> : <><button className={`todo-edit${activeFocusTodoId === item.id ? " is-active-focus" : ""}`} aria-label="开始专注" onClick={() => void startFocus(item.id)}><Icon name="Timer" size={13} /></button><button className="todo-edit" aria-label="编辑任务" onClick={() => startEditing(item)}><Icon name="Pencil" size={13} /></button><button className="todo-delete" aria-label="删除任务" onClick={() => void removeTodo(item.id)}><Icon name="Trash2" size={14} /></button></>}</div></div>
+              <div className={`todo-item-row${canDrag ? " is-draggable" : ""}`} draggable={canDrag} onDragStart={(event) => handleDragStart(event, item.id)} onDragOver={(event) => handleDragOver(event, item.id)} onDrop={(event) => void handleDrop(event, item.id)} onDragEnd={() => void handleDragEnd()}><button className="todo-check" aria-label={filter === "trash" ? "恢复任务" : item.status === "completed" ? "取消完成" : "完成任务"} onClick={() => filter === "trash" ? void undoDelete(item) : void toggleTodo(item)}><Icon name="Check" size={13} /></button><button className="todo-item-main" onClick={() => { if (editingId !== item.id) setExpandedId(expandedId === item.id ? null : item.id); }}><span className="todo-item-title">{item.title}</span><span className="todo-item-summary">{item.priority && item.priority !== "normal" && <span className={`todo-priority priority-${item.priority}`}>{item.priority === "urgent" ? "紧急" : item.priority === "high" ? "高" : "低"}</span>}{item.dueAt && <span className={`todo-due${new Date(item.dueAt) < new Date() && item.status === "active" ? " is-overdue" : ""}`}>{formatDue(item.dueAt)}</span>}{listNameOf(item) && <span className="todo-item-list" title={listNameOf(item)}>{listNameOf(item)}</span>}</span></button><div className="todo-item-actions">{filter === "trash" ? <button className="todo-edit" aria-label="恢复任务" onClick={() => void undoDelete(item)}><Icon name="Undo2" size={13} /></button> : <><button className={`todo-edit${activeFocusTodoId === item.id ? " is-active-focus" : ""}`} aria-label="开始专注" onClick={() => void startFocus(item.id)}><Icon name="Timer" size={13} /></button><button className="todo-edit" aria-label="编辑任务" onClick={() => startEditing(item)}><Icon name="Pencil" size={13} /></button><button className="todo-delete" aria-label="删除任务" onClick={() => void removeTodo(item.id)}><Icon name="Trash2" size={14} /></button></>}</div></div>
               {expandedId === item.id && (editingId === item.id ? <div className="todo-item-details todo-edit-fields"><input aria-label="编辑任务标题" value={editTitle} onChange={(event) => setEditTitle(event.target.value)} maxLength={500} /><textarea aria-label="编辑任务备注" value={editNotes} onChange={(event) => setEditNotes(event.target.value)} maxLength={2000} placeholder="备注（可选）" /><div className="todo-edit-grid"><select aria-label="编辑任务优先级" value={editPriority} onChange={(event) => setEditPriority(event.target.value as TodoPriority)}><option value="normal">普通优先级</option><option value="low">低优先级</option><option value="high">高优先级</option><option value="urgent">紧急</option></select><select aria-label="编辑任务重复" value={editRepeatRule} onChange={(event) => setEditRepeatRule(event.target.value as TodoRepeatRule)}><option value="none">不重复</option><option value="daily">每天</option><option value="weekly">每周</option><option value="workdays">工作日</option></select><input aria-label="编辑任务标签" value={editTags} onChange={(event) => setEditTags(event.target.value)} placeholder="标签，用逗号分隔" /><select aria-label="编辑任务清单" value={editListId} onChange={(event) => setEditListId(event.target.value)}><option value="">无清单</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select></div><div className="todo-date-row">{renderDateField("截止", editDueAt, setEditDueAt)}{renderDateField("提醒", editRemindAt, setEditRemindAt)}</div><div className="todo-edit-buttons"><button onClick={() => void saveEditing(item.id)}>保存</button><button onClick={() => { setEditingId(null); setExpandedId(null); }}>取消</button></div></div> : <div className="todo-item-details">{item.notes && <div>{item.notes}</div>}{item.remindAt ? `提醒 ${formatDue(item.remindAt)}` : "未设置提醒"}</div>)}
             </div>
           ))}

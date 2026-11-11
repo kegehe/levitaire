@@ -20,7 +20,8 @@ export type ToolIconName =
   | "GripVertical"
   | "Grid3x3"
   | "StickyNote"
-  | "Broom";
+  | "Broom"
+  | "Files";
 
 interface ToolIconProps {
   name: ToolIconName;
@@ -211,6 +212,15 @@ function ToolIcon({ name, size = 20, className = "", style }: ToolIconProps) {
           <path d="M6 3.5h9l4 4V20.5H6z" />
           <path d="M15 3.5V7.5h4" />
           <path d="M9 12h6M9 15.5h6M9 9h2.5" />
+        </svg>
+      );
+
+    case "Files":
+      return (
+        <svg {...common}>
+          <path d="M7 3.5h6l4 4V20.5H7z" />
+          <path d="M13 3.5V7.5h4" />
+          <path d="M4 13.5h7.5M4 17h7.5" />
         </svg>
       );
 

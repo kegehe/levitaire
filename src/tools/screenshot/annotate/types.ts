@@ -55,12 +55,15 @@ export interface NumberAnnotation extends BaseAnnotation {
   n: number;
 }
 
+/**
+ * 马赛克是「画笔式」的：沿涂抹路径把底图打码，不再用矩形框选。
+ * 因此几何与 BrushAnnotation 同构（points），strokeWidth 就是涂抹直径，
+ * 打码强度由 blockSize 决定。为什么不做框选：框选只有落笔/松手两帧能看出范围，
+ * 中途和提交后都只剩色块、看不到边界，用户无从判断打码区域（见 render.ts drawMosaic）。
+ */
 export interface MosaicAnnotation extends BaseAnnotation {
   kind: "mosaic";
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+  points: { x: number; y: number }[]; // 至少 2 点
   blockSize: number; // 降采样块大小，物理像素
 }
 
@@ -113,13 +116,23 @@ export interface ToolStyle {
 
 export type ToolStyles = Record<ToolKind, ToolStyle>;
 
+/**
+ * 马赛克的涂抹直径。默认值比描边工具粗一倍：马赛克要盖住一片内容，
+ * 5px 的涂抹直径在高 DPI 下只剩 2~3 CSS px，几乎看不出打码效果。
+ */
+export const DEFAULT_MOSAIC_STROKE_WIDTH = 16;
+
+/** 马赛克块大小（物理像素）。块越大越糊，10px 在 1× 下已足够让文字不可读。 */
+export const MOSAIC_BLOCK_SIZE = 10;
+
 export const DEFAULT_TOOL_STYLES: ToolStyles = {
   rect: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
   arrow: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
   brush: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
   text: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
   number: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
-  mosaic: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_STROKE_WIDTH },
+  // 马赛克不用颜色（只打码不染色），线宽是涂抹直径
+  mosaic: { color: DEFAULT_COLOR, strokeWidth: DEFAULT_MOSAIC_STROKE_WIDTH },
 };
 
 /**

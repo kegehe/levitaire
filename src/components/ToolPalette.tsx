@@ -31,6 +31,7 @@ import {
   ensureUtilityHubWindow,
   ensureStickyNotesManagerWindow,
   ensureSystemCleanerWindow,
+  ensureFileShelfWindow,
   waitForNewMonitorWindowReady,
 } from "../utils/toolWindows";
 import { clampWindowToWorkArea } from "../utils/panelWindow";
@@ -64,6 +65,8 @@ const TOOL_COLORS: Record<string, string> = {
   "quick-input": "#b14fbf",
   "sticky-notes": "#d99a1b",
   "system-cleaner": "#d06a3a",
+  // 石板蓝：与 timer 紫的最小色差约 17.7，与 text-toolbar 蓝约 19.7
+  "file-shelf": "#445c8a",
 };
 
 /** 面板分组顺序。
@@ -560,6 +563,16 @@ function ToolPalette() {
         } else if (tool.id === "sticky-notes") {
           await ensureStickyNotesManagerWindow();
           await invoke("show_sticky_notes_manager");
+          await hidePalette();
+        } else if (tool.id === "file-shelf") {
+          try {
+            await ensureFileShelfWindow();
+            await invoke("show_file_shelf");
+          } catch (err) {
+            console.error("show_file_shelf 失败:", err);
+            setActivateError(`文件暂存架启动失败: ${err}`);
+            return;
+          }
           await hidePalette();
         } else if (tool.id === "quick-input") {
           // 点击「快速输入」卡片：切换唤起/关闭转盘（语义与触发键单击一致）

@@ -235,6 +235,9 @@ pub struct AppConfig {
     /// 缺了它，palette 的「全部关闭」就只改前端勾选、关不掉已打开的通用工具窗口。
     #[serde(default = "default_utility_hub_enabled")]
     pub utility_hub_enabled: bool,
+    /// 文件暂存架是否启用。默认 false，避免升级后凭空多出一扇常驻窗口。
+    #[serde(default)]
+    pub file_shelf_enabled: bool,
 }
 
 fn default_quick_input_enabled() -> bool {
@@ -434,6 +437,7 @@ impl Default for AppConfig {
             quick_input_sound_volume: default_quick_input_sound_volume(),
             sticky_notes_enabled: false,
             utility_hub_enabled: default_utility_hub_enabled(),
+            file_shelf_enabled: false,
         }
     }
 }
@@ -640,13 +644,6 @@ impl ConfigManager {
                 accent: c.theme_accent.clone(),
                 scheme: c.theme_scheme.clone(),
             })
-    }
-
-    pub fn get_orb_icon(&self) -> Result<String, String> {
-        self.config
-            .lock()
-            .map_err(|e| format!("获取配置锁失败: {}", e))
-            .map(|c| c.orb_icon.clone())
     }
 
     pub fn update_orb_icon(&self, icon: String) -> Result<(), String> {
@@ -1781,6 +1778,24 @@ impl ConfigManager {
             .map(|c| c.utility_hub_enabled)
     }
 
+    pub fn get_file_shelf_enabled(&self) -> Result<bool, String> {
+        self.config
+            .lock()
+            .map_err(|e| format!("获取配置锁失败: {}", e))
+            .map(|c| c.file_shelf_enabled)
+    }
+
+    pub fn update_file_shelf_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|e| format!("获取配置锁失败: {}", e))?;
+            config.file_shelf_enabled = enabled;
+        }
+        self.save_config()
+    }
+
     /// 更新通用工具启用状态并持久化
     pub fn update_utility_hub_enabled(&self, enabled: bool) -> Result<(), String> {
         {
@@ -1999,6 +2014,14 @@ mod tests {
         // 通用工具默认启用：与 registry 的 defaultEnabled 一致，否则升级后
         // 老用户的「通用工具」会在首次同步后端真值时被静默取消勾选。
         assert!(config.utility_hub_enabled);
+        assert!(!config.file_shelf_enabled);
+    }
+
+    #[test]
+    fn test_app_config_file_shelf_enabled_defaults_false_for_legacy_config() {
+        let json = r#"{"ai":{"api_key":"","base_url":"","model":"","api_type":"anthropic"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.file_shelf_enabled);
     }
 
     #[test]
@@ -2100,10 +2123,10 @@ mod tests {
         };
 
         assert!(manager.update_orb_icon("invalid".to_string()).is_err());
-        assert_eq!(manager.get_orb_icon().unwrap(), "jellyfish");
+        assert_eq!(manager.config.lock().unwrap().orb_icon, "jellyfish");
 
         manager.update_orb_icon("rocket".to_string()).unwrap();
-        assert_eq!(manager.get_orb_icon().unwrap(), "rocket");
+        assert_eq!(manager.config.lock().unwrap().orb_icon, "rocket");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

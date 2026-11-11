@@ -145,6 +145,16 @@ export const FLOATING_TOOLS: FloatingTool[] = [
     loader: () => import("./system-cleaner/SystemCleanerTool"),
     activation: "immediate",
   },
+  {
+    id: "file-shelf",
+    name: "文件暂存架",
+    icon: "Files",
+    description: "把文件先放在手边，再拖进别的窗口。原文件留在原地，拖出时是复制。",
+    category: "system",
+    defaultEnabled: false,
+    loader: () => import("./file-shelf/FileShelf"),
+    activation: "immediate",
+  },
 ];
 
 /** 类别显示名 */
@@ -194,6 +204,11 @@ export const BACKEND_TOOLS: ReadonlyArray<{ id: string; getter: string; setter: 
     id: "system-cleaner",
     getter: "get_system_cleaner_enabled",
     setter: "set_system_cleaner_enabled",
+  },
+  {
+    id: "file-shelf",
+    getter: "get_file_shelf_enabled",
+    setter: "set_file_shelf_enabled",
   },
 ];
 

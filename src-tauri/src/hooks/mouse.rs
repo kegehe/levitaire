@@ -4,12 +4,13 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CopyIcon, DestroyIcon, GetMessageW, GetWindowRect, LoadCursorW,
-    PostThreadMessageW, SetCursor, SetSystemCursor, SetWindowsHookExW, UnhookWindowsHookEx,
-    HCURSOR, HHOOK, HICON, ICONINFO, IDC_ARROW, MSG, OCR_NORMAL, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+    CallNextHookEx, CopyIcon, DestroyIcon, GetMessageW, GetWindowRect, IsWindowVisible,
+    LoadCursorW, PostThreadMessageW, SetCursor, SetSystemCursor, SetWindowsHookExW,
+    UnhookWindowsHookEx, HCURSOR, HHOOK, HICON, ICONINFO, IDC_ARROW, MSG, OCR_NORMAL, WH_MOUSE_LL,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
 
@@ -28,11 +29,18 @@ struct HookState {
     /// 悬浮球窗口是否可见。隐藏后即使 orb_hwnd 仍存在
     /// （GetWindowRect 对隐藏窗口也返回其矩形），也不再把该区域点击
     /// 当作悬浮球交互，避免隐藏状态下点击原位置仍弹出工具面板。
+    ///
+    /// 初值必须是 false：窗口在 tauri.conf.json 里以 `visible: false` 创建，
+    /// 只有前端真正 show() 后才存在可点击的球（由 mark_orb_ready 按真实可见性回写）。
+    /// 若初值为 true，前端显示失败时会留下「看不见但仍能点」的隐形热区。
     orb_visible: AtomicBool,
     /// 二维码预览模式：为 true 时点击工具栏外部不隐藏窗口
     qrcode_preview: AtomicBool,
     /// 截图模式：为 true 时跳过选区检测，避免截图遮罩上的拖拽误触发文字工具栏
     screenshot_mode: AtomicBool,
+    /// 截图标注的文字输入框是否正在输入。为 true 时全局 Esc 只取消这段文字，
+    /// 不结束整个截图会话（输入框的关闭由前端 keydown 处理）。
+    screenshot_text_editing: AtomicBool,
     smart_screenshot_mode: AtomicBool,
     /// 录制模式：为 true 时跳过选区检测，避免录制遮罩上的拖拽误触发文字工具栏
     recording_mode: AtomicBool,
@@ -100,9 +108,10 @@ static STATE: HookState = HookState {
     orb_hwnd: AtomicPtr::new(std::ptr::null_mut()),
     utility_hub_hwnd: AtomicPtr::new(std::ptr::null_mut()),
     toolbar_visible: AtomicBool::new(false),
-    orb_visible: AtomicBool::new(true),
+    orb_visible: AtomicBool::new(false),
     qrcode_preview: AtomicBool::new(false),
     screenshot_mode: AtomicBool::new(false),
+    screenshot_text_editing: AtomicBool::new(false),
     smart_screenshot_mode: AtomicBool::new(false),
     recording_mode: AtomicBool::new(false),
     text_toolbar_enabled: AtomicBool::new(true),
@@ -207,6 +216,50 @@ fn is_point_on_orb(hwnd_ptr: *mut std::ffi::c_void, x: i32, y: i32) -> bool {
     is_point_in_window_rect(hwnd_ptr, x, y)
 }
 
+/// 窗口是否**真实可见**（自身及祖先都带 WS_VISIBLE）。
+///
+/// 钩子里的 `orb_visible` 只是「我们以为」的状态，任何一条显隐路径漏同步都会让它
+/// 与画面脱节；而 `GetWindowRect` 对隐藏窗口仍返回矩形 —— 两者叠加就是「球看不见，
+/// 但原位置点击仍弹工具面板」。命中判定前问一次 Windows，作为最后一道兜底。
+fn is_window_visible(hwnd_ptr: *mut std::ffi::c_void) -> bool {
+    if hwnd_ptr.is_null() {
+        return false;
+    }
+    unsafe { IsWindowVisible(HWND(hwnd_ptr)).as_bool() }
+}
+
+/// 窗口是否被 DWM cloaked（典型场景：窗口在**别的虚拟桌面**上）。
+///
+/// `WS_VISIBLE` 表达的是「窗口被显示过」，不是「它此刻在这块屏幕上」：用户切到
+/// 另一个虚拟桌面后，悬浮球仍带 WS_VISIBLE、矩形也不变，只有 DWM 的 cloaked 状态
+/// 能反映它已经不可见。少了这层，切桌面后原坐标点击仍会命中球的隐形热区。
+///
+/// 查询失败按「未 cloaked」处理（fail-open）：DWM 异常时宁可多认一次球，
+/// 也不能让球从此点不动。
+fn is_window_cloaked(hwnd_ptr: *mut std::ffi::c_void) -> bool {
+    if hwnd_ptr.is_null() {
+        return false;
+    }
+    let mut cloaked = 0u32;
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            HWND(hwnd_ptr),
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    result.is_ok() && cloaked != 0
+}
+
+/// 窗口此刻是否真的可能被用户点到：可见，且不在别的虚拟桌面上。
+///
+/// 只在点击判定里调用：`DwmGetWindowAttribute` 比 `IsWindowVisible` 贵，
+/// 鼠标移动的热区刷新只走 `is_window_visible` 就够了（cloaked 的球不会被点）。
+fn is_window_clickable(hwnd_ptr: *mut std::ffi::c_void) -> bool {
+    is_window_visible(hwnd_ptr) && !is_window_cloaked(hwnd_ptr)
+}
+
 /// 悬浮球视觉球半径对应的交互热区半径（逻辑像素）= 球半径 28（`--orb-size` 56 / 2）+ 2px 容差，
 /// 覆盖 hover 放大（scale 1.05 → 半径约 29.4px）后的球边缘。
 /// 与前端 `FloatingOrb.tsx::isPointWithinOrb` 的 `rect.width / 2 + 2` 同源。
@@ -247,6 +300,10 @@ fn orb_ignore_cursor_events(inside: bool) -> bool {
 /// 点击球外透明留白/角落不再被视为点击悬浮球，避免误触弹面板或拖动。
 fn is_point_in_orb_circle(hwnd_ptr: *mut std::ffi::c_void, x: i32, y: i32) -> bool {
     if hwnd_ptr.is_null() {
+        return false;
+    }
+    // 隐藏的球没有热区：隐藏后矩形仍然存在，只看矩形会把原位置变成隐形热区。
+    if !is_window_visible(hwnd_ptr) {
         return false;
     }
     unsafe {
@@ -696,6 +753,8 @@ fn target_cursor() -> Option<HCURSOR> {
 // ─── 公共 API ──────────────────────────────────────────────────
 
 pub fn start_hook(app_handle: tauri::AppHandle) {
+    // 全局「开始拖文件」探测：拖放开始时给暂存架发引导动画（与钩子共用按下/抬起事件）。
+    crate::shelf::start_drag_watch(app_handle.clone());
     let (tx, rx) = mpsc::channel::<HookEvent>();
 
     STATE.sender.set(tx).expect("SENDER already initialized");
@@ -722,6 +781,8 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
         while let Ok(event) = rx.recv() {
             match event {
                 HookEvent::MouseUp => {
+                    // 与按下对称：无论这次点击落到哪个分支，都要退出暂存架的「待放入」状态。
+                    crate::shelf::note_mouse_up(&app);
                     // 先取出并**立即**清除「按下落在球圆形热区」标志。
                     //
                     // 为什么必须在松手时清：WM_MOUSEMOVE 的上报门控要求它为 false（拖球期间
@@ -801,16 +862,21 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     // settings 延迟创建且关闭后仅隐藏（窗口对象仍存在），故需 is_visible 守卫：
                     // 否则隐藏窗口仍保留最后的屏幕矩形，会让该区域内的正常拖选被误排除。
                     // 置于 text_toolbar_enabled 检查之后：开关关闭时选区检测本就跳过，无需查询。
+                    // 暂存架上拖出一行看起来也像拖选，不排除的话会模拟 Ctrl+C。
                     let down_in_own_window = down_valid
-                        && ["settings", "utility-hub-overlay"].iter().any(|label| {
-                            app.get_webview_window(label).is_some_and(|win| {
-                                win.is_visible().unwrap_or(false)
-                                    && win
-                                        .hwnd()
-                                        .map(|hwnd| is_point_in_window_rect(hwnd.0, down_x, down_y))
-                                        .unwrap_or(false)
-                            })
-                        });
+                        && ["settings", "utility-hub-overlay", "file-shelf-overlay"]
+                            .iter()
+                            .any(|label| {
+                                app.get_webview_window(label).is_some_and(|win| {
+                                    win.is_visible().unwrap_or(false)
+                                        && win
+                                            .hwnd()
+                                            .map(|hwnd| {
+                                                is_point_in_window_rect(hwnd.0, down_x, down_y)
+                                            })
+                                            .unwrap_or(false)
+                                })
+                            });
                     if down_in_own_window {
                         continue;
                     }
@@ -930,6 +996,7 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
                     {
                         continue;
                     }
+                    crate::shelf::note_mouse_down(x, y);
                     STATE.mouse_down_x.store(x, Ordering::SeqCst);
                     STATE.mouse_down_y.store(y, Ordering::SeqCst);
                     STATE.mouse_down_valid.store(true, Ordering::SeqCst);
@@ -945,9 +1012,13 @@ pub fn start_hook(app_handle: tauri::AppHandle) {
 
                     let orb_hwnd = STATE.orb_hwnd.load(Ordering::SeqCst);
                     // 悬浮球隐藏时（GetWindowRect 仍会返回其矩形），不把该位置点击
-                    // 当作悬浮球交互，否则隐藏状态下点击原位置会触发 orb-mouseup 弹面板
-                    let on_orb =
-                        STATE.orb_visible.load(Ordering::SeqCst) && is_point_on_orb(orb_hwnd, x, y);
+                    // 当作悬浮球交互，否则隐藏状态下点击原位置会触发 orb-mouseup 弹面板。
+                    // 除标志外再问一次真实可见性（含 cloaked：球可能在别的虚拟桌面上）：
+                    // 显隐入口虽已统一，这一层保证即使将来新增路径漏同步标志，也不会
+                    // 重新出现隐形热区。矩形判定放最前，球外点击不必再查 DWM。
+                    let on_orb = STATE.orb_visible.load(Ordering::SeqCst)
+                        && is_point_on_orb(orb_hwnd, x, y)
+                        && is_window_clickable(orb_hwnd);
                     STATE.mouse_down_on_orb.store(on_orb, Ordering::SeqCst);
                     // 圆形热区精确判定：仅落在视觉球内才在 mouseup 触发 orb 交互，
                     // 避免点击透明留白/角落误弹面板
@@ -1568,6 +1639,9 @@ pub fn set_screenshot_mode(active: bool) {
     }
     // 退出截图模式时重置鼠标按下残留状态，避免下次 MouseUp 误判
     if !active {
+        // 会话结束（含全局 Esc 取消）时清掉文字输入标记，避免残留到下一次截图：
+        // 残留为 true 会让下一次截图里的 Esc 失效。
+        STATE.screenshot_text_editing.store(false, Ordering::SeqCst);
         STATE.mouse_down_valid.store(false, Ordering::SeqCst);
         STATE.mouse_down_on_orb.store(false, Ordering::SeqCst);
         STATE
@@ -1619,6 +1693,17 @@ pub fn is_smart_screenshot_mode() -> bool {
 /// 查询当前是否处于截图模式（供键盘钩子监听 Esc 时判断）
 pub fn is_screenshot_mode() -> bool {
     STATE.screenshot_mode.load(Ordering::SeqCst)
+}
+
+/// 标注文字输入框的输入状态：为 true 时全局 Esc 不结束截图会话。
+pub fn set_screenshot_text_editing(active: bool) {
+    STATE
+        .screenshot_text_editing
+        .store(active, Ordering::SeqCst);
+}
+
+pub fn is_screenshot_text_editing() -> bool {
+    STATE.screenshot_text_editing.load(Ordering::SeqCst)
 }
 
 /// 文字工具栏启用开关：关闭后拖拽选中文本不再触发 selection-found / 弹出工具栏
@@ -1936,6 +2021,31 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
 mod tests {
     use super::*;
 
+    /// 去掉行注释后再交给源码哨兵：否则「把调用写进注释、实现里已删掉」会骗过断言。
+    ///
+    /// 只剥 `//` 到行尾。字符串里的 `//`（URL 等）也会被剥掉，但哨兵只关心代码
+    /// 片段，误剥不影响结论。
+    fn code_only(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(index) => &line[..index],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 取 `signature` 之后的函数体（到行首 `}` 为止）。
+    fn body_after<'a>(source: &'a str, signature: &str) -> &'a str {
+        let rest = source
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} 被改名/删除了 —— 请同步本守卫"));
+        let body_end = rest.find("\n}").map(|i| i + 1).unwrap_or(rest.len());
+        &rest[..body_end]
+    }
+
     #[test]
     fn test_cooldown_constant() {
         assert_eq!(COOLDOWN_MS, 300);
@@ -1957,6 +2067,62 @@ mod tests {
     fn test_is_point_in_orb_circle_null_hwnd() {
         // null HWND 应返回 false
         assert!(!is_point_in_orb_circle(std::ptr::null_mut(), 100, 100));
+    }
+
+    #[test]
+    fn test_is_window_visible_null_hwnd() {
+        assert!(!is_window_visible(std::ptr::null_mut()));
+    }
+
+    #[test]
+    fn test_is_window_cloaked_null_hwnd() {
+        // null 不是窗口：按「未 cloaked」处理（fail-open）
+        assert!(!is_window_cloaked(std::ptr::null_mut()));
+    }
+
+    /// 源码级哨兵：点击命中球时必须再问一次真实可交互性。
+    ///
+    /// 只靠 `orb_visible` 标志不够 —— 任何一条显隐路径漏同步，隐藏的球就会在
+    /// 原位置继续吃点击（弹工具面板）。这条测试把兜底钉在 MouseDown 的判定里。
+    #[test]
+    fn orb_click_requires_real_window_visibility() {
+        let source = code_only(include_str!("mouse.rs"));
+        let rest = source
+            .split("let on_orb =")
+            .nth(1)
+            .expect("on_orb 判定被改名/删除了 —— 请同步本守卫");
+        let expr = &rest[..rest.find(';').expect("on_orb 判定应以分号结尾")];
+        assert!(
+            expr.contains("is_window_clickable(orb_hwnd)"),
+            "on_orb 必须要求窗口真实可点（可见且不在别的虚拟桌面），\
+             否则隐藏的球会在原位置继续弹面板"
+        );
+    }
+
+    /// 「可见」之外还要排除 cloaked：别的虚拟桌面上的球 WS_VISIBLE 仍为真。
+    #[test]
+    fn window_clickable_requires_visibility_and_not_cloaked() {
+        let source = code_only(include_str!("mouse.rs"));
+        let body = body_after(&source, "fn is_window_clickable");
+        assert!(
+            body.contains("is_window_visible("),
+            "is_window_clickable 必须包含真实可见性判定"
+        );
+        assert!(
+            body.contains("is_window_cloaked("),
+            "is_window_clickable 必须排除 cloaked 窗口（例如位于别的虚拟桌面）"
+        );
+    }
+
+    /// 圆形热区同理：隐藏窗口没有热区（GetWindowRect 对隐藏窗口仍返回矩形）。
+    #[test]
+    fn orb_circle_hit_test_requires_visible_window() {
+        let source = code_only(include_str!("mouse.rs"));
+        let body = body_after(&source, "fn is_point_in_orb_circle");
+        assert!(
+            body.contains("is_window_visible(hwnd_ptr)"),
+            "圆形热区必须先确认窗口可见，不能只信缓存标志 + 窗口矩形"
+        );
     }
 
     #[test]
@@ -2009,16 +2175,11 @@ mod tests {
     /// 前端 `FloatingOrb.tsx::isPointWithinOrb` 用元素实际 rect 的中心，两端同源。
     #[test]
     fn orb_center_is_window_center() {
-        let src = include_str!("mouse.rs");
-        let rest = src
-            .split("fn is_point_in_orb_circle")
-            .nth(1)
-            .expect("is_point_in_orb_circle 被改名/删除了 —— 请同步本守卫");
+        let source = code_only(include_str!("mouse.rs"));
         // 只认行首的收尾 `}`，不写死尾随换行：CI 检出的是 CRLF（仓库无 `.gitattributes`
         // 且 `core.autocrlf=true`），`"\n}\n"` 匹配不到会让 body 顺着 `unwrap_or` 退化成
         // 整段剩余源码 —— 断言随之变宽、恒真，守卫静默失效。
-        let body_end = rest.find("\n}").map(|i| i + 1).unwrap_or(rest.len());
-        let body = &rest[..body_end];
+        let body = body_after(&source, "fn is_point_in_orb_circle");
         assert!(
             body.contains("let cx = (rect.left as f64 + rect.right as f64) / 2.0;"),
             "球心必须取窗口矩形中心（球由 #root 的 flex 居中在窗口里）"
@@ -2049,12 +2210,8 @@ mod tests {
     /// 的 30 逻辑大 12px —— 球外一圈会被误判成「点在球上」。
     #[test]
     fn orb_hit_radius_uses_height_not_width() {
-        let source = include_str!("mouse.rs");
-        let after = source
-            .split("fn is_point_in_orb_circle")
-            .nth(1)
-            .expect("is_point_in_orb_circle 不见了：本哨兵依赖它仍在 mouse.rs 内");
-        let body = &after[..after.find("\n}").unwrap_or(after.len())];
+        let source = code_only(include_str!("mouse.rs"));
+        let body = body_after(&source, "fn is_point_in_orb_circle");
         assert!(
             body.contains("let height_px = (rect.bottom - rect.top) as f64;")
                 && body.contains("orb_hit_radius_px(height_px)"),

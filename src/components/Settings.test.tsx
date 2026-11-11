@@ -34,7 +34,8 @@ describe("Settings 悬浮窗位置恢复", () => {
     // 悬浮球 / 系统监控 / 时间工具 / 待办清单 / 系统清理 / 便利贴
     expect(screen.getAllByText("系统清理").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("便利贴").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByRole("button", { name: "恢复默认位置" })).toHaveLength(6);
+    expect(screen.getAllByText("文件暂存架").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByRole("button", { name: "恢复默认位置" })).toHaveLength(7);
     expect(screen.getByRole("button", { name: "全部恢复默认位置" })).toBeInTheDocument();
   });
 
@@ -47,7 +48,7 @@ describe("Settings 悬浮窗位置恢复", () => {
     const hint = screen.getByText(/会记住上次拖拽的位置/);
     // 文案由 WINDOW_POSITION_TARGETS 派生，顺序、顿号分隔与名称都应与下方入口一致
     expect(hint.textContent).toMatch(
-      /^悬浮球、系统监控、时间工具、待办清单、系统清理、便利贴会记住/,
+      /^悬浮球、系统监控、时间工具、待办清单、系统清理、便利贴、文件暂存架会记住/,
     );
     expect(hint.textContent).not.toContain("番茄钟");
   });
@@ -194,6 +195,87 @@ describe("Settings 悬浮窗位置恢复", () => {
         { label: "第一条", text: "first" },
       ]),
     });
+  });
+
+  it("预设词保存失败时回滚列表并保留未提交的输入", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_history_limit") return Promise.resolve(5);
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_snippets_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_snippets")
+        return Promise.resolve(JSON.stringify([{ label: "第一条", text: "first" }]));
+      if (command === "set_quick_input_snippets")
+        return Promise.reject(new Error("write failed"));
+      return Promise.resolve("");
+    });
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "快速输入" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textInput = screen.getByPlaceholderText("输入文本…");
+    fireEvent.change(textInput, { target: { value: "新增内容" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "添加" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // 界面回滚到保存前的列表，并提示失败
+    const rows = document.querySelectorAll(".qi-snippet-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("第一条");
+    expect(screen.getByText("保存失败")).toBeInTheDocument();
+    // 输入内容保留，便于用户重试
+    expect(textInput).toHaveValue("新增内容");
+  });
+
+  it("预设词保存失败回滚后，编辑行仍指向原来那条预设词", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_quick_input_history_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_history_limit") return Promise.resolve(5);
+      if (command === "get_quick_input_history") return Promise.resolve([]);
+      if (command === "get_quick_input_snippets_enabled") return Promise.resolve(true);
+      if (command === "get_quick_input_snippets")
+        return Promise.resolve(
+          JSON.stringify([
+            { label: "第一条", text: "first" },
+            { label: "第二条", text: "second" },
+          ]),
+        );
+      if (command === "set_quick_input_snippets")
+        return Promise.reject(new Error("write failed"));
+      return Promise.resolve("");
+    });
+    render(<Settings />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "快速输入" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // 编辑第二条，随后删除第一条：编辑索引会乐观前移，回滚后必须仍指向第二条
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[1]);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(document.querySelectorAll(".qi-snippet-row")).toHaveLength(2);
+    // 编辑行必须仍位于第二条的位置；仅比对输入框内容无法发现索引指错行
+    const rows = Array.from(document.querySelectorAll(".qi-snippet-row"));
+    expect(rows[1].classList.contains("qi-snippet-editing")).toBe(true);
+    expect(rows[0]).toHaveTextContent("第一条");
+    expect(rows[1].querySelectorAll("input")[1]).toHaveValue("second");
   });
 
   it("点击全部恢复按钮时逐个恢复所有悬浮窗", async () => {

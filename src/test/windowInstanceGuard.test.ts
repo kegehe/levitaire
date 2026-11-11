@@ -36,6 +36,7 @@ const WINDOW_COMPONENTS = [
   "src/tools/sticky-note/StickyNote.tsx",
   "src/tools/sticky-note/StickyNoteManager.tsx",
   "src/tools/system-monitor/SystemMonitor.tsx",
+  "src/tools/file-shelf/FileShelf.tsx",
 ];
 
 const memoForm = "useMemo(() => getCurrentWebviewWindow(), [])";

@@ -13,25 +13,49 @@ pub fn clipboard_read_text(clipboard: State<'_, ClipboardManager>) -> Result<Str
     clipboard.get_text().map_err(|e| e.to_string())
 }
 
+/// 悬浮球显隐的**唯一入口**：原生窗口与钩子热区状态必须一起变。
+///
+/// 以操作后的真实 `is_visible()` 回写钩子标志，而不是沿用调用方的意图 ——
+/// 窗口创建/显示失败、或某条路径只动了窗口没动标志时，热区都不会与画面脱节。
+/// 「隐藏后点击原位置仍弹面板」和「球显示着却点不动」两种不一致都在这里收敛。
+pub fn apply_orb_visibility(app: &tauri::AppHandle, visible: bool) {
+    let actual = match app.get_webview_window("orb") {
+        Some(window) => {
+            let result = if visible {
+                let shown = window.show();
+                // 记忆位置恢复后球会重新置顶；与会话恢复路径保持同一行为。
+                if shown.is_ok() {
+                    let _ = window.set_always_on_top(true);
+                }
+                shown
+            } else {
+                window.hide()
+            };
+            if let Err(error) = result {
+                crate::utils::logger::log(
+                    "mouse",
+                    &format!("切换悬浮球可见性失败(visible={visible}): {error}"),
+                );
+            }
+            window.is_visible().unwrap_or(false)
+        }
+        None => false,
+    };
+    crate::hooks::set_orb_visible(actual);
+}
+
 #[tauri::command]
 pub fn show_orb(app: tauri::AppHandle) -> Result<(), String> {
     if !is_orb_ready() {
         return Ok(());
     }
-    if let Some(window) = app.get_webview_window("orb") {
-        window.show().map_err(|e| e.to_string())?;
-    }
-    crate::hooks::set_orb_visible(true);
+    apply_orb_visibility(&app, true);
     Ok(())
 }
 
 #[tauri::command]
 pub fn hide_orb(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("orb") {
-        window.hide().map_err(|e| e.to_string())?;
-    }
-    // 隐藏后同步钩子可见状态：避免隐藏状态下点击原位置仍触发 orb 交互（弹面板）
-    crate::hooks::set_orb_visible(false);
+    apply_orb_visibility(&app, false);
     Ok(())
 }
 
@@ -40,15 +64,11 @@ pub fn toggle_orb(app: tauri::AppHandle) -> Result<(), String> {
     if !is_orb_ready() {
         return Ok(());
     }
-    if let Some(window) = app.get_webview_window("orb") {
-        if window.is_visible().unwrap_or(false) {
-            window.hide().map_err(|e| e.to_string())?;
-            crate::hooks::set_orb_visible(false);
-        } else {
-            window.show().map_err(|e| e.to_string())?;
-            crate::hooks::set_orb_visible(true);
-        }
-    }
+    let visible = app
+        .get_webview_window("orb")
+        .map(|window| window.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    apply_orb_visibility(&app, !visible);
     Ok(())
 }
 
@@ -683,6 +703,7 @@ pub async fn navigate_scroll(
 /// 退出应用（悬浮球右键菜单「退出」入口，与托盘菜单 quit 等价）
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
+    crate::utils::logger::log("lifecycle", "exit_app invoked");
     crate::hooks::mouse::stop_color_pick();
     crate::hooks::mouse::stop_window_pin();
     // 置顶状态写在**目标窗口**身上，不主动撤销就会残留 —— 用户会看到几扇「莫名其妙
@@ -703,6 +724,7 @@ pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
 /// 新进程启动时才不会误判「已有实例在跑」而当场自退。
 #[tauri::command]
 pub fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
+    crate::utils::logger::log("lifecycle", "restart_app invoked");
     crate::hooks::mouse::stop_color_pick();
     crate::hooks::mouse::stop_window_pin();
     crate::window_pin::cleanup();
@@ -745,6 +767,7 @@ pub(crate) const RESETTABLE_WINDOW_IDS: &[&str] = &[
     "todo-overlay",
     "system-cleaner-overlay",
     "sticky-notes-manager",
+    "file-shelf-overlay",
 ];
 
 /// 恢复悬浮窗默认位置：清除记忆位置，并将窗口移动到默认定位。

@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { Annotation, ToolKind } from "./types";
+import type { Annotation } from "./types";
 
 // 单数组 + index 指针实现撤销/重做：
 // - items 存全部已提交标注（含 redo 尾巴）；对同一 id 重复提交即形成「版本日志」
@@ -69,11 +69,11 @@ function dedupeById(list: Annotation[]): Annotation[] {
 function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
   switch (a.kind) {
     case "rect":
-    case "mosaic":
       return { ...a, x: a.x + dx, y: a.y + dy };
     case "arrow":
       return { ...a, x1: a.x1 + dx, y1: a.y1 + dy, x2: a.x2 + dx, y2: a.y2 + dy };
     case "brush":
+    case "mosaic":
       return { ...a, points: a.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
     case "text":
     case "number":
@@ -146,8 +146,7 @@ export function useAnnotations(): UseAnnotations {
   }, []);
 
   const getCommitted = useCallback(
-    () =>
-      dedupeById(itemsStateRef.current.items.slice(0, itemsStateRef.current.index)),
+    () => dedupeById(itemsStateRef.current.items.slice(0, itemsStateRef.current.index)),
     [],
   );
   const getDraft = useCallback(() => draftRef.current, []);
@@ -176,9 +175,4 @@ export function useAnnotations(): UseAnnotations {
     getCommitted,
     getDraft,
   };
-}
-
-// 按 tool 类型聚合 committed，便于渲染时无需判 kind 逐个处理
-export function countTool(a: Annotation[], kind: ToolKind): number {
-  return a.filter((x) => x.kind === kind).length;
 }

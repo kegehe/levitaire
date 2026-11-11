@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, act } from "@testing-library/react";
 import { createRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import AnnotationCanvas, {
   annotationCursor,
   type AnnotationCanvasHandle,
 } from "./AnnotationCanvas";
 import { useAnnotations } from "./useAnnotations";
-import type { Annotation } from "./types";
+import { MOSAIC_BLOCK_SIZE, type Annotation } from "./types";
 
 // happy-dom 的 canvas.getContext 返回 null，手动 stub 一个记录调用的 ctx
 function makeStubCtx() {
@@ -30,6 +31,8 @@ function makeStubCtx() {
     fillRect: vi.fn(),
     fillText: vi.fn(() => calls.push("fillText")),
     arc: vi.fn(),
+    // 马赛克把笔迹带当剪裁区用（drawMosaic）
+    clip: vi.fn(() => calls.push("clip")),
     closePath: vi.fn(),
     measureText: vi.fn(() => ({ width: 10 }) as TextMetrics),
     getImageData: vi.fn(() => ({ data: [128, 128, 128, 255] }) as unknown as ImageData),
@@ -361,6 +364,61 @@ describe("AnnotationCanvas", () => {
     expect((ctx as { calls: string[] }).calls).toContain("drawImage");
   });
 
+  it("mosaic 工具：pointerdown→move→up 提交画笔式马赛克（points 而非矩形）", async () => {
+    const { ctx } = setup();
+    let annotations!: ReturnType<typeof useAnnotations>;
+    function Host() {
+      annotations = useAnnotations();
+      return (
+        <AnnotationCanvas
+          image={image}
+          selection={selection}
+          scale={scale}
+          tool="mosaic"
+          color="#E53935"
+          strokeWidth={16}
+          annotations={annotations}
+        />
+      );
+    }
+    const { container } = render(<Host />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = vi.fn(() => ({
+      left: selection.left,
+      top: selection.top,
+      width: selection.width,
+      height: selection.height,
+      right: 110,
+      bottom: 70,
+      x: 10,
+      y: 20,
+      toJSON: () => ({}),
+    })) as never;
+
+    fireEvent.pointerDown(canvas, { clientX: 20, clientY: 30, pointerId: 1 });
+    fireEvent.pointerMove(canvas, { clientX: 40, clientY: 45, pointerId: 1 });
+    fireEvent.pointerUp(canvas, { clientX: 40, clientY: 45, pointerId: 1 });
+
+    expect(annotations!.committed).toHaveLength(1);
+    const a = annotations!.committed[0] as Extract<Annotation, { kind: "mosaic" }>;
+    expect(a.kind).toBe("mosaic");
+    // 采集的是路径（松手不再补点，与画笔一致）
+    expect(a.points).toEqual([
+      { x: 10, y: 10 },
+      { x: 30, y: 25 },
+    ]);
+    expect(a.strokeWidth).toBe(16);
+    expect(a.blockSize).toBe(MOSAIC_BLOCK_SIZE);
+    // 结构上不该再是矩形：以前的马赛克是 x/y/w/h
+    expect("w" in a).toBe(false);
+    // 渲染时确实走了「剪裁笔迹带 + 贴马赛克」
+    expect((ctx as unknown as { calls: string[] }).calls).toContain("clip");
+  });
+
   it("flushBase64 返回非空字符串", async () => {
     setup();
     const ref = createRef<AnnotationCanvasHandle>();
@@ -446,6 +504,62 @@ describe("AnnotationCanvas", () => {
     expect(committed).toHaveLength(1);
     expect(committed[0].kind).toBe("text");
     expect((committed[0] as { text: string }).text).toBe("标注文字");
+  });
+
+  // 回归：文字输入框聚焦时按 Esc，后端全局键盘钩子会先于 textarea 收到按键。
+  // 组件必须把「正在输入文字」告知后端，否则 Esc 会直接结束整个截图会话、丢失已有标注。
+  it("text 工具：Esc 只关闭输入框并放弃文字，且同步告知后端输入状态", async () => {
+    setup();
+    const mockInvoke = vi.mocked(invoke);
+    mockInvoke.mockClear();
+    let annotations!: ReturnType<typeof useAnnotations>;
+    function Host() {
+      annotations = useAnnotations();
+      return (
+        <AnnotationCanvas
+          image={image}
+          selection={selection}
+          scale={scale}
+          tool="text"
+          color="#000000"
+          strokeWidth={5}
+          annotations={annotations}
+        />
+      );
+    }
+    const { container } = render(<Host />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = vi.fn(() => ({
+      left: selection.left,
+      top: selection.top,
+      width: selection.width,
+      height: selection.height,
+      right: 110,
+      bottom: 70,
+      x: 10,
+      y: 20,
+      toJSON: () => ({}),
+    })) as never;
+
+    fireEvent.pointerDown(canvas, { clientX: 20, clientY: 30, pointerId: 1 });
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(textarea).toBeTruthy();
+    // 打开输入框后立即告知后端：输入期间的 Esc 不得结束会话
+    expect(mockInvoke).toHaveBeenCalledWith("set_screenshot_text_editing", { active: true });
+
+    fireEvent.change(textarea, { target: { value: "不要了" } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: "Escape" });
+    });
+
+    // Esc 只是关掉输入框，文字被放弃（不提交）
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(annotations.getCommitted()).toHaveLength(0);
+    expect(mockInvoke).toHaveBeenCalledWith("set_screenshot_text_editing", { active: false });
   });
 
   // 回归：选中标注时手柄会画在显示用 canvas 上，但 flushBase64 是导出路径，

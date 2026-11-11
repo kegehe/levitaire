@@ -271,6 +271,23 @@ export function clampWheelCenter(
   };
 }
 
+/**
+ * 空盘提示：预设词与剪贴板历史都为空时，中心给出标题与去处引导。
+ * 该 overlay 无焦点、不接收点击，因此只做文字说明、不放链接。
+ */
+export function getEmptyWheelHint(snippetsEnabled: boolean): { title: string; hint: string } {
+  if (snippetsEnabled) {
+    return {
+      title: "还没有预设词或历史",
+      hint: "在「设置 › 快速输入」中添加预设提示词，或开启剪贴板历史",
+    };
+  }
+  return {
+    title: "预设提示词已关闭",
+    hint: "在「设置 › 快速输入」中重新开启，或开启剪贴板历史",
+  };
+}
+
 /** 根据物理鼠标坐标计算高亮扇区；中心死区与鼠标移动逻辑保持一致。 */
 export function getHighlightedSector(
   x: number,
@@ -291,6 +308,8 @@ function QuickInputTool() {
   const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [visible, setVisible] = useState(false);
   const [items, setItems] = useState<WheelItem[]>([]);
+  /** 预设提示词是否启用：仅用于空盘提示区分「未添加」与「已关闭」 */
+  const [snippetsEnabled, setSnippetsEnabled] = useState(true);
   /** 当前高亮扇区索引，-1 表示无选中 */
   const [highlighted, setHighlighted] = useState(-1);
   /** 窗口中心在屏幕上的物理坐标（用于计算鼠标相对角度） */
@@ -338,6 +357,7 @@ function QuickInputTool() {
       ).catch(() => []),
       invoke<boolean>("get_quick_input_snippets_enabled").catch(() => true),
     ]);
+    setSnippetsEnabled(snippetsEnabled);
     const next: WheelItem[] = [];
     // 预设词（关闭时仅展示剪贴板历史）；带 children 的片段为父级分组条目
     if (snippetsEnabled && snippetsJson) {
@@ -773,6 +793,19 @@ function QuickInputTool() {
   }, [items]);
 
   if (!visible) return null;
+
+  // 空盘：既无预设词也无剪贴板历史时，中心给出引导，避免只剩底盘看起来像坏了
+  if (items.length === 0) {
+    const hint = getEmptyWheelHint(snippetsEnabled);
+    return (
+      <div className="quick-input-root">
+        <div className="quick-input-empty" role="status">
+          <span className="quick-input-empty-title">{hint.title}</span>
+          <span className="quick-input-empty-hint">{hint.hint}</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="quick-input-root">

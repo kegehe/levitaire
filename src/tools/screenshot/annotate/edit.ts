@@ -12,7 +12,7 @@ import {
 /**
  * 可拖动的部位：
  * - `body`：整体移动；
- * - `n|s|e|w|ne|nw|se|sw`：框类（矩形/马赛克）四边四角缩放；
+ * - `n|s|e|w|ne|nw|se|sw`：矩形四边四角缩放（马赛克是画笔式，没有拉伸点）；
  * - `end1|end2`：箭头两端。
  */
 export type EditZone = "body" | "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw" | "end1" | "end2";
@@ -68,7 +68,6 @@ function textBounds(a: Extract<Annotation, { kind: "text" }>): Bounds {
 export function annotationBounds(a: Annotation): Bounds {
   switch (a.kind) {
     case "rect":
-    case "mosaic":
       return { x: a.x, y: a.y, w: a.w, h: a.h };
     case "arrow":
       return {
@@ -77,7 +76,9 @@ export function annotationBounds(a: Annotation): Bounds {
         w: Math.abs(a.x2 - a.x1),
         h: Math.abs(a.y2 - a.y1),
       };
-    case "brush": {
+    // 画笔与马赛克同构：都是路径 + 线宽（马赛克的线宽是涂抹直径）
+    case "brush":
+    case "mosaic": {
       if (a.points.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
       const pad = a.strokeWidth / 2;
       let minX = Infinity;
@@ -120,7 +121,7 @@ export function distanceToSegment(
   return Math.hypot(px - x1 - t * dx, py - y1 - t * dy);
 }
 
-/** 框类（矩形/马赛克）的命中：四角 → 四边 → 内部 */
+/** 矩形（唯一有拉伸点的框类）的命中：四角 → 四边 → 内部 */
 function hitBox(b: Bounds, px: number, py: number, tol: HitTolerance): EditZone | null {
   const x2 = b.x + b.w;
   const y2 = b.y + b.h;
@@ -165,7 +166,8 @@ export function hitTestAnnotation(
       ? "body"
       : null;
   }
-  if (a.kind === "brush") {
+  // 画笔与马赛克同构：命中的是笔迹带（路径 ± 线宽/2），不是外包围盒
+  if (a.kind === "brush" || a.kind === "mosaic") {
     const pts = a.points;
     if (pts.length === 0) return null;
     if (pts.length === 1) {
@@ -219,11 +221,11 @@ export function applyEditZone(
   if (zone === "body") {
     switch (a.kind) {
       case "rect":
-      case "mosaic":
         return { ...a, x: a.x + dx, y: a.y + dy };
       case "arrow":
         return { ...a, x1: a.x1 + dx, y1: a.y1 + dy, x2: a.x2 + dx, y2: a.y2 + dy };
       case "brush":
+      case "mosaic":
         return { ...a, points: a.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
       case "text":
       case "number":
@@ -237,7 +239,8 @@ export function applyEditZone(
     return a;
   }
 
-  if (a.kind !== "rect" && a.kind !== "mosaic") return a;
+  // 只有矩形有拉伸手柄；马赛克改成画笔式后与画笔一样只能整体平移（见 handlePoints）
+  if (a.kind !== "rect") return a;
 
   const right0 = a.x + a.w;
   const bottom0 = a.y + a.h;
@@ -256,9 +259,12 @@ export function applyEditZone(
   };
 }
 
-/** 选中标注需要绘制的手柄点：框类 8 个（四边四角），箭头 2 个（两端）。其余返回空数组（只画虚线包围盒）。 */
+/**
+ * 选中标注需要绘制的手柄点：矩形 8 个（四边四角），箭头 2 个（两端）。
+ * 其余（画笔/马赛克/文字/序号）返回空数组，只画虚线包围盒。
+ */
 export function handlePoints(a: Annotation): HandlePoint[] {
-  if (a.kind === "rect" || a.kind === "mosaic") {
+  if (a.kind === "rect") {
     const b = annotationBounds(a);
     const x2 = b.x + b.w;
     const y2 = b.y + b.h;
@@ -306,7 +312,7 @@ export function zoneCursor(zone: EditZone): string {
  * 返回一个线宽改为 `strokeWidth` 的新标注（不修改原对象，也不动几何）。
  * 文字/序号的字号（以及序号的半径）是由线宽派生的，这里一并重算，与新建时的口径完全一致，
  * 否则滚轮只改 strokeWidth 时文字的 fontSize 会与线宽脱节。
- * 马赛克本来就不使用 strokeWidth（见 render.ts 的 drawMosaic），改它没有视觉变化。
+ * 马赛克改画笔式后 strokeWidth 就是涂抹直径，滚轮调粗细则直接生效。
  */
 export function withStrokeWidth(a: Annotation, strokeWidth: number): Annotation {
   const w = clampStrokeWidth(strokeWidth);

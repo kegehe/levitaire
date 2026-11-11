@@ -184,21 +184,26 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         });
                     }
                 } else if in_screenshot {
-                    // 防抖：连按 Esc 只触发一次退出线程（cancel 幂等，但避免无谓并发）
-                    if KB_STATE
-                        .cancelling
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-                    {
-                        if let Some(app) = KB_STATE.app_handle.get() {
-                            let app_clone = app.clone();
-                            let session = crate::commands::current_screenshot_session();
-                            std::thread::spawn(move || {
-                                cancel_screenshot_global(app_clone, session);
+                    // 标注文字输入框聚焦时，Esc 的语义是「取消这段文字」而不是「退出截图」：
+                    // 放行给前端 textarea 的 keydown 处理（本钩子不吞键），否则已画好的标注
+                    // 会随整个会话一起丢失。
+                    if !crate::hooks::mouse::is_screenshot_text_editing() {
+                        // 防抖：连按 Esc 只触发一次退出线程（cancel 幂等，但避免无谓并发）
+                        if KB_STATE
+                            .cancelling
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            if let Some(app) = KB_STATE.app_handle.get() {
+                                let app_clone = app.clone();
+                                let session = crate::commands::current_screenshot_session();
+                                std::thread::spawn(move || {
+                                    cancel_screenshot_global(app_clone, session);
+                                    KB_STATE.cancelling.store(false, Ordering::SeqCst);
+                                });
+                            } else {
                                 KB_STATE.cancelling.store(false, Ordering::SeqCst);
-                            });
-                        } else {
-                            KB_STATE.cancelling.store(false, Ordering::SeqCst);
+                            }
                         }
                     }
                 } else if in_recording

@@ -24,7 +24,8 @@
     "sketch-overlay",
     "sticky-notes-manager",
     "sticky-note-*",
-    "system-cleaner-overlay"
+    "system-cleaner-overlay",
+    "file-shelf-overlay"
   ],
   "permissions": [
     "core:default",

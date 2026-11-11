@@ -10,7 +10,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
-use tauri::Emitter;
+use image::ImageEncoder;
+use tauri::{Emitter, Manager};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     GlobalFree, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -52,6 +53,7 @@ const CMD_DUPLICATE_HORIZONTAL_MIRROR: u16 = 8;
 const CMD_DUPLICATE_VERTICAL_MIRROR: u16 = 9;
 const CMD_DUPLICATE_MIRROR: u16 = 10;
 const CMD_OCR: u16 = 11;
+const CMD_SHELF: u16 = 12;
 const SCALE_TIMER_ID: usize = 1;
 /// 比例文字显示时长（毫秒）
 const SCALE_LABEL_MS: u32 = 1200;
@@ -763,6 +765,7 @@ unsafe extern "system" fn pin_wndproc(
                     duplicate_transformed_pin(hwnd, PinTransform::FlipVertical)
                 }
                 CMD_OCR => start_pin_ocr(hwnd),
+                CMD_SHELF => shelf_pin(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -1031,6 +1034,57 @@ fn render_pin_rgba(
         }
     }
     Ok((out, dst_w, dst_h))
+}
+
+/// 把当前贴图（含缩放/透明度调整）写入文件暂存架。
+///
+/// 渲染 + PNG 编码 + 写盘都放到独立线程：贴图窗口的 wndproc 跑在应用主线程上，
+/// 大图（4K / 高倍放大）编码要几百毫秒，直接在 wndproc 里做会把整个应用（悬浮球、
+/// 工具栏、其它浮窗）一起冻住 —— 与 `save_pin_as` 的同款处理。
+fn shelf_pin(hwnd: HWND) {
+    let state_ptr = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::GWL_USERDATA,
+        ) as *mut PinState
+    };
+    if state_ptr.is_null() {
+        return;
+    }
+    let state = unsafe { &*state_ptr };
+    let app = state.app.clone();
+    let enabled = app
+        .try_state::<crate::config::ConfigManager>()
+        .and_then(|config| config.get_file_shelf_enabled().ok())
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let pixels = state.pixels.clone();
+    let (width, height) = (state.width, state.height);
+    let (scale, opacity) = (state.scale, state.opacity);
+    std::thread::spawn(move || {
+        let Ok((rgba, w, h)) = render_pin_rgba(&pixels, width, height, scale, opacity) else {
+            return;
+        };
+        let mut png = Vec::new();
+        if image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
+            .is_err()
+        {
+            return;
+        }
+        let Some(store) = app.try_state::<crate::shelf::ShelfStore>() else {
+            return;
+        };
+        if store.add_png(&png, "截图.png").is_ok() {
+            let _ = app.emit_to(
+                "file-shelf-overlay",
+                "file-shelf-changed",
+                serde_json::json!([{ "status": "added" }]),
+            );
+        }
+    });
 }
 
 /// 把当前贴图（含缩放/透明度调整）以 CF_DIB 复制到剪贴板。
@@ -1334,6 +1388,7 @@ pub fn context_menu_action(id: u32, action: &str) -> Result<(), String> {
         "duplicate-horizontal-mirror" => CMD_DUPLICATE_HORIZONTAL_MIRROR,
         "duplicate-vertical-mirror" => CMD_DUPLICATE_VERTICAL_MIRROR,
         "ocr" => CMD_OCR,
+        "shelf" => CMD_SHELF,
         _ => return Err("未知的贴图菜单操作".into()),
     };
     let hwnd_isize = pins_locked(|m| m.get(&id).map(|p| p.hwnd).unwrap_or(0));

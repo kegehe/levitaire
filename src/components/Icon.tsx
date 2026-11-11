@@ -85,6 +85,9 @@ import {
   ChevronsDown,
   ArrowUpToLine,
   ArrowDownToLine,
+  Music,
+  Code,
+  FileText,
 } from "lucide-react";
 import type { LucideProps } from "lucide-react";
 
@@ -175,6 +178,9 @@ const ICON_MAP = {
   ChevronsDown,
   ArrowUpToLine,
   ArrowDownToLine,
+  Music,
+  Code,
+  FileText,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;

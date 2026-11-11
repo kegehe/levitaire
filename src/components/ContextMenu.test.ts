@@ -147,6 +147,9 @@ describe("菜单窗口高度必须与菜单结构一致", () => {
     // 34N + 11G + 2×6 padding + 2×1 border
     expect(contextMenuHeight("orb")).toBe(161);
     expect(contextMenuHeight("tray")).toBe(240);
-    expect(contextMenuHeight("pin")).toBe(466);
+    expect(contextMenuHeight("pin")).toBe(500);
+    // 暂存架关闭时贴图菜单少渲染一条，窗口高度必须同步扣除，否则靠屏幕下沿时
+    // clamp 会按多出来的 34px 夹取，菜单离光标远一截。
+    expect(contextMenuHeight("pin", 1)).toBe(466);
   });
 });

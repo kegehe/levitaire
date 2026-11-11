@@ -100,8 +100,17 @@ function termPhaseOffset(year: number, month: number, day: number, longitude: nu
   return (((sunApparentLongitude(jd) - longitude) % 360) + 360) % 360;
 }
 
+/** 当月节气结果缓存：同一屏 42 格至多涉及 3 个月，避免重复做黄经计算。 */
+const solarTermsCache = new Map<string, ReadonlyArray<{ name: string; day: number }>>();
+
 /** 某公历月内两个节气各自的名称与日期（东八区）。 */
-function solarTermsOfMonth(year: number, monthIndex: number): Array<{ name: string; day: number }> {
+function solarTermsOfMonth(
+  year: number,
+  monthIndex: number,
+): ReadonlyArray<{ name: string; day: number }> {
+  const cacheKey = `${year}-${monthIndex}`;
+  const cached = solarTermsCache.get(cacheKey);
+  if (cached) return cached;
   const month = monthIndex + 1;
   const daysInMonth = new Date(year, month, 0).getDate();
   const result: Array<{ name: string; day: number }> = [];
@@ -113,6 +122,7 @@ function solarTermsOfMonth(year: number, monthIndex: number): Array<{ name: stri
     }
     result.push({ name, day: termDay });
   }
+  solarTermsCache.set(cacheKey, result);
   return result;
 }
 
@@ -125,12 +135,20 @@ function solarTermNameOn(date: Date): string | null {
   return terms.find((term) => term.day === day)?.name ?? null;
 }
 
+/** 复用的农历格式化器；构造开销大，不应按日期重复创建。 */
+let lunarFormatter: Intl.DateTimeFormat | null = null;
+
+function getLunarFormatter(): Intl.DateTimeFormat {
+  lunarFormatter ??= new Intl.DateTimeFormat("zh-CN-u-ca-chinese", {
+    month: "long",
+    day: "numeric",
+  });
+  return lunarFormatter;
+}
+
 function parseLunarMonthDay(date: Date): { month: string; day: number } | null {
   try {
-    const parts = new Intl.DateTimeFormat("zh-CN-u-ca-chinese", {
-      month: "long",
-      day: "numeric",
-    }).formatToParts(date);
+    const parts = getLunarFormatter().formatToParts(date);
     const month = parts.find((part) => part.type === "month")?.value ?? "";
     const day = Number(parts.find((part) => part.type === "day")?.value);
     if (!month || day < 1 || day > 30) return null;

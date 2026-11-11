@@ -219,6 +219,18 @@ pub fn finish_at(x: i32, y: i32) -> Option<RectI> {
     Some(RectI::from_end(hole.left + ox, hole.top + oy, hole.right + ox, hole.bottom + oy))
 }
 
+/// 同步收掉原生选区层，并排队销毁窗口。
+///
+/// `dispose` 用 `PostMessageW(WM_CLOSE)` 销毁，必须等 owning 线程回到消息循环才
+/// 生效；而长截图是在主线程里紧接着 BitBlt 抓首帧、中途不泵消息的，只调 `dispose`
+/// 首帧仍会把整屏遮罩和选区描边抓进去。这里先同步 `ShowWindow(SW_HIDE)`。
+pub fn dismiss() {
+    TRACKING.store(false, Ordering::SeqCst);
+    FROZEN.store(false, Ordering::SeqCst);
+    show_windows(false);
+    dispose();
+}
+
 /// 退出框选（切模式 / 取消 / 会话结束）：销毁两扇窗。
 pub fn dispose() {
     TRACKING.store(false, Ordering::SeqCst);
@@ -570,6 +582,26 @@ mod guard_tests {
             .map(|line| line.split("//").next().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// 长截图开始必须同步收掉原生层。
+    ///
+    /// 长截图的每一帧都是实时 BitBlt。原生层没收掉的话，遮罩会一直压暗选区外，
+    /// 选区描边（内缩 1px）会被抓进每一帧，结束长截图后遮罩还会留在桌面上。
+    /// 必须用 `dismiss`（同步 Hide）而不是 `dispose`：`start_long_capture` 在主线程
+    /// 上抓首帧前不泵消息，`PostMessage(WM_CLOSE)` 来不及生效。
+    #[test]
+    fn long_capture_dismisses_native_selector_before_first_frame() {
+        let src = strip_line_comments(include_str!("../commands/long_capture.rs"));
+        let body = src
+            .split("pub fn start_long_capture")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("start_long_capture 被改名/删除了 —— 请同步本守卫");
+        assert!(
+            body.contains("selector::dismiss()"),
+            "start_long_capture 必须先 selector::dismiss()，否则遮罩/描边会被抓进长截图"
+        );
     }
 
     /// 会话收尾必须拆掉原生层：它是全屏置顶窗，残留下来会一直压着桌面、

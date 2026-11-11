@@ -576,6 +576,17 @@ pub fn count_words(text: String) -> Result<(usize, usize), String> {
       列了 12 种越界写法）。
     - 尺寸上限（`NOTE_MAX_*` = 10000）**只是脏数据的理智边界**，别压低：大屏用户合法拖得到的尺寸
       一旦被后端改小，前端存进去的值与落盘值就不一致，下次开窗会静默回缩。
+27. **破坏性操作的确认一律用组件弹窗，禁用浏览器原生对话框**：`window.confirm` / `window.alert` /
+    `window.prompt` 在 WebView2 里是无样式的系统弹窗——字体、配色、明暗主题、圆角全部不受控，
+    和应用的视觉语言完全脱节（文件暂存架的「清空」曾因此在一块精心做过的浮窗上弹出一张系统脸）。
+    统一替代品是 `src/components/ConfirmDialog.tsx`：遮罩 + 居中卡片 + 危险红确认钮，
+    **默认焦点在「取消」**（Enter / 空格按原生按钮行为激活焦点所在按钮，连按 Enter 只会取消、
+    不会误执行破坏性操作），Esc 取消（捕获阶段拦，抢在页面级快捷键之前）、Tab 在卡片内循环，
+    明暗主题走 token，阴影用自包含字面值。有源码级守卫 `src/test/nativeDialogGuard.test.ts`
+    递归扫 `src` 下全部 ts/tsx（剥整行注释、排除测试文件——测试里 stub 原生 API 是合法的），
+    命中 `window.(alert|confirm|prompt)(` 或裸 `alert(/confirm(/prompt(` 即失败；
+    反向断言钉住判定本身（`dialog.confirm(` 这类对象方法调用不误伤）。
+    弹窗打开期间宿主窗口要屏蔽自己的全局快捷键（如暂存架的 Ctrl+V，用 ref 判态即可）。
 
 ---
 

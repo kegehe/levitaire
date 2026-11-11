@@ -742,6 +742,26 @@ pub fn toggle_wheel(app: &tauri::AppHandle) {
 
 // ─── 剪贴板历史（内存环形缓冲 + 本地文件持久化） ─────────────────
 
+/// 快速输入工具是否启用（运行时状态，由启动初始化与 `set_quick_input_enabled` 同步）。
+///
+/// 剪贴板历史属于该工具的一部分：「记录剪贴板历史」开关只在工具启用时才有意义。
+/// 用户关掉整个工具后必须停止收集，否则后台仍会把复制的文本加密写入本地历史文件，
+/// 与用户「已关闭」的认知相悖。
+///
+/// 默认 `true`：监听线程在启动初始化（会按配置写入真实值）之后才启动，
+/// 默认值只覆盖这段空窗期；保持 `true` 也让不经过初始化的调用方（如测试）行为不变。
+static TOOL_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// 同步快速输入工具的启用状态到运行时。
+pub fn set_tool_enabled(enabled: bool) {
+    TOOL_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// 快速输入工具当前是否启用。
+pub fn is_tool_enabled() -> bool {
+    TOOL_ENABLED.load(Ordering::SeqCst)
+}
+
 /// 历史记录的绝对上限，避免配置异常导致无限增长。
 pub const HISTORY_MAX: usize = 20;
 /// 新安装或旧配置缺少该字段时的默认保留条数。
@@ -959,12 +979,15 @@ fn save_history_to(path: &Path, items: &[ClipboardHistoryItem]) -> Result<(), St
     Ok(())
 }
 
-/// 由 keyboard hook 在检测到 Ctrl+C 复制文本后调用，追加到历史。
+/// 由 clipboard listener 在检测到剪贴板文本变化后调用，追加到历史。
 /// 去重：仅与最近一条（相邻项）相同则跳过；非相邻重复项仍会保留。
 /// 内存更新后持久化到本地文件。
 /// 测试环境跳过落盘，避免污染真实用户数据。
+///
+/// ⚠️ 快速输入工具停用时直接返回：历史是该工具的功能，用户关闭工具即表示
+/// 不再需要收集，不能仅凭「记录剪贴板历史」开关继续在后台落盘。
 pub fn push_history(text: &str) {
-    if !get_history_enabled() || text.is_empty() || get_history_limit() == 0 {
+    if !is_tool_enabled() || !get_history_enabled() || text.is_empty() || get_history_limit() == 0 {
         return;
     }
     let preview = if text.chars().count() > PREVIEW_MAX {
@@ -981,7 +1004,8 @@ pub fn push_history(text: &str) {
     let mut changed = false;
     if let Ok(mut hist) = HISTORY.lock() {
         // Re-check after acquiring the lock so a concurrent disable cannot append a record.
-        if !get_history_enabled() {
+        // 工具开关同样复查：停用与这次写入并发时，以后到者为准，不留下一条停用后的记录。
+        if !get_history_enabled() || !is_tool_enabled() {
             return;
         }
         // 与最近一条相同则跳过
@@ -1407,10 +1431,10 @@ pub fn vk_to_name(vk: u16) -> String {
 mod tests {
     use super::{
         clear_history, get_history, get_history_enabled, get_history_limit, history_path,
-        is_dangerous_trigger_vk, load_history, load_history_from, parse_trigger_key, push_history,
-        remove_history_item, save_history_to, set_history_enabled, set_history_favorite,
-        set_history_limit, should_tick_for_sector, vk_to_name, ClipboardHistoryItem,
-        HISTORY_DEFAULT_LIMIT, HISTORY_MAX,
+        is_dangerous_trigger_vk, is_tool_enabled, load_history, load_history_from,
+        parse_trigger_key, push_history, remove_history_item, save_history_to, set_history_enabled,
+        set_history_favorite, set_history_limit, set_tool_enabled, should_tick_for_sector,
+        vk_to_name, ClipboardHistoryItem, HISTORY_DEFAULT_LIMIT, HISTORY_MAX,
     };
 
     /// 串行化操作全局 HISTORY 的测试，避免并行运行互相污染
@@ -1637,6 +1661,51 @@ mod tests {
         push_history("ignored");
         assert!(get_history().is_empty());
         set_history_limit(HISTORY_DEFAULT_LIMIT);
+    }
+
+    /// 快速输入工具停用后必须停止收集剪贴板历史。
+    ///
+    /// 历史属于该工具，只受「记录剪贴板历史」开关控制是不够的：用户关掉整个工具后，
+    /// 后台仍会持续把复制的文本加密写入本地，与「已关闭」的认知冲突。
+    /// 停用是暂停收集，不是删除：既有历史（含收藏项）保留，重新启用后继续使用。
+    #[test]
+    fn history_recording_pauses_when_tool_disabled() {
+        let _guard = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 确保断言失败也不会把工具开关留在停用态，污染并行的其它历史测试
+        struct ToolEnabledGuard(bool);
+        impl Drop for ToolEnabledGuard {
+            fn drop(&mut self) {
+                set_tool_enabled(self.0);
+            }
+        }
+        let _restore = ToolEnabledGuard(is_tool_enabled());
+
+        clear_history();
+        set_history_limit(HISTORY_DEFAULT_LIMIT);
+        set_history_enabled(true);
+
+        push_history("before-disable");
+        assert_eq!(get_history().len(), 1);
+
+        set_tool_enabled(false);
+        assert!(!is_tool_enabled());
+        push_history("while-disabled");
+        let hist = get_history();
+        assert_eq!(hist.len(), 1, "工具停用后不应再追加历史");
+        assert_eq!(
+            hist[0].text, "before-disable",
+            "既有历史应保留，不因停用被删"
+        );
+
+        set_tool_enabled(true);
+        push_history("after-enable");
+        assert_eq!(
+            get_history()[0].text,
+            "after-enable",
+            "重新启用后应恢复收集"
+        );
+
+        clear_history();
     }
 
     /// 持久化往返：加密写入后能解密读回，内容一致

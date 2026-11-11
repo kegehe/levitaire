@@ -241,6 +241,8 @@ describe("index.html 首帧主题脚本", () => {
       dispatchEvent: () => false,
     }));
     document.documentElement.removeAttribute("data-theme");
+    // 清掉上一轮应用留下的内联变量，确保断言的是首帧脚本本身的效果
+    document.documentElement.removeAttribute("style");
     // 执行的就是 index.html 里的那段首帧脚本（原样取出，不做改写）
     new Function(script)();
     return document.documentElement.getAttribute("data-theme");
@@ -268,6 +270,27 @@ describe("index.html 首帧主题脚本", () => {
   it("显式 dark / light 不受系统设置影响", () => {
     expect(runFirstPaintScript({ stored: "dark", systemDark: false })).toBe("dark");
     expect(runFirstPaintScript({ stored: "light", systemDark: true })).toBe("light");
+  });
+
+  it("自定义强调色/配色方案在首帧就生效（跟随系统时亮暗两套都对）", () => {
+    applyThemePreferences({ theme: "system", accent: "teal", scheme: "moss" });
+
+    runFirstPaintScript({ stored: "system", systemDark: false });
+    expect(document.documentElement.style.getPropertyValue("--color-bg")).toBe("#f9fbf8");
+    expect(document.documentElement.style.getPropertyValue("--color-accent")).toBe(
+      "oklch(0.5 0.11 185)",
+    );
+
+    runFirstPaintScript({ stored: "system", systemDark: true });
+    expect(document.documentElement.style.getPropertyValue("--color-bg")).toBe("#1d2420");
+    expect(document.documentElement.style.getPropertyValue("--color-accent")).toBe(
+      "oklch(0.73 0.11 185)",
+    );
+  });
+
+  it("没有缓存时首帧不写自定义变量，退回 tokens.css 的默认主题", () => {
+    runFirstPaintScript({ stored: "light", systemDark: false });
+    expect(document.documentElement.style.getPropertyValue("--color-bg")).toBe("");
   });
 
   it("没存过主题时按 light 起步（跟随系统由设置页显式选择才生效）", () => {

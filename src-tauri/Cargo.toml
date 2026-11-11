@@ -53,6 +53,8 @@ ndarray = { version = "0.17", features = ["std"] }
 # （校验方式：cargo tree -i webview2-com）。
 webview2-com = "0.38"
 
+windows-core = "0.61.2"
+
 [dependencies.windows]
 version = "0.61"
 features = [
@@ -61,6 +63,8 @@ features = [
     "Win32_UI_Shell",
     "Win32_UI_Accessibility",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_SystemServices",
     "Win32_System_Console",
     "Win32_System_Ole",
     "Win32_System_LibraryLoader",
@@ -79,6 +83,9 @@ features = [
     # GetDpiForMonitor 在 Win32_UI_HiDpi 下；此前只在录制指示层用 GetDeviceCaps 近似取过系统缩放。
     "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",
+    # 悬浮球点击判定要排除「别的虚拟桌面上的窗口」：这些窗口 WS_VISIBLE 仍为真，
+    # 只有 DwmGetWindowAttribute(DWMWA_CLOAKED) 能区分出来。
+    "Win32_Graphics_Dwm",
     "Win32_Security_Cryptography",
     "Win32_System_Power",
     "Win32_System_Performance",

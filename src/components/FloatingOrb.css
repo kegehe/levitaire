@@ -18,7 +18,10 @@
 }
 
 /* ── Glassmorphism circle ──────────────────────────────── */
-/* 视觉球固定为 --orb-size，由父容器 flex 居中，不受透明留白影响。 */
+/* 视觉球固定为 --orb-size，由父容器 flex 居中，不受透明留白影响。
+   这里刻意不用 backdrop-filter：orb 是透明窗口，元素背后只有页面自己的透明底，
+   没有可采样的内容，毛玻璃不产生任何像素差异（有无该属性的截图逐字节一致），
+   却会把玻璃层变成独立渲染表面，动画期间每帧多花约 20 个百分点单核。 */
 .orb-inner {
   width: var(--orb-size);
   height: var(--orb-size);
@@ -31,21 +34,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  -webkit-backdrop-filter: var(--orb-backdrop);
-  backdrop-filter: var(--orb-backdrop);
   transition:
     transform var(--transition-fast),
     box-shadow var(--transition-normal);
-  /* 呼吸只动 transform（轻微缩放），把 box-shadow 让给 transition，
-     避免 animation 屏蔽 hover/active 的 box-shadow 过渡 */
-  animation: orb-breathe 3s ease-in-out infinite;
-}
-
-/* Fallback: 不支持 backdrop-filter 时用不透明背景模拟 */
-@supports not (backdrop-filter: blur(10px)) {
-  .orb-inner {
-    background: var(--orb-bg-fallback);
-  }
+  /* 空闲不跑任何动画：orb 是常驻可见的透明置顶窗口，只要每帧都有新内容，
+     WebView2 就会持续产帧；实测这种窗口每帧呈现要花 2~4ms CPU（原生 GPU
+     进程 0.86 核 + 渲染进程 0.18 核，144Hz 屏上约满一个核）。呼吸动画改为
+     悬停时才播放，空闲时零帧、零 CPU。 */
 }
 
 /* Fallback: older engines do not recognize color-mix. Keep the neutral glass
@@ -62,10 +57,13 @@
 .orb-container:hover .orb-inner {
   transform: scale(1.05);
   box-shadow: var(--orb-shadow-hover);
-  animation: none;
+  animation: orb-breathe 3s ease-in-out infinite;
 }
 .orb-container.is-open .orb-inner {
   box-shadow: var(--orb-shadow-hover);
+  /* 面板打开期间不播呼吸动画：面板会停在那里，一直半透明闪烁既没必要，
+     也让常驻置顶窗持续产帧。呼吸只在"悬停但未打开"时生效。 */
+  animation: none;
 }
 
 /* ── Active: shrink ──────────────────────────────────── */
@@ -75,12 +73,12 @@
   animation: none;
 }
 
-/* ── Breathing animation ──────────────────────────────── */
+/* ── Breathing animation（仅悬停时播放）───────────────── */
 /* 呼吸只动 opacity，不动 transform：orb 是透明置顶窗口且 .orb-inner 带
    backdrop-filter，若对玻璃层做无限 scale 动画，毛玻璃采样区域会逐帧改变，
-   合成器每帧都要对桌面背景重新做高斯模糊（软件合成/虚拟机/远程桌面下直接
-   烧 CPU）。opacity 只影响层合成、不改变 backdrop 采样区域，不触发重采样，
-   视觉上保留轻微“呼吸”感。box-shadow 仍交给 transition，避免动画屏蔽过渡。 */
+   合成器每帧都要对桌面背景重新做高斯模糊。opacity 只影响层合成、不改变
+   backdrop 采样区域。box-shadow 仍交给 transition，避免动画屏蔽过渡。
+   注意：动画挂在 :hover 上，指针离开球体后动画立即停止，窗口回到零帧状态。 */
 @keyframes orb-breathe {
   0%,
   100% {
@@ -92,8 +90,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .orb-inner,
+  /* !important 才能压过 :hover 上的动画声明 */
+  .orb-container .orb-inner,
   .orb-character * {
-    animation: none;
+    animation: none !important;
   }
 }

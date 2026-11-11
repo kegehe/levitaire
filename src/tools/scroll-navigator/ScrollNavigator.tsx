@@ -2,11 +2,13 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Icon from "../../components/Icon";
 import {
   applyThemePreferences,
@@ -35,6 +37,14 @@ const EMPTY_STATE: ScrollNavigationState = {
  */
 const POLL_INTERVAL_MS = 2000;
 
+/**
+ * 面板隐藏期间的「可见性探测」间隔。
+ *
+ * 隐藏时不发探测请求，但仍要能尽快发现「面板又被打开了」，才能立刻补一次刷新；
+ * 单次探测只是一次窗口属性 IPC，和它省掉的跨进程 UIA 遍历不是一个量级。
+ */
+const HIDDEN_PROBE_INTERVAL_MS = 250;
+
 function ScrollNavigator() {
   const [state, setState] = useState<ScrollNavigationState>(EMPTY_STATE);
   const [draft, setDraft] = useState("0");
@@ -42,6 +52,12 @@ function ScrollNavigator() {
   const [busy, setBusy] = useState(false);
   // 轮询回调要读最新的忙碌状态，但不能因此重建定时器 → 用 ref 镜像。
   const busyRef = useRef(false);
+  // 用户手动改过百分比（输入框键入 / 拖动滑杆）但还没提交时置位：后台轮询仍更新真实状态，
+  // 但不能回写 draft —— 否则每 2s 一次的探测会把输入到一半的数字、拖到一半的滑杆弹回旧值。
+  const draftDirtyRef = useRef(false);
+  // getCurrentWebviewWindow() 每次调用都返回新对象，必须 memo 化：
+  // 它是轮询 effect 的依赖，写在渲染体里会让定时器每次渲染都重建。
+  const win = useMemo(() => getCurrentWebviewWindow(), []);
 
   const markBusy = (value: boolean) => {
     busyRef.current = value;
@@ -63,63 +79,141 @@ function ScrollNavigator() {
     };
   }, []);
 
-  const applyState = useCallback((next: ScrollNavigationState) => {
+  /**
+   * 应用后端返回的状态。
+   *
+   * `respectDraft` 为 true 时（后台轮询专用）：用户正手动设定百分比（draft 脏）、或动作正在
+   * 提交时，只更新真实状态、不回写草稿。检查放在响应到达后，顺带挡住「请求在途时用户才开始
+   * 输入 / 动作才开始」的竞态 —— 动作自身的 `applyState` 用默认值，不受此限制。
+   */
+  const applyState = useCallback((next: ScrollNavigationState, respectDraft = false) => {
     setState(next);
+    if (respectDraft && (draftDirtyRef.current || busyRef.current)) return;
+    draftDirtyRef.current = false;
     if (next.percent !== null) setDraft(String(Math.round(next.percent)));
   }, []);
 
   /** 读一次后端真值。不带 busy 守卫 —— 供「动作失败后回读」复用。 */
-  const fetchState = useCallback(async () => {
-    applyState(await invoke<ScrollNavigationState>("get_scroll_navigation_state"));
-  }, [applyState]);
+  const fetchState = useCallback(
+    async (respectDraft = false) => {
+      applyState(await invoke<ScrollNavigationState>("get_scroll_navigation_state"), respectDraft);
+    },
+    [applyState],
+  );
 
   const refresh = useCallback(async () => {
     // 动作进行中不叠加探测请求
     if (busyRef.current) return;
     try {
       setError(null);
-      await fetchState();
+      // 用户正在调整百分比时不回写 draft，避免中途被后台读到的旧值覆盖。
+      await fetchState(true);
     } catch {
       setError("无法读取目标窗口");
     }
   }, [fetchState]);
 
+  // 面板关闭时只是原生窗口 hide()，React 树不卸载、定时器照旧跑 —— 必须自己停下来，
+  // 否则面板关了后端还在被每 2s 一次、最坏 120ms 的跨进程 UIA 遍历持续压着。
+  //
+  // 判断依据**不能是 document.hidden**：实测 WebView2 156 上窗口 hide() 之后
+  // visibilityState 仍是 "visible"、visibilitychange 也不触发（show → hide 全程实测），
+  // 旧守卫因此从未生效。这里改成反问原生窗口：隐藏时只保留一次极便宜的可见性探测，
+  // 一旦重新显示就立刻恢复轮询并补刷一次，避免用户看到隐藏前的旧数值。
   useEffect(() => {
-    let timer: number | undefined;
-    const stop = () => {
-      if (timer !== undefined) {
-        window.clearInterval(timer);
-        timer = undefined;
+    let pollTimer: number | undefined;
+    let hiddenProbeTimer: number | undefined;
+    let disposed = false;
+    let inFlight = false;
+    let probingHidden = false;
+
+    const stopPoll = () => {
+      if (pollTimer !== undefined) {
+        window.clearInterval(pollTimer);
+        pollTimer = undefined;
       }
     };
-    const start = () => {
-      if (timer === undefined) {
-        timer = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    const startPoll = () => {
+      if (pollTimer === undefined && !disposed) {
+        pollTimer = window.setInterval(() => void poll(), POLL_INTERVAL_MS);
       }
     };
-    // 通用工具面板关闭时只是原生窗口 hide()，React 树不卸载、定时器照旧跑 ——
-    // 所以必须自己看 document.hidden 停下来，否则面板关了后端还在被持续探测。
-    const onVisibility = () => {
-      if (document.hidden) {
-        stop();
-        return;
+    const stopHiddenProbe = () => {
+      if (hiddenProbeTimer !== undefined) {
+        window.clearInterval(hiddenProbeTimer);
+        hiddenProbeTimer = undefined;
       }
-      void refresh();
-      start();
     };
-    if (!document.hidden) {
-      void refresh();
-      start();
-    }
-    document.addEventListener("visibilitychange", onVisibility);
+
+    /** 隐藏期间只做可见性探测，绝不发探测请求。 */
+    const enterHidden = () => {
+      stopPoll();
+      if (hiddenProbeTimer === undefined && !disposed) {
+        hiddenProbeTimer = window.setInterval(() => void probeHidden(), HIDDEN_PROBE_INTERVAL_MS);
+      }
+    };
+
+    /** 面板重新显示：恢复常规轮询并立刻刷一次。 */
+    const resume = () => {
+      stopHiddenProbe();
+      startPoll();
+      void poll();
+    };
+
+    const probeHidden = async () => {
+      // 探测本身也可能慢（窗口正在销毁），不让多次探测叠加
+      if (disposed || probingHidden) return;
+      probingHidden = true;
+      try {
+        let visible = true;
+        try {
+          visible = await win.isVisible();
+        } catch {
+          // 读不到可见性就按可见处理：宁可多探一次，也不能让面板停在旧数据上
+        }
+        if (disposed) return;
+        if (visible) resume();
+      } finally {
+        probingHidden = false;
+      }
+    };
+
+    const poll = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      try {
+        let visible = true;
+        try {
+          visible = await win.isVisible();
+        } catch {
+          visible = true;
+        }
+        if (disposed) return;
+        if (!visible) {
+          enterHidden();
+          return;
+        }
+        await refresh();
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    startPoll();
     return () => {
-      stop();
-      document.removeEventListener("visibilitychange", onVisibility);
+      disposed = true;
+      stopPoll();
+      stopHiddenProbe();
     };
-  }, [refresh]);
+  }, [refresh, win]);
 
   const setPercent = async (value: number) => {
-    if (!state.precise || busy) return;
+    if (!state.precise || busy) {
+      // 提交被守卫挡掉时也要解除「草稿保护」，否则后台轮询再也无法把 draft 拉回真值。
+      draftDirtyRef.current = false;
+      return;
+    }
     const percent = Math.round(Math.max(0, Math.min(100, value)));
     setDraft(String(percent));
     markBusy(true);
@@ -164,7 +258,15 @@ function ScrollNavigator() {
   const commitDraft = () => {
     const value = Number(draft);
     if (Number.isFinite(value)) void setPercent(value);
-    else setDraft(state.percent === null ? "" : String(Math.round(state.percent)));
+    else {
+      draftDirtyRef.current = false;
+      setDraft(state.percent === null ? "" : String(Math.round(state.percent)));
+    }
+  };
+
+  /** 用户开始手动设定百分比：暂停后台对 draft 的回写。 */
+  const markDraftDirty = () => {
+    draftDirtyRef.current = true;
   };
 
   const sliderValue = Number.isFinite(Number(draft))
@@ -232,7 +334,10 @@ function ScrollNavigator() {
                   inputMode="numeric"
                   value={draft}
                   disabled={busy}
-                  onChange={(event) => setDraft(event.target.value)}
+                  onChange={(event) => {
+                    markDraftDirty();
+                    setDraft(event.target.value);
+                  }}
                   onBlur={commitDraft}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") event.currentTarget.blur();
@@ -249,7 +354,10 @@ function ScrollNavigator() {
               max="100"
               value={sliderValue}
               disabled={busy}
-              onChange={(event) => setDraft(event.target.value)}
+              onChange={(event) => {
+                markDraftDirty();
+                setDraft(event.target.value);
+              }}
               onPointerUp={(event) => void setPercent(Number(event.currentTarget.value))}
               style={{ "--scroll-progress": `${sliderValue}%` } as CSSProperties}
               onKeyUp={(event) => {

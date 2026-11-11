@@ -5,6 +5,7 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import Icon from "../../components/Icon";
+import { useFileShelfEnabled } from "../../hooks/useFileShelfEnabled";
 import { clampWindowToWorkArea } from "../../utils/panelWindow";
 import {
   applyThemePreferences,
@@ -33,7 +34,10 @@ function LongCaptureControls() {
   // （含 long-capture-completed）反复重建，存在丢事件导致控制条卡在「正在截长图」的窗口。
   const win = useMemo(() => getCurrentWebviewWindow(), []);
   const [view, setView] = useState<View | null>(null);
+  // 控制条窗口常驻，需跟随工具面板里的暂存架开关实时更新。
+  const fileShelfEnabled = useFileShelfEnabled();
   const [warning, setWarning] = useState<string | null>(null);
+  const [shelfMessage, setShelfMessage] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const viewRef = useRef<View | null>(null);
   const controlsRef = useRef<HTMLDivElement | null>(null);
@@ -262,6 +266,20 @@ function LongCaptureControls() {
     }
   };
 
+  const putOnShelf = async () => {
+    if (!view || view.kind !== "preview" || actionPending.current) return;
+    actionPending.current = true;
+    try {
+      await invoke("shelf_add_png", { data: view.preview, name: "截图.png" });
+      setShelfMessage(null);
+    } catch (error) {
+      console.error("shelf long capture failed", error);
+      setShelfMessage(typeof error === "string" ? error : "放入暂存架失败");
+    } finally {
+      actionPending.current = false;
+    }
+  };
+
   const save = async () => {
     if (!view || view.kind !== "preview" || actionPending.current) return;
     actionPending.current = true;
@@ -383,9 +401,16 @@ function LongCaptureControls() {
           }}
         />
       </div>
-      {result.message && <p className="long-capture-message">{result.message}</p>}
+      {(shelfMessage || result.message) && (
+        <p className="long-capture-message">{shelfMessage ?? result.message}</p>
+      )}
       <div className="long-capture-actions">
         <button onClick={copy} title="复制图片" aria-label="复制图片"><Icon name="Copy" size={15} /></button>
+        {fileShelfEnabled && (
+          <button onClick={putOnShelf} title="放入暂存架" aria-label="放入暂存架">
+            <Icon name="FolderOpen" size={15} />
+          </button>
+        )}
         <button onClick={save} title="保存图片" aria-label="保存图片"><Icon name="Download" size={15} /></button>
       </div>
     </div>

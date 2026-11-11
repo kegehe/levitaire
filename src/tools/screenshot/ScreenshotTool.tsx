@@ -3,6 +3,15 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Icon from "../../components/Icon";
+import { OPTIMIZE_MODES } from "../../constants/optimizeModes";
+import {
+  buildSearchUrl,
+  DEFAULT_SEARCH_ENGINE,
+  fetchSearchEngine,
+  type SearchEngineId,
+} from "../../constants/searchEngineConfig";
+import { useFileShelfEnabled } from "../../hooks/useFileShelfEnabled";
+import { useAiOptimize } from "../../hooks/useAiOptimize";
 import AnnotationCanvas, { type AnnotationCanvasHandle } from "./annotate/AnnotationCanvas";
 import AnnotationToolbar from "./annotate/AnnotationToolbar";
 import { useAnnotations } from "./annotate/useAnnotations";
@@ -245,6 +254,9 @@ interface ScreenshotTarget {
 const OCR_PANEL_WIDTH = 420;
 const OCR_PANEL_HEIGHT = 300;
 const OCR_PANEL_GAP = 10;
+
+/** OCR 结果面板的「翻译」复用文本优化里的翻译模式 */
+const TRANSLATE_MODE = OPTIMIZE_MODES.find((m) => m.id === "translate")!;
 const VIEWPORT_PADDING = 12;
 
 function initialOcrPanelPosition(selection: Selection): PanelPosition {
@@ -271,7 +283,25 @@ function ScreenshotTool() {
   // 每次渲染都重跑；而挂载 effect 里又会 setMonitorWorkArea(新对象) → 状态恒变
   // → 再渲染 → 自激循环（实测 ≈700 次/秒 IPC + 重渲染，且遮罩窗在启动时就被预加载）。
   const win = useMemo(() => getCurrentWebviewWindow(), []);
+  const {
+    optimize: optimizeOcrText,
+    cancel: cancelOcrOptimize,
+    isLoading: ocrAiLoading,
+    optimizedText: ocrOptimizedText,
+    errorMessage: ocrAiError,
+    checkAiConfig,
+  } = useAiOptimize();
   const [mode, setMode] = useState<Mode>("selecting");
+  // 暂存架开关可在工具面板随时切换，窗口打开后要跟着广播实时更新。
+  const fileShelfEnabled = useFileShelfEnabled();
+  const [shelfNote, setShelfNote] = useState<string | null>(null);
+  const shelfNoteTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (shelfNoteTimer.current != null) window.clearTimeout(shelfNoteTimer.current);
+    },
+    [],
+  );
   const modeRef = useRef<Mode>("selecting");
   modeRef.current = mode;
   const [selectMode, setSelectMode] = useState<SelectMode>("region");
@@ -309,7 +339,17 @@ function ScreenshotTool() {
   const [ocrText, setOcrText] = useState<string | null>(null);
   const [ocrSelection, setOcrSelection] = useState("");
   const [ocrPanelPosition, setOcrPanelPosition] = useState<PanelPosition | null>(null);
+  const [searchEngine, setSearchEngine] = useState<SearchEngineId>(DEFAULT_SEARCH_ENGINE);
+  // OCR 文本翻译：translating 控制 UI，ref 供事件回调和同步判断使用
+  const [ocrTranslating, setOcrTranslating] = useState(false);
+  const ocrTranslatingRef = useRef(false);
+  // 翻译前原文：取消/失败时恢复，避免流式字幕残留在文本框里
+  const ocrTextBeforeTranslateRef = useRef("");
+  // 翻译会话代次：新 OCR / 重置 / 关面板时自增，让仍卡在配置查询里的调用作废
+  const ocrTranslateSessionRef = useRef(0);
   const [toolbarAbove, setToolbarAbove] = useState(false);
+  /** 工具栏实测后夹回视口的左边距；测量前为 null（退回选区左边）。 */
+  const [toolbarLeft, setToolbarLeft] = useState<number | null>(null);
   const [monitorWorkArea, setMonitorWorkArea] = useState<MonitorWorkArea | null>(null);
   const [captureTabsPosition, setCaptureTabsPosition] = useState<PanelPosition | null>(null);
   const [ready, setReady] = useState(false);
@@ -376,17 +416,38 @@ function ScreenshotTool() {
 
   // 标注工具栏默认显示在选区下方；底部空间不足时翻到选区上方。
   // 使用实际尺寸而不是固定高度，兼容窄屏换行和错误提示导致的高度变化。
+  //
+  // 横向同理：工具栏是「左边缘对齐选区左边」的绝对定位，选区贴着右边缘时
+  // 会被裁出屏幕。工具栏宽度会随按钮（如「放入暂存架」按开关异步出现）和
+  // 状态文案变化，所以用 ResizeObserver 跟着实测宽度，而不是只在选区变化时算一次。
   useLayoutEffect(() => {
-    if (mode !== "annotating" || !selection || !image || !toolbarRef.current) return;
-    const toolbarRect = toolbarRef.current.getBoundingClientRect();
-    const gap = 6;
-    const belowTop = selection.top + selection.height + gap;
-    const aboveTop = selection.top - toolbarRect.height - gap;
-    const belowFits = belowTop + toolbarRect.height <= window.innerHeight - VIEWPORT_PADDING;
-    const aboveFits = aboveTop >= VIEWPORT_PADDING;
-    const shouldPlaceAbove = !belowFits && aboveFits;
-    setToolbarAbove((current) => (current === shouldPlaceAbove ? current : shouldPlaceAbove));
-  }, [mode, selection, image, busy, error]);
+    if (mode !== "annotating" || !selection || !image) return;
+    const toolbar = toolbarRef.current;
+    if (!toolbar) return;
+    const measure = () => {
+      const rect = toolbar.getBoundingClientRect();
+      const gap = 6;
+      const belowTop = selection.top + selection.height + gap;
+      const aboveTop = selection.top - rect.height - gap;
+      const belowFits = belowTop + rect.height <= window.innerHeight - VIEWPORT_PADDING;
+      const aboveFits = aboveTop >= VIEWPORT_PADDING;
+      setToolbarAbove((current) => {
+        const next = !belowFits && aboveFits;
+        return current === next ? current : next;
+      });
+      const maxLeft = Math.max(
+        VIEWPORT_PADDING,
+        window.innerWidth - rect.width - VIEWPORT_PADDING,
+      );
+      const nextLeft = Math.min(Math.max(selection.left, VIEWPORT_PADDING), maxLeft);
+      setToolbarLeft((current) => (current === nextLeft ? current : nextLeft));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, [mode, selection, image]);
 
   // 模式栏尺寸只在「模式切换 / 窗口尺寸变化」时量一次：它随按钮文案与换行变化，
   // 但不随选区变化。量完缓存进 ref，拖框热路径只读缓存（见 updateCapturePanelPosition）。
@@ -681,6 +742,55 @@ function ScreenshotTool() {
     errorTimer.current = setTimeout(() => setError(null), 4000);
   }, []);
 
+  // 中止 OCR 翻译：复位本地状态并通知后端取消流式请求。
+  // 截图遮罩是常驻窗口，取消/重新识别时组件不会卸载，不主动取消的话后台请求
+  // 会继续跑完并消耗接口额度。
+  const abortOcrTranslation = useCallback(() => {
+    ocrTranslateSessionRef.current += 1;
+    if (!ocrTranslatingRef.current) return;
+    ocrTranslatingRef.current = false;
+    setOcrTranslating(false);
+    cancelOcrOptimize();
+    // 恢复原文：调用方可能接着清空面板（取消截图），也可能因为新一轮 OCR
+    // 失败而保留旧内容 —— 两种情况下都不该让半截译文留在文本框里。
+    setOcrText(ocrTextBeforeTranslateRef.current);
+    setOcrSelection("");
+  }, [cancelOcrOptimize]);
+
+  // 监听翻译进度：流式过程实时写回文本框，结束后落定结果或恢复原文。
+  useEffect(() => {
+    if (!ocrTranslatingRef.current) return;
+    if (ocrOptimizedText !== null && ocrAiLoading) {
+      setOcrText(ocrOptimizedText);
+    } else if (!ocrAiLoading) {
+      ocrTranslatingRef.current = false;
+      setOcrTranslating(false);
+      if (ocrAiError) {
+        // 失败时恢复原文，避免流式翻译的残留片段留在文本框
+        setOcrText(ocrTextBeforeTranslateRef.current);
+        showError(ocrAiError);
+      } else if (ocrOptimizedText !== null) {
+        setOcrText(ocrOptimizedText);
+        setOcrSelection("");
+      }
+    }
+  }, [ocrAiLoading, ocrOptimizedText, ocrAiError, showError]);
+
+  // 读取已配置的搜索引擎，并跟随设置窗口的变更（与贴图 OCR 结果窗保持一致）
+  useEffect(() => {
+    let disposed = false;
+    fetchSearchEngine().then((engine) => {
+      if (!disposed) setSearchEngine(engine);
+    });
+    const un = listen<SearchEngineId>("levitaire-search-engine-changed", (event) => {
+      if (!disposed) setSearchEngine(event.payload);
+    });
+    return () => {
+      disposed = true;
+      un.then((fn) => fn());
+    };
+  }, []);
+
   /**
    * 丢弃进行中的选区调整会话。会话重置（Esc / 全局 Esc / 长截图复位）时必须调用：
    * 否则在途的 capture_region 会在取消之后落地，把已清空的截图状态"复活"。
@@ -923,10 +1033,14 @@ function ScreenshotTool() {
   redoRef.current = annotations.redo;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
       // 文字输入聚焦时不拦截 Ctrl+Z/Y，交给 textarea 处理
-      const tag = (e.target as HTMLElement | null)?.tagName;
       const inTextInput = tag === "TEXTAREA" || tag === "INPUT";
       if (e.key === "Escape") {
+        // 标注文字输入框（AnnotationCanvas 的 .ss-text-input）自己处理 Esc：
+        // 只关闭输入框，不能顺手结束整个截图会话，否则已画好的标注会一起丢失。
+        if (target?.classList?.contains("ss-text-input")) return;
         cancelRef.current();
         return;
       }
@@ -960,6 +1074,7 @@ function ScreenshotTool() {
       // save_image/pin_image 夺焦期间（弹系统对话框）忽略全局 Esc，避免与对话框取消冲突清空标注
       if (suppressFocusReset.current) return;
       genRef.current++;
+      abortOcrTranslation();
       readyRef.current = false;
       setReady(false);
       applyMonitorWorkArea(null);
@@ -989,11 +1104,12 @@ function ScreenshotTool() {
     return () => {
       un.then((fn) => fn());
     };
-  }, [discardWheelEdit]);
+  }, [abortOcrTranslation, discardWheelEdit]);
 
   useEffect(() => {
     const un = listen("long-capture-overlay-reset", () => {
       genRef.current++;
+      abortOcrTranslation();
       readyRef.current = false;
       setReady(false);
       applyMonitorWorkArea(null);
@@ -1019,7 +1135,7 @@ function ScreenshotTool() {
     return () => {
       un.then((fn) => fn());
     };
-  }, [discardWheelEdit]);
+  }, [abortOcrTranslation, discardWheelEdit]);
 
   // 失焦退出标注态：普通失焦（切走窗口、系统弹窗等）应清空截图状态，
   // 但 save/pin 弹系统对话框夺焦期间由 suppressFocusReset 抑制，避免与对话框冲突。
@@ -1072,6 +1188,7 @@ function ScreenshotTool() {
   const cancel = useCallback(() => {
     // 自增代际，使进行中的异步回调（capture/ocr/pin 等）失效
     genRef.current++;
+    abortOcrTranslation();
     readyRef.current = false;
     setReady(false);
     applyMonitorWorkArea(null);
@@ -1103,7 +1220,7 @@ function ScreenshotTool() {
     }
     dragStart.current = null;
     invoke("cancel_screenshot").catch(console.error);
-  }, [discardWheelEdit]);
+  }, [abortOcrTranslation, discardWheelEdit]);
   cancelRef.current = cancel;
 
   // 把浮点 CSS 坐标对齐到「整数物理像素」对应的 CSS 坐标。
@@ -1562,6 +1679,28 @@ function ScreenshotTool() {
     }
   };
 
+  const putOnShelf = async () => {
+    if (!image) return;
+    setBusy("shelf");
+    try {
+      const b64 = flushAnnotated() ?? image.base64;
+      await invoke("shelf_add_png", { data: b64, name: "截图.png" });
+      setShelfNote("已放入暂存架");
+      if (shelfNoteTimer.current != null) window.clearTimeout(shelfNoteTimer.current);
+      shelfNoteTimer.current = window.setTimeout(() => {
+        shelfNoteTimer.current = null;
+        setShelfNote(null);
+      }, 2500);
+    } catch (err) {
+      if (modeRef.current !== "annotating") return;
+      showError(
+        typeof err === "string" ? err : ((err as { message?: string })?.message ?? "放入暂存架失败"),
+      );
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const saveFile = async () => {
     if (!image) return;
     setBusy("save");
@@ -1589,6 +1728,8 @@ function ScreenshotTool() {
 
   const ocr = async () => {
     if (!selection || busy) return;
+    // 新一轮识别结果会覆盖面板内容，进行中的翻译先作废
+    abortOcrTranslation();
     const scale = scaleRef.current;
     const origin = originRef.current;
     const gen = genRef.current;
@@ -1639,6 +1780,46 @@ function ScreenshotTool() {
     const textarea = ocrTextRef.current;
     if (!textarea) return;
     setOcrSelection(textarea.value.slice(textarea.selectionStart, textarea.selectionEnd));
+  };
+
+  // 有选中文本时搜索选中部分，否则搜索全部识别结果
+  const searchOcrText = async () => {
+    const query = ocrSelection.trim() || ocrText?.trim() || "";
+    if (!query) return;
+    const url = buildSearchUrl(searchEngine, query);
+    try {
+      await invoke("open_url", { url });
+    } catch (err) {
+      console.error("search OCR text failed:", err);
+      showError(typeof err === "string" ? err : "打开搜索链接失败");
+    }
+  };
+
+  const translateOcrText = async () => {
+    // 翻译进行中再次点击 → 取消并恢复原文
+    if (ocrTranslatingRef.current) {
+      ocrTranslatingRef.current = false;
+      setOcrTranslating(false);
+      cancelOcrOptimize();
+      setOcrText(ocrTextBeforeTranslateRef.current);
+      setOcrSelection("");
+      return;
+    }
+    if (ocrAiLoading || !ocrText?.trim()) return;
+    const session = ocrTranslateSessionRef.current;
+    const config = await checkAiConfig();
+    // 等待配置查询期间面板被关闭 / 重新识别：这次翻译已经作废，不能再发起请求
+    if (session !== ocrTranslateSessionRef.current) return;
+    if (!config || !config.api_key || !config.api_key.trim()) {
+      showError("请先配置 AI 再进行翻译");
+      return;
+    }
+    ocrTextBeforeTranslateRef.current = ocrText;
+    ocrTranslatingRef.current = true;
+    setOcrTranslating(true);
+    setOcrSelection("");
+    // 结束/取消/报错由上面的完成 effect 统一落定，这里无需处理
+    await optimizeOcrText(ocrText, TRANSLATE_MODE).catch(() => {});
   };
 
   const startOcrPanelDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1871,16 +2052,18 @@ function ScreenshotTool() {
             annotations={toolbarAnnotations}
             busy={busy}
             error={error}
+            status={shelfNote}
             ready={true}
             onCopy={copyToClipboard}
             onSave={saveFile}
             onOcr={ocr}
             onPin={pinToDesktop}
+            onShelf={fileShelfEnabled ? putOnShelf : undefined}
             onCancel={cancel}
             toolbarRef={toolbarRef}
             above={toolbarAbove}
             style={{
-              left: selection.left,
+              left: toolbarLeft ?? selection.left,
               ...(toolbarAbove
                 ? { top: "auto", bottom: window.innerHeight - selection.top + 6 }
                 : { top: selection.top + selection.height + 6 }),
@@ -1906,7 +2089,9 @@ function ScreenshotTool() {
                   className="ss-btn"
                   onPointerDown={(event) => event.stopPropagation()}
                   onClick={() => {
+                    abortOcrTranslation();
                     setOcrText(null);
+                    setOcrSelection("");
                     setOcrPanelPosition(null);
                   }}
                   aria-label="关闭 OCR 结果"
@@ -1920,25 +2105,44 @@ function ScreenshotTool() {
                 className="ss-ocr-result-text"
                 value={ocrText}
                 onChange={(event) => {
+                  if (ocrTranslatingRef.current) return;
                   setOcrText(event.target.value);
                   setOcrSelection("");
                 }}
                 onSelect={updateOcrSelection}
                 aria-label="OCR 识别文本"
+                readOnly={ocrTranslating}
+                placeholder={ocrTranslating ? "翻译中..." : ""}
                 spellCheck={false}
               />
               <div className="ss-ocr-result-actions">
                 <button
                   className="ss-ocr-action"
+                  onClick={() => void searchOcrText()}
+                  disabled={!ocrText.trim() || !!busy || ocrTranslating}
+                  title="搜索选中内容；未选中时搜索全部"
+                >
+                  搜索
+                </button>
+                <button
+                  className="ss-ocr-action"
+                  onClick={() => void translateOcrText()}
+                  disabled={!ocrText.trim() || !!busy}
+                  title={ocrTranslating ? "取消翻译" : "翻译"}
+                >
+                  {ocrTranslating ? "取消翻译" : "翻译"}
+                </button>
+                <button
+                  className="ss-ocr-action"
                   onClick={() => copyOcrText(ocrSelection)}
-                  disabled={!ocrSelection || !!busy}
+                  disabled={!ocrSelection || !!busy || ocrTranslating}
                 >
                   复制选中
                 </button>
                 <button
                   className="ss-ocr-action ss-ocr-action-primary"
                   onClick={() => copyOcrText(ocrText)}
-                  disabled={!ocrText || !!busy}
+                  disabled={!ocrText || !!busy || ocrTranslating}
                 >
                   复制全部
                 </button>

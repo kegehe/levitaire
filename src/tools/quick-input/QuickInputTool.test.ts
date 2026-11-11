@@ -3,11 +3,29 @@ import {
   clampWheelCenter,
   fitText,
   getCapsuleGeometry,
+  getEmptyWheelHint,
   getHighlightedSector,
   getWheelItemLayout,
   snippetToWheelItem,
   textWidth,
 } from "./QuickInputTool";
+
+describe("getEmptyWheelHint", () => {
+  it("预设词启用且无内容时，提示添加预设词或开启历史，并指明设置路径", () => {
+    const hint = getEmptyWheelHint(true);
+    expect(hint.title).toBe("还没有预设词或历史");
+    expect(hint.hint).toContain("设置 › 快速输入");
+    expect(hint.hint).toContain("预设提示词");
+    expect(hint.hint).toContain("剪贴板历史");
+  });
+
+  it("预设词已关闭时，提示重新开启或开启历史", () => {
+    const hint = getEmptyWheelHint(false);
+    expect(hint.title).toBe("预设提示词已关闭");
+    expect(hint.hint).toContain("设置 › 快速输入");
+    expect(hint.hint).toContain("重新开启");
+  });
+});
 
 describe("getHighlightedSector", () => {
   const center = { x: 160, y: 160 };

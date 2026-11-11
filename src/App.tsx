@@ -20,6 +20,7 @@ const ScreenshotTool = lazy(() => import("./tools/screenshot/ScreenshotTool"));
 const RecordingTool = lazy(() => import("./tools/recording/RecordingTool"));
 const SystemMonitor = lazy(() => import("./tools/system-monitor/SystemMonitor"));
 const SystemCleanerTool = lazy(() => import("./tools/system-cleaner/SystemCleanerTool"));
+const FileShelf = lazy(() => import("./tools/file-shelf/FileShelf"));
 const TimerTool = lazy(() => import("./tools/timer/TimerTool"));
 const TodoTool = lazy(() => import("./tools/todo/TodoTool"));
 const QuickInputTool = lazy(() => import("./tools/quick-input/QuickInputTool"));
@@ -393,6 +394,8 @@ function App() {
     content = <SystemMonitor />;
   } else if (windowLabel === "system-cleaner-overlay") {
     content = <SystemCleanerTool />;
+  } else if (windowLabel === "file-shelf-overlay") {
+    content = <FileShelf />;
   } else if (windowLabel === "time-overlay") {
     content = <TimerTool />;
   } else if (windowLabel === "todo-overlay") {

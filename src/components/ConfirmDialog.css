@@ -1,0 +1,145 @@
+/* 项目统一确认弹窗（见 ConfirmDialog.tsx 的交互约定）。
+   阴影用自包含字面值 + [data-theme="dark"] 覆盖，不引用 --shadow-*（运行时是 17~39px 大投影）。 */
+.confirm-dialog-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--color-fg) 30%, transparent);
+  animation: confirm-dialog-veil-in 0.2s ease;
+}
+
+.confirm-dialog-card {
+  width: 264px;
+  max-width: calc(100% - 32px);
+  /* 暂存架最小面板（1 个条目）总高 212px：卡片紧凑化到 ~176px 才放得下；
+     max-height 是兜底，极端情况下内部滚动而不是被窗口裁掉。 */
+  max-height: calc(100% - 16px);
+  overflow-y: auto;
+  padding: 16px 16px 12px;
+  border-radius: 14px;
+  background: var(--palette-bg);
+  border: 1px solid var(--palette-border);
+  box-shadow:
+    0 6px 16px rgba(0, 0, 0, 0.16),
+    0 20px 44px -8px rgba(0, 0, 0, 0.3);
+  text-align: center;
+  animation: confirm-dialog-card-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.confirm-dialog-card p {
+  margin: 0;
+}
+
+/* 危险确认的图标锚点：红色淡底圆 + 警示图形（非 danger 用品牌色，语义是「注意」而非「破坏」） */
+.confirm-dialog-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  color: var(--confirm-dialog-danger);
+  background: color-mix(in srgb, var(--confirm-dialog-danger) 10%, transparent);
+}
+
+.confirm-dialog-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--color-fg);
+}
+
+.confirm-dialog-desc {
+  margin-top: 6px !important;
+  margin-bottom: 12px !important;
+  font-size: 11px;
+  line-height: 1.65;
+  color: color-mix(in srgb, var(--color-fg) 62%, transparent);
+}
+
+.confirm-dialog-desc b {
+  color: var(--color-fg);
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.confirm-dialog-btn {
+  flex: 1;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid var(--palette-border);
+  background: transparent;
+  color: var(--color-fg);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    transform 0.1s;
+}
+
+.confirm-dialog-btn:hover {
+  background: color-mix(in srgb, var(--color-fg) 6%, transparent);
+}
+
+/* 中性确认（非 danger）：品牌色描边强调，语义是「往前走」而不是「破坏」 */
+.confirm-dialog-btn.is-confirm:not(.is-danger) {
+  border-color: color-mix(in srgb, var(--color-accent) 40%, var(--palette-border));
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.confirm-dialog-btn.is-confirm:not(.is-danger):hover {
+  background: var(--color-accent-subtle);
+}
+
+.confirm-dialog-btn:active {
+  transform: scale(0.97);
+}
+
+.confirm-dialog-btn.is-confirm.is-danger {
+  border-color: transparent;
+  background: var(--confirm-dialog-danger);
+  color: #fff;
+  font-weight: 600;
+}
+
+.confirm-dialog-btn.is-confirm.is-danger:hover {
+  background: color-mix(in srgb, var(--confirm-dialog-danger) 88%, black);
+}
+
+/* 危险色只在组件内部定义（亮/暗两套），不依赖使用方提供 */
+.confirm-dialog-veil {
+  --confirm-dialog-danger: #c43b30;
+}
+
+[data-theme="dark"] .confirm-dialog-veil {
+  --confirm-dialog-danger: #e0655a;
+}
+
+@keyframes confirm-dialog-veil-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes confirm-dialog-card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .confirm-dialog-veil,
+  .confirm-dialog-card {
+    animation: none;
+  }
+}

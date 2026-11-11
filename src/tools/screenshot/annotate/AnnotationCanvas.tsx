@@ -8,9 +8,16 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { buildCursorSkin, normalizeCursorColor } from "../../../utils/cursorSkin";
 import type { ActiveTool, Annotation, ToolKind } from "./types";
-import { DEFAULT_COLOR, fontSizeFor, numberFontSizeFor, numberRadiusFor } from "./types";
+import {
+  DEFAULT_COLOR,
+  fontSizeFor,
+  MOSAIC_BLOCK_SIZE,
+  numberFontSizeFor,
+  numberRadiusFor,
+} from "./types";
 import { normalizeRect, renderAll } from "./render";
 import { hitTestAnnotation, toleranceFor, type EditHit } from "./edit";
 import type { UseAnnotations } from "./useAnnotations";
@@ -52,8 +59,8 @@ interface Props {
  * 截图标注光标（十字准星 + 颜色徽章）。几何、叠色、热点**全部来自 utils/cursorSkin**——
  * 屏幕草稿（SketchTool）用的是同一套外壳，要改光标外观请改那边，别在这里再抄一份副本。
  * 本模块只负责「每个工具画什么符号」；三条硬约束见 cursorSkin.ts 顶部注释。
- * 热点 = 十字交点 (16,16)：六个工具的落笔点都正好是点击处（矩形/马赛克左上角、
- * 箭头/画笔起点、序号圆心、文字左上角）。
+ * 热点 = 十字交点 (16,16)：六个工具的落笔点都正好是点击处（矩形左上角、
+ * 箭头/画笔/马赛克起点、序号圆心、文字左上角）。
  */
 
 /**
@@ -177,6 +184,21 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     const maxH = Math.max(40, (selection.height ?? 0) / scale);
     el.style.height = `${Math.min(el.scrollHeight, maxH)}px`;
   }, [textEditing, selection.height, scale]);
+
+  // 文字输入期间同步标记给后端：WH_KEYBOARD_LL 全局钩子不依赖窗口焦点，
+  // 若不告诉它「正在输入文字」，Esc 会在 keydown 到达 textarea 之前就结束整个截图会话。
+  // 用 effect 覆盖所有结束路径（Enter / Esc / 失焦 / 导出前 flush）与组件卸载。
+  const textEditingActive = textEditing !== null;
+  useEffect(() => {
+    if (!textEditingActive) return;
+    // 卸载（会话结束）时窗口可能已在销毁，命令失败无需处理
+    void Promise.resolve(invoke("set_screenshot_text_editing", { active: true })).catch(() => {});
+    return () => {
+      void Promise.resolve(invoke("set_screenshot_text_editing", { active: false })).catch(
+        () => {},
+      );
+    };
+  }, [textEditingActive]);
 
   // 同步重绘（供 flushBase64 在导出前强制刷新 canvas，避免 commit 后 effect 未 flush 导致导出旧像素）
   // 读 ref（getCommitted/getDraft）而非闭包 state，确保刚 commit 的标注被画上
@@ -325,7 +347,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
       return;
     }
 
-    // rect / arrow / mosaic：记起点，建 draft
+    // rect / arrow：记起点，按两点拖出形状；brush / mosaic：沿路径累点（马赛克是画笔式的）
     startRef.current = p;
     if (tool === "rect") {
       setDraft({
@@ -349,27 +371,20 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
         x2: p.x,
         y2: p.y,
       });
-    } else if (tool === "mosaic") {
-      setDraft({
-        id: genId(),
-        kind: "mosaic",
-        color,
-        strokeWidth: sw,
-        x: p.x,
-        y: p.y,
-        w: 0,
-        h: 0,
-        blockSize: 10,
-      });
-    } else if (tool === "brush") {
+    } else if (tool === "brush" || tool === "mosaic") {
       draftPtsRef.current = [p];
-      setDraft({
-        id: genId(),
-        kind: "brush",
-        color,
-        strokeWidth: sw,
-        points: [p],
-      });
+      setDraft(
+        tool === "brush"
+          ? { id: genId(), kind: "brush", color, strokeWidth: sw, points: [p] }
+          : {
+              id: genId(),
+              kind: "mosaic",
+              color,
+              strokeWidth: sw,
+              points: [p],
+              blockSize: MOSAIC_BLOCK_SIZE,
+            },
+      );
     }
     e.currentTarget.setPointerCapture(e.pointerId);
   };
@@ -380,22 +395,21 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     if (!start) return;
     const p = toCanvas(e.clientX, e.clientY);
 
-    if (tool === "rect" || tool === "mosaic") {
+    if (tool === "rect") {
       const r = normalizeRect(start.x, start.y, p.x, p.y);
-      setDraft((d) =>
-        d && (d.kind === "rect" || d.kind === "mosaic")
-          ? ({ ...d, x: r.x, y: r.y, w: r.w, h: r.h } as Annotation)
-          : d,
-      );
+      setDraft((d) => (d && d.kind === "rect" ? ({ ...d, ...r } as Annotation) : d));
     } else if (tool === "arrow") {
       setDraft((d) => (d && d.kind === "arrow" ? ({ ...d, x2: p.x, y2: p.y } as Annotation) : d));
-    } else if (tool === "brush") {
+    } else if (tool === "brush" || tool === "mosaic") {
       const pts = draftPtsRef.current;
       const last = pts[pts.length - 1];
+      // 采样去抖：相邻点不足 2 物理像素不落点，避免路径点暴涨拖慢重绘
       if (Math.hypot(p.x - last.x, p.y - last.y) < 2) return;
       pts.push(p);
       setDraft((d) =>
-        d && d.kind === "brush" ? ({ ...d, points: pts.slice() } as Annotation) : d,
+        d && (d.kind === "brush" || d.kind === "mosaic")
+          ? ({ ...d, points: pts.slice() } as Annotation)
+          : d,
       );
     }
   };
@@ -410,37 +424,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
     const sw = strokeWidth;
     // 直接构造最终 annotation 提交，不依赖 commitDraft 读 draft ref（避免 React 批处理下 ref 陈旧）
     let ann: Annotation | null = null;
-    if (tool === "rect" || tool === "mosaic") {
+    if (tool === "rect") {
       const r = normalizeRect(start.x, start.y, p.x, p.y);
       if (r.w < 3 || r.h < 3) {
         setDraft(null);
         draftPtsRef.current = [];
         return;
       }
-      if (tool === "rect") {
-        ann = {
-          id: genId(),
-          kind: "rect",
-          color,
-          strokeWidth: sw,
-          x: r.x,
-          y: r.y,
-          w: r.w,
-          h: r.h,
-        };
-      } else {
-        ann = {
-          id: genId(),
-          kind: "mosaic",
-          color,
-          strokeWidth: sw,
-          x: r.x,
-          y: r.y,
-          w: r.w,
-          h: r.h,
-          blockSize: 10,
-        };
-      }
+      ann = {
+        id: genId(),
+        kind: "rect",
+        color,
+        strokeWidth: sw,
+        x: r.x,
+        y: r.y,
+        w: r.w,
+        h: r.h,
+      };
     } else if (tool === "arrow") {
       if (Math.hypot(p.x - start.x, p.y - start.y) < 3) {
         setDraft(null);
@@ -457,20 +457,25 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
         x2: p.x,
         y2: p.y,
       };
-    } else if (tool === "brush") {
+    } else if (tool === "brush" || tool === "mosaic") {
       const pts = draftPtsRef.current;
+      // 单点（点一下就松手）不留标注：马赛克/画笔都需要一段笔迹才有意义
       if (pts.length < 2) {
         setDraft(null);
         draftPtsRef.current = [];
         return;
       }
-      ann = {
-        id: genId(),
-        kind: "brush",
-        color,
-        strokeWidth: sw,
-        points: pts.slice(),
-      };
+      ann =
+        tool === "brush"
+          ? { id: genId(), kind: "brush", color, strokeWidth: sw, points: pts.slice() }
+          : {
+              id: genId(),
+              kind: "mosaic",
+              color,
+              strokeWidth: sw,
+              points: pts.slice(),
+              blockSize: MOSAIC_BLOCK_SIZE,
+            };
     }
     if (ann) {
       commit(ann);
@@ -527,6 +532,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(function Anno
               finishText();
             } else if (e.key === "Escape") {
               e.preventDefault();
+              // 先清 ref 再关输入框：Esc 的语义是「放弃这段文字」，不能让紧随其后的
+              // blur / flushBase64 通过 finishText 把它又提交上去。
+              textEditingRef.current = null;
+              composingRef.current = false;
               setTextEditing(null);
             }
           }}

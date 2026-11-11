@@ -102,6 +102,12 @@ static TIMER_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
 
 static TODO_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
 
+/// 文件暂存架也是置顶浮窗。藏起来的时机与时钟相同，但截完纯净画面后
+/// **不能**跟时钟一起在遮罩底下提前显示：它同样置顶，会盖住选区。
+/// 只在会话真正结束时恢复。长截图开始时不要重写这个标记，否则会把
+/// 「会话前可见」记成当时已经被藏起来的状态。
+static SHELF_VISIBLE_BEFORE_SESSION: AtomicBool = AtomicBool::new(false);
+
 /// 截图/录屏会话是否活跃。进入 start_screenshot / start_recording_select 时置 true，
 /// 会话清理（cleanup_screenshot_session_inner / cancel_recording_select）时置 false。
 /// 用于区分「正在清理会话」（按会话前状态恢复 orb）与「空闲清理」
@@ -202,6 +208,7 @@ mod text;
 mod timer;
 mod todo;
 mod tools;
+mod shelf;
 mod window;
 
 pub use ai::*;
@@ -213,6 +220,7 @@ pub use quick_input::*;
 pub use recording::*;
 pub use screenshot::*;
 pub use session::*;
+pub use shelf::*;
 pub use sketch::*;
 pub use sticky::*;
 pub use text::*;
@@ -397,6 +405,7 @@ fn tool_still_enabled(app: &tauri::AppHandle, tool: &str) -> bool {
         "todo" => config.get_todo_enabled(),
         "sketch" => config.get_sketch_enabled(),
         "text-toolbar" => config.get_text_toolbar_enabled(),
+        "file-shelf" => config.get_file_shelf_enabled(),
         _ => return true,
     };
     enabled.unwrap_or(true)
@@ -453,12 +462,10 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
             *guard = None;
         }
     }
-    // 仅当确有会话被清理且会话前 orb 可见时才恢复显示，避免强制弹出托盘已隐藏的 orb
-    if session_active && ORB_VISIBLE_BEFORE_SESSION.load(Ordering::SeqCst) {
-        if let Some(orb) = app.get_webview_window("orb") {
-            let _ = orb.show();
-            let _ = orb.set_always_on_top(true);
-        }
+    // 仅当确有会话被清理且会话前 orb 可见时才恢复显示，避免强制弹出托盘已隐藏的 orb。
+    // 标记用 swap 消费：陈旧值跨会话泄漏会让后续「空闲清理」误判成需要恢复。
+    if session_active && ORB_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        apply_orb_visibility(app, true);
     }
     // 恢复会话前可见的时钟/待办悬浮窗：缓存截取期间被临时隐藏，
     // 若会话在恢复步骤前被取消（如截屏期间按 Esc），此处兜底恢复。
@@ -476,6 +483,13 @@ fn cleanup_screenshot_session_inner(app: &tauri::AppHandle) {
         {
             if let Some(todo) = app.get_webview_window("todo-overlay") {
                 let _ = todo.show();
+            }
+        }
+        if SHELF_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+            && tool_still_enabled(app, "file-shelf")
+        {
+            if let Some(shelf) = app.get_webview_window("file-shelf-overlay") {
+                let _ = shelf.show();
             }
         }
     }
@@ -544,6 +558,7 @@ pub const OWN_WINDOW_LABELS: &[&str] = &[
     "utility-hub-overlay",
     "sticky-notes-manager",
     "system-cleaner-overlay",
+    "file-shelf-overlay",
 ];
 
 /// 某个 HWND 是否属于 Levitaire 自己的窗口（**唯一权威实现**）。
@@ -1116,12 +1131,24 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         .get_webview_window("todo-overlay")
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false);
-    // 记录会话前 orb/时钟/待办可见性 + 会话活跃标记，供会话清理（取消截图）时按原状态恢复，
+    let shelf_was_visible = app
+        .get_webview_window("file-shelf-overlay")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    // 记录会话前 orb/时钟/待办/暂存架可见性 + 会话活跃标记，供会话清理（取消截图）时按原状态恢复，
     // 不强制弹出用户经托盘已隐藏的 orb。先记录再置 screenshot_mode，
     // 避免并发清理读到「模式已置但标记未更新」的半状态。
-    ORB_VISIBLE_BEFORE_SESSION.store(orb_was_visible, Ordering::SeqCst);
-    TIMER_VISIBLE_BEFORE_SESSION.store(timer_was_visible, Ordering::SeqCst);
-    TODO_VISIBLE_BEFORE_SESSION.store(todo_was_visible, Ordering::SeqCst);
+    //
+    // 只在**没有更早的采集会话**时写标记：录屏停止后的预览阶段 recording_mode 已清零，
+    // 但 CAPTURE_SESSION_ACTIVE 仍为 true，浮窗正是被那次会话藏起来的。此时若照常
+    // 用「当前不可见」覆盖标记，截图结束后 orb/时钟/待办/暂存架就再也不会回来。
+    // 与 start_recording_select_inner 的同名判断保持一致。
+    if !CAPTURE_SESSION_ACTIVE.load(Ordering::SeqCst) {
+        ORB_VISIBLE_BEFORE_SESSION.store(orb_was_visible, Ordering::SeqCst);
+        TIMER_VISIBLE_BEFORE_SESSION.store(timer_was_visible, Ordering::SeqCst);
+        TODO_VISIBLE_BEFORE_SESSION.store(todo_was_visible, Ordering::SeqCst);
+        SHELF_VISIBLE_BEFORE_SESSION.store(shelf_was_visible, Ordering::SeqCst);
+    }
     // 置活跃标记并通知 overlay 启动周期心跳：wait_for_screenshot_overlay_ready
     // 与原生 watchdog 都依赖渲染器持续上报存活，此通知必须在 show 之前完成。
     //
@@ -1140,9 +1167,7 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false);
     if orb_was_visible {
-        if let Some(w) = app.get_webview_window("orb") {
-            let _ = w.hide();
-        }
+        apply_orb_visibility(&app, false);
     }
     if toolbar_was_visible {
         // 统一入口：隐藏 + 复位后端侧状态（qrcode_preview 标志）＋通知前端复位预览态。
@@ -1156,6 +1181,11 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     }
     if todo_was_visible {
         if let Some(w) = app.get_webview_window("todo-overlay") {
+            let _ = w.hide();
+        }
+    }
+    if shelf_was_visible {
+        if let Some(w) = app.get_webview_window("file-shelf-overlay") {
             let _ = w.hide();
         }
     }
@@ -1263,9 +1293,7 @@ pub fn start_screenshot_inner(app: tauri::AppHandle) -> Result<(), String> {
     // 此处按原状态恢复。随后 overlay 全屏置顶会盖住它们，但退出截图（overlay.hide）后
     // 它们会按原状态正常显现，不会因截图模式而意外消失。
     if orb_was_visible {
-        if let Some(w) = app.get_webview_window("orb") {
-            let _ = w.show();
-        }
+        apply_orb_visibility(&app, true);
     }
     if toolbar_was_visible {
         if let Some(w) = app.get_webview_window("toolbar") {
@@ -1537,6 +1565,7 @@ fn default_window_position(window_id: &str, win_w: i32, win_h: i32) -> (i32, i32
             }
         }
         "system-cleaner-overlay" => (120, 120),
+        "file-shelf-overlay" => (160, 160),
         _ => (100, 100),
     }
 }
@@ -1650,6 +1679,12 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
                 .unwrap_or(false),
             Ordering::SeqCst,
         );
+        SHELF_VISIBLE_BEFORE_SESSION.store(
+            app.get_webview_window("file-shelf-overlay")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false),
+            Ordering::SeqCst,
+        );
         // 录制选区会话激活，通知 overlay 启动周期心跳
         set_capture_session_active(&app, true);
     }
@@ -1660,15 +1695,16 @@ pub fn start_recording_select_inner(app: tauri::AppHandle) -> Result<(), String>
     }
 
     // 隐藏浮动 UI，避免被截入
-    if let Some(w) = app.get_webview_window("orb") {
-        let _ = w.hide();
-    }
+    apply_orb_visibility(&app, false);
     // 统一入口：隐藏 + 复位后端侧状态（qrcode_preview 残留会让下次弹出后点外部关不掉）
     hide_toolbar_and_reset_state(&app);
     if let Some(w) = app.get_webview_window("time-overlay") {
         let _ = w.hide();
     }
     if let Some(w) = app.get_webview_window("todo-overlay") {
+        let _ = w.hide();
+    }
+    if let Some(w) = app.get_webview_window("file-shelf-overlay") {
         let _ = w.hide();
     }
     if let Some(w) = app.get_webview_window("palette") {
@@ -1929,11 +1965,8 @@ fn cancel_recording_select_inner(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(overlay) = app.get_webview_window("screenshot-overlay") {
         let _ = overlay.hide();
     }
-    if session_active && ORB_VISIBLE_BEFORE_SESSION.load(Ordering::SeqCst) {
-        if let Some(orb) = app.get_webview_window("orb") {
-            let _ = orb.show();
-            let _ = orb.set_always_on_top(true);
-        }
+    if session_active && ORB_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst) {
+        apply_orb_visibility(&app, true);
     }
     // 恢复会话前可见的时钟/待办悬浮窗（与截图会话清理保持一致）。
     // 工具已被用户关掉（例如 palette 的「全部关闭」）时不再恢复——标记无条件消费。
@@ -1950,6 +1983,13 @@ fn cancel_recording_select_inner(app: tauri::AppHandle) -> Result<(), String> {
         {
             if let Some(todo) = app.get_webview_window("todo-overlay") {
                 let _ = todo.show();
+            }
+        }
+        if SHELF_VISIBLE_BEFORE_SESSION.swap(false, Ordering::SeqCst)
+            && tool_still_enabled(&app, "file-shelf")
+        {
+            if let Some(shelf) = app.get_webview_window("file-shelf-overlay") {
+                let _ = shelf.show();
             }
         }
     }
@@ -2034,6 +2074,7 @@ mod tests {
             include_str!("quick_input.rs"),
             include_str!("sticky.rs"),
             include_str!("disk_cleanup.rs"),
+            include_str!("shelf.rs"),
         ];
         // 收窗动作：隐藏窗口 / 销毁窗口 / 取消会话 / 收起转盘 / 关闭全部贴图 /
         // 走统一入口隐藏文字工具栏（内含 hide + 状态复位）。
@@ -2059,6 +2100,7 @@ mod tests {
             "set_sticky_notes_enabled",
             "set_utility_hub_enabled",
             "set_system_cleaner_enabled",
+            "set_file_shelf_enabled",
         ];
         for name in TOGGLE_FNS {
             let body = SOURCES
@@ -2328,6 +2370,7 @@ mod tests {
             ("todo-overlay", 100, 100),
             ("system-cleaner-overlay", 120, 120),
             ("sticky-notes-manager", 100, 100),
+            ("file-shelf-overlay", 160, 160),
         ];
         for (label, x, y) in CASES {
             let start = ts.find(&format!("createToolWindow(\"{label}\"")).unwrap_or_else(|| {

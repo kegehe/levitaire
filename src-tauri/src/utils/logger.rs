@@ -36,6 +36,7 @@ fn write_line(tag: &str, msg: &str) {
         return;
     };
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let pid = std::process::id();
     let tag = tag.replace(['\r', '\n'], " ");
     let mut bounded = msg.replace(['\r', '\n'], " ");
     if bounded.len() > MAX_MESSAGE_BYTES {
@@ -46,7 +47,7 @@ fn write_line(tag: &str, msg: &str) {
         bounded.truncate(end);
         bounded.push_str("... [truncated]");
     }
-    let _ = writeln!(file, "[{timestamp}][{tag}] {bounded}");
+    let _ = writeln!(file, "[{timestamp}][pid={pid}][{tag}] {bounded}");
 }
 
 pub fn log(tag: &str, msg: &str) {

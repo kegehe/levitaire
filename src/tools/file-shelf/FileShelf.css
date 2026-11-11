@@ -1,0 +1,760 @@
+.file-shelf {
+  position: relative;
+  width: 320px;
+  box-sizing: border-box;
+  color: var(--color-fg);
+  background: var(--palette-bg);
+  border: var(--palette-border);
+  border-radius: 8px;
+  box-shadow: var(--palette-shadow);
+  backdrop-filter: blur(28px) saturate(160%);
+  font-family: inherit;
+  overflow: hidden;
+  user-select: none;
+}
+
+.file-shelf--collapsed {
+  height: 36px;
+}
+
+.file-shelf-header {
+  height: 44px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.file-shelf--collapsed .file-shelf-header {
+  height: 36px;
+}
+
+.file-shelf-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.file-shelf-count {
+  margin-right: auto;
+  min-width: 20px;
+  padding: 0 7px;
+  border-radius: 10px;
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: center;
+}
+
+.file-shelf-icon,
+.file-shelf-footer button {
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-fg) 55%, transparent);
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    transform 0.1s;
+}
+
+.file-shelf-icon:hover,
+.file-shelf-footer button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-fg) 8%, transparent);
+  color: var(--color-fg);
+}
+
+.file-shelf-icon:active {
+  transform: scale(0.94);
+}
+
+.file-shelf-notice,
+.file-shelf-message {
+  margin: 0;
+  padding: 6px 12px 4px;
+  font-size: 12px;
+  opacity: 0.75;
+  color: var(--color-fg);
+}
+
+/* ---------- 磁贴网格（方案 S · 预览优先） ---------- */
+
+.file-shelf-grid {
+  list-style: none;
+  margin: 0;
+  padding: 2px 10px 10px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 9px;
+  /* 最多完整显示 3 行，与 panelHeight 的 maxGrid 对齐 */
+  max-height: 378px;
+  overflow-y: auto;
+}
+
+.file-card {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  background: color-mix(in srgb, var(--color-fg) 3.5%, transparent);
+  border: 1.5px solid transparent;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    transform 0.12s,
+    box-shadow 0.15s;
+}
+
+.file-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px -2px oklch(0 0 0 / 0.12);
+}
+
+.file-card:active {
+  transform: scale(0.98);
+}
+
+/* 架内排序：抓起的磁贴浮到最上层，其余格子让位（位置变化由 FLIP 补间） */
+.file-card.is-dragging {
+  z-index: 3;
+  cursor: grabbing;
+  border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  background: var(--color-accent-subtle);
+  box-shadow: 0 10px 24px -8px color-mix(in srgb, var(--color-accent) 45%, transparent);
+  transform: scale(1.03);
+}
+
+/* 指针捕获挂在面板上，光标仍由指针下的卡片决定；排序期间统一显示抓取态 */
+.file-shelf--reordering .file-card {
+  cursor: grabbing;
+}
+
+.file-card.is-dragging:hover,
+.file-card.is-dragging:active {
+  transform: scale(1.03);
+}
+
+.file-shelf--reordering .file-card:not(.is-dragging):hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.file-card.is-selected {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  background: var(--color-accent-subtle);
+}
+
+/* 预览块：类型渐变 + 左上高光 + 居中玻璃图形芯片 */
+.file-card-prev {
+  height: 64px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-card-prev::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(130% 90% at 18% -10%, rgba(255, 255, 255, 0.3), transparent 55%);
+}
+
+.file-card-glyph {
+  position: relative;
+  z-index: 1;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.17);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  transition: transform 0.18s ease;
+}
+
+.file-card:hover .file-card-glyph {
+  transform: scale(1.07);
+}
+
+/* 类型色板：一类一色相，图形芯片里的文字标签（PDF/DOC/XLS…）负责精确区分 */
+.file-card-prev.pdf {
+  background: linear-gradient(135deg, #e26a6a, #b03636);
+}
+.file-card-prev.docx {
+  background: linear-gradient(135deg, #4a8ce8, #2557b8);
+}
+.file-card-prev.sheet {
+  background: linear-gradient(135deg, #3fae7d, #1f7a52);
+}
+.file-card-prev.slide {
+  background: linear-gradient(135deg, #eb9a4a, #c2661f);
+}
+.file-card-prev.img {
+  background: linear-gradient(135deg, #9070ea, #5a3fc0);
+}
+.file-card-prev.video {
+  background: linear-gradient(135deg, #e0559a, #b03070);
+}
+.file-card-prev.audio {
+  background: linear-gradient(135deg, #2fb8a6, #16857a);
+}
+.file-card-prev.archive {
+  background: linear-gradient(135deg, #b08346, #7d5a2a);
+}
+.file-card-prev.code {
+  background: linear-gradient(135deg, #5a6ee0, #3846b0);
+}
+.file-card-prev.text {
+  background: linear-gradient(135deg, #7a8aa6, #525f78);
+}
+.file-card-prev.exe {
+  background: linear-gradient(135deg, #6a7686, #454f5c);
+}
+.file-card-prev.font {
+  background: linear-gradient(135deg, #d05fa2, #963573);
+}
+.file-card-prev.dir {
+  background: linear-gradient(135deg, #e2a94f, #a86a1c);
+}
+.file-card-prev.file {
+  background: linear-gradient(135deg, #8a94a8, #5a6478);
+}
+.file-card-prev.dead {
+  background: linear-gradient(135deg, #b9b9b9, #8a8a8a);
+}
+
+[data-theme="dark"] .file-card-prev.dead {
+  background: linear-gradient(135deg, #3a3a3a, #242424);
+}
+
+/* 图片/视频缩略图：铺满预览块（object-fit: cover），radial 高光 ::after 仍盖在其上 */
+.file-card-thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 视频角标：居中播放圆钮 */
+.file-card-play {
+  position: relative;
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.file-card-play svg {
+  width: 12px;
+  height: 12px;
+}
+
+.file-card-glyph svg {
+  width: 20px;
+  height: 20px;
+}
+
+.file-card.is-selected .file-card-prev {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55);
+}
+
+[data-theme="dark"] .file-card.is-selected .file-card-prev {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35);
+}
+
+.file-card-meta {
+  padding: 8px 10px 9px;
+}
+
+.file-card-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-card-kind {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  font-size: 10px;
+  color: var(--color-fg-muted);
+}
+
+.file-card-kind::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  margin-right: 4px;
+  flex: none;
+}
+
+.file-card-kind.is-ref::before {
+  background: transparent;
+  border: 1.2px solid var(--color-accent);
+}
+
+.file-card.is-dead {
+  opacity: 0.8;
+}
+
+.file-card.is-dead .file-card-glyph {
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+.file-card-warn {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  color: var(--file-shelf-warn);
+  z-index: 2;
+}
+
+.file-card-warn-t {
+  color: var(--file-shelf-warn);
+  font-weight: 600;
+}
+
+/* 媒体上的常驻角按钮：白色小药丸（暗色深药丸），定位=左上、移除=右上 */
+.file-card-tact {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  width: 21px;
+  height: 21px;
+  border-radius: 7px;
+  border: 0;
+  background: rgba(255, 255, 255, 0.88);
+  color: #3a3a3a;
+  cursor: pointer;
+  padding: 0;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px oklch(0 0 0 / 0.18);
+  transition:
+    background 0.15s,
+    color 0.15s,
+    transform 0.1s;
+}
+
+[data-theme="dark"] .file-card-tact {
+  background: rgba(18, 18, 18, 0.8);
+  color: #cfcfcf;
+}
+
+.file-card-tact:hover {
+  background: #fff;
+  color: #111;
+}
+
+[data-theme="dark"] .file-card-tact:hover {
+  background: #262626;
+  color: #fff;
+}
+
+.file-card-tact:active {
+  transform: scale(0.92);
+}
+
+.file-card-tact.is-del {
+  left: auto;
+  right: 5px;
+}
+
+.file-card-tact.is-del:hover {
+  color: #d64541;
+  background: #fff;
+}
+
+[data-theme="dark"] .file-card-tact.is-del:hover {
+  color: #ff8b80;
+  background: #262626;
+}
+
+/* 空状态：虚线容器 + 品牌色加号（拖入引导由 --drop-target 层接管，此处只占位） */
+.file-shelf-empty {
+  margin: 2px 10px 10px;
+  height: 118px;
+  border-radius: 11px;
+  border: 1.5px dashed color-mix(in srgb, var(--color-fg) 18%, transparent);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--color-fg-muted);
+  font-size: 11.5px;
+}
+
+.file-shelf-empty-plus {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-shelf-footer {
+  height: 38px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+
+.file-shelf-stat {
+  display: inline-flex;
+  align-items: center;
+}
+
+.file-shelf-stat::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  margin-right: 5px;
+}
+
+.file-shelf-stat.is-ref::before {
+  background: transparent;
+  border: 1.2px solid var(--color-accent);
+}
+
+.file-shelf-stat + .file-shelf-stat {
+  margin-left: 12px;
+}
+
+.file-shelf-footer button {
+  margin-left: auto;
+  width: auto;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  color: var(--color-fg-muted);
+  font-size: 11px;
+}
+
+.file-shelf-footer button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.file-shelf-footer button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--file-shelf-danger) 10%, transparent);
+  color: var(--file-shelf-danger);
+}
+
+/* 拖着文件悬在窗口上时的引导层（方案 I · 玻璃浮层）。
+   系统拖放由后端的 IDropTarget 接管，页面收不到 dragover，悬停状态只能由 Rust 转发。
+   两级反馈：
+   - armed（.file-shelf--drop-target，文件在系统里被拖起）：呼吸环境光 + 边缘流光 + 光尘 + 悬浮芯片；
+   - hover（.file-shelf--drop-hover，光标已到窗口上）：流光加速、芯片弹性落位并转品牌色。
+   动效全部走 transform/opacity/box-shadow，不触发重排。
+   ⚠️ 环境光投影受窗口留白硬约束（PANEL_SHADOW_MARGIN=20）：模糊半径/2 + 垂直偏移 ≤ 20。 */
+
+@property --shelf-ang {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.file-shelf {
+  --shelf-glow: color-mix(in srgb, var(--color-accent) 30%, transparent);
+  --shelf-glow-strong: color-mix(in srgb, var(--color-accent) 42%, transparent);
+  --file-shelf-warn: #c46a1e;
+  --file-shelf-danger: #c43b30;
+  transition:
+    border-color 0.35s,
+    box-shadow 0.35s;
+}
+
+[data-theme="dark"] .file-shelf {
+  --file-shelf-warn: #e09a55;
+  --file-shelf-danger: #e0655a;
+}
+
+/* armed：品牌色环境光呼吸（叠加在原有调色板投影之上） */
+.file-shelf--drop-target {
+  border-color: color-mix(in srgb, var(--color-accent) 45%, var(--palette-card-border));
+  animation: file-shelf-ambient 2.8s ease-in-out infinite;
+}
+
+.file-shelf--drop-hover {
+  border-color: var(--color-accent);
+}
+
+/* 边缘流光：一段高亮沿边框巡游，armed 慢速、hover 加速提亮 */
+.file-shelf--drop-target::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  /* inset:0 定位在 padding box（8px 圆角 - 1px 边框），这里必须用 7px 才能贴住拐角 */
+  border-radius: 7px;
+  padding: 1.5px;
+  background: conic-gradient(
+    from var(--shelf-ang),
+    transparent 0 68%,
+    var(--color-accent) 82%,
+    transparent 94%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: 0.5;
+  animation: file-shelf-spin 5.5s linear infinite;
+  pointer-events: none;
+}
+
+.file-shelf--drop-hover::before {
+  opacity: 0.95;
+  animation-duration: 2.2s;
+}
+
+/* 清单与底栏退到背景，把视觉重心让给引导芯片 */
+.file-shelf-grid,
+.file-shelf-empty,
+.file-shelf-footer,
+.file-shelf-message {
+  transition:
+    opacity 0.4s,
+    transform 0.4s;
+}
+
+.file-shelf--drop-target .file-shelf-grid,
+.file-shelf--drop-target .file-shelf-empty,
+.file-shelf--drop-target .file-shelf-footer,
+.file-shelf--drop-target .file-shelf-message {
+  opacity: 0.25;
+  transform: scale(0.99);
+}
+
+/* 用 visibility 而不是不渲染：空列表的提示占着高度，删掉会让面板在拖动时突然缩一截。 */
+.file-shelf--drop-target .file-shelf-empty {
+  visibility: hidden;
+}
+
+.file-shelf-drop {
+  position: absolute;
+  inset: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* 玻璃芯片：armed 悬浮 + 图标下落引导；hover 弹性落位、转品牌色并扫过一道光泽 */
+.file-shelf-drop-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--palette-bg) 92%, transparent);
+  backdrop-filter: blur(6px);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-fg);
+  box-shadow: 0 6px 18px oklch(0 0 0 / 0.14);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.file-shelf--drop-target:not(.file-shelf--drop-hover) .file-shelf-drop-chip {
+  animation: file-shelf-chip-float 3.2s ease-in-out infinite;
+}
+
+.file-shelf--drop-target:not(.file-shelf--drop-hover) .file-shelf-drop-chip svg {
+  animation: file-shelf-icon-drop 1.8s ease-in-out infinite;
+}
+
+.file-shelf--drop-hover .file-shelf-drop-chip {
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-hover));
+  color: var(--color-accent-fg);
+  box-shadow: 0 6px 24px var(--shelf-glow);
+  animation: file-shelf-chip-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.file-shelf--drop-hover .file-shelf-drop-chip::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -45%;
+  width: 40%;
+  background: linear-gradient(
+    105deg,
+    transparent,
+    color-mix(in srgb, var(--color-accent-fg) 50%, transparent),
+    transparent
+  );
+  animation: file-shelf-sheen 0.7s ease-out 1 both;
+}
+
+/* 光尘：缓缓上升的光点，收起态（36px）没有空间，直接隐藏 */
+.file-shelf-drop .speck {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  opacity: 0;
+  animation: file-shelf-speck 3.6s linear infinite;
+}
+
+.file-shelf-drop .speck.s1 {
+  left: 16%;
+  bottom: 22%;
+}
+.file-shelf-drop .speck.s2 {
+  left: 38%;
+  bottom: 16%;
+  animation-delay: 1.1s;
+}
+.file-shelf-drop .speck.s3 {
+  left: 63%;
+  bottom: 20%;
+  animation-delay: 2.1s;
+}
+.file-shelf-drop .speck.s4 {
+  left: 83%;
+  bottom: 26%;
+  animation-delay: 0.5s;
+}
+
+.file-shelf--collapsed .file-shelf-drop .speck {
+  display: none;
+}
+
+@keyframes file-shelf-ambient {
+  0%,
+  100% {
+    box-shadow:
+      var(--palette-shadow),
+      0 2px 20px var(--shelf-glow);
+  }
+  50% {
+    box-shadow:
+      var(--palette-shadow),
+      0 6px 28px var(--shelf-glow-strong);
+  }
+}
+
+@keyframes file-shelf-spin {
+  to {
+    --shelf-ang: 360deg;
+  }
+}
+
+@keyframes file-shelf-chip-float {
+  0%,
+  100% {
+    transform: translate(0, -2px);
+  }
+  50% {
+    transform: translate(0, 3px);
+  }
+}
+
+@keyframes file-shelf-chip-pop {
+  0% {
+    transform: scale(0.9);
+  }
+  60% {
+    transform: scale(1.04);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes file-shelf-icon-drop {
+  0%,
+  100% {
+    transform: translateY(-2px);
+    opacity: 0.7;
+  }
+  50% {
+    transform: translateY(2px);
+    opacity: 1;
+  }
+}
+
+@keyframes file-shelf-sheen {
+  from {
+    left: -45%;
+  }
+  to {
+    left: 110%;
+  }
+}
+
+@keyframes file-shelf-speck {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.7;
+  }
+  60% {
+    opacity: 0.45;
+  }
+  100% {
+    transform: translateY(-92px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-shelf--drop-target,
+  .file-shelf--drop-target::before,
+  .file-shelf-drop-chip,
+  .file-shelf-drop-chip svg,
+  .file-shelf-drop .speck {
+    animation: none;
+  }
+
+  .file-shelf-drop .speck {
+    display: none;
+  }
+}

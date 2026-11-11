@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LogicalSize } from "@tauri-apps/api/dpi";
@@ -976,6 +976,17 @@ function FloatingToolbar() {
     resetToDefault();
   };
 
+  const selectionText = selection?.text ?? "";
+  const trimmedText = selectionText.trim();
+  // base64 检测会解码整段文本，成本随选区长度线性增长；而流式输出/朗读进度会高频
+  // 重渲染本组件。仅在默认态、且「解码」按钮启用时才计算，并按文本与可见性缓存，
+  // 避免每次渲染重复解码。
+  const showBase64Decode = useMemo(() => {
+    if (!isVisible || state !== "default") return false;
+    if (!enabledFeatureIds.includes("base64-decode")) return false;
+    return isBase64(trimmedText);
+  }, [isVisible, state, enabledFeatureIds, trimmedText]);
+
   if (!isVisible || !selection) {
     return null;
   }
@@ -1002,8 +1013,6 @@ function FloatingToolbar() {
     tts: { icon: "Volume2", label: "朗读", onClick: handleSpeak },
     clear: { icon: "RemoveFormatting", label: "清除", onClick: handleClearClick },
   };
-  const selectionText = selection.text ?? "";
-  const trimmedText = selectionText.trim();
   // 纯图片选区（有图无文字）时只显示复制按钮，历史行为
   const imageOnlySelection = Boolean(selection["has-image"] && !selectionText);
   const needsNonEmptyText = new Set([
@@ -1022,7 +1031,7 @@ function FloatingToolbar() {
     .filter((id) => {
       if (id === "copy") return true;
       if (imageOnlySelection) return false;
-      if (id === "base64-decode") return isBase64(trimmedText);
+      if (id === "base64-decode") return showBase64Decode;
       if (id === "unicode-decode") return trimmedText.length > 0 && isUnicodeEscaped(trimmedText);
       if (needsNonEmptyText.has(id)) return trimmedText.length > 0;
       return true;

@@ -252,7 +252,6 @@
   --orb-bg: rgb(244 248 250 / 0.74);
   --orb-bg-fallback: rgb(244 248 250);
   --orb-border: 1px solid rgb(105 122 141 / 0.28);
-  --orb-backdrop: blur(22px) saturate(160%);
   --orb-size: 56px;
   --orb-icon-color: var(--color-fg);
   --orb-glow-neutral: rgb(92 111 129 / 0.2);
@@ -394,7 +393,6 @@
   --orb-bg: rgb(22 28 37 / 0.78);
   --orb-bg-fallback: rgb(22 28 37);
   --orb-border: 1px solid rgb(255 255 255 / 0.16);
-  --orb-backdrop: blur(24px) saturate(160%);
   --orb-icon-color: var(--color-fg);
   --orb-glow-neutral: rgb(139 158 179 / 0.18);
   --orb-glow-neutral-hover: rgb(160 180 201 / 0.25);

@@ -32,7 +32,8 @@ type ToolWindowLabel =
   | "sketch-overlay"
   | "utility-hub-overlay"
   | "sticky-notes-manager"
-  | "system-cleaner-overlay";
+  | "system-cleaner-overlay"
+  | "file-shelf-overlay";
 
 const pendingWindows = new Map<ToolWindowLabel, Promise<WebviewWindowInstance>>();
 let screenshotOverlayReady = false;
@@ -41,6 +42,9 @@ const screenshotOverlayReadyWaiters = new Set<() => void>();
 let monitorReady = false;
 let monitorReadyListener: Promise<UnlistenFn> | undefined;
 const monitorReadyWaiters = new Set<() => void>();
+let fileShelfReady = false;
+let fileShelfReadyListener: Promise<UnlistenFn> | undefined;
+const fileShelfReadyWaiters = new Set<() => void>();
 let cleanerReady = false;
 let cleanerReadyListener: Promise<UnlistenFn> | undefined;
 const cleanerReadyWaiters = new Set<() => void>();
@@ -753,7 +757,17 @@ function clampContextMenuPosition(
 export async function showContextMenu(request: ContextMenuRequest): Promise<void> {
   const window = await ensureContextMenuWindow();
   const width = CONTEXT_MENU_WIDTH;
-  const height = contextMenuHeight(request.source);
+  // 「放入暂存架」只在暂存架开启时渲染。窗口高度必须按**实际条目数**算：
+  // 按满配算再让前端缩回去，会让靠近屏幕下沿的菜单按多出来的 34px 夹取，
+  // 菜单离光标远一截（而且第一条消息渲染出来前会有一帧高度不匹配）。
+  const shelfEnabled =
+    request.source === "pin"
+      ? await invoke<boolean>("get_file_shelf_enabled").catch(() => true)
+      : undefined;
+  const height = contextMenuHeight(
+    request.source,
+    request.source === "pin" && shelfEnabled === false ? 1 : 0,
+  );
   const [bounds, scaleFactor] = await Promise.all([
     invoke<DesktopBounds>("get_virtual_desktop_bounds"),
     window.scaleFactor(),
@@ -776,7 +790,7 @@ export async function showContextMenu(request: ContextMenuRequest): Promise<void
       bounds,
     ),
   );
-  await emitTo("context-menu", "context-menu-show", request);
+  await emitTo("context-menu", "context-menu-show", { ...request, shelfEnabled });
 }
 
 export async function hideContextMenu(): Promise<void> {
@@ -849,6 +863,67 @@ export async function ensureTimerWindow(): Promise<WebviewWindowInstance> {
     backgroundColor: [0, 0, 0, 0],
   });
   await waitForTimerWindowReady();
+  return window;
+}
+
+async function prepareFileShelfWindowReadyListener(): Promise<void> {
+  if (!fileShelfReadyListener) {
+    fileShelfReadyListener = listen("file-shelf-ready", () => {
+      fileShelfReady = true;
+      fileShelfReadyWaiters.forEach((resolve) => resolve());
+      fileShelfReadyWaiters.clear();
+    });
+  }
+  await fileShelfReadyListener;
+}
+
+async function waitForFileShelfWindowReady(): Promise<void> {
+  await prepareFileShelfWindowReadyListener();
+  if (fileShelfReady) return;
+  await new Promise<void>((resolve) => {
+    const retryTimer = startReadyRequestRetry("file-shelf-overlay", "file-shelf-ready-request");
+    const timeout = window.setTimeout(() => {
+      // 开发态首次打开要走 vite 的模块图，冷启动可能超过 5 秒。超时不该让整次打开失败：
+      // show_file_shelf 只是显示窗口并登记拖放目标，页面晚挂载也能用。
+      console.warn("[toolWindows] 文件暂存架窗口就绪超时，继续显示");
+      window.clearInterval(retryTimer);
+      fileShelfReadyWaiters.delete(onReady);
+      resolve();
+    }, 5000);
+    const onReady = () => {
+      window.clearInterval(retryTimer);
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    fileShelfReadyWaiters.add(onReady);
+  });
+}
+
+export async function ensureFileShelfWindow(): Promise<WebviewWindowInstance> {
+  const existing = await WebviewWindow.getByLabel("file-shelf-overlay");
+  if (existing) {
+    await waitForFileShelfWindowReady();
+    return existing;
+  }
+  await prepareFileShelfWindowReadyListener();
+  fileShelfReady = false;
+  const window = await createToolWindow("file-shelf-overlay", {
+    title: "Levitaire 文件暂存架",
+    // 面板 320（FileShelf.tsx PANEL_WIDTH）+ 2×20 投影留白；高度为空状态面板 214 + 40
+    width: 360,
+    height: 254,
+    resizable: false,
+    transparent: true,
+    decorations: false,
+    shadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    x: 160,
+    y: 160,
+    backgroundColor: [0, 0, 0, 0],
+  });
+  await waitForFileShelfWindowReady();
   return window;
 }
 
@@ -1059,6 +1134,11 @@ export async function openToolWindow(toolId: string): Promise<boolean> {
     if (toolId === "sticky-notes") {
       await ensureStickyNotesManagerWindow();
       await invoke("show_sticky_notes_manager");
+      return true;
+    }
+    if (toolId === "file-shelf") {
+      await ensureFileShelfWindow();
+      await invoke("show_file_shelf");
       return true;
     }
     // 其他工具（screenshot、recording、text-toolbar）是按需触发的，

@@ -47,6 +47,7 @@
 .todo-item-title { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color var(--transition-fast), opacity var(--transition-fast); }
 .todo-item.is-completed .todo-item-title { color: var(--color-fg-subtle); text-decoration: line-through; }
 .todo-due { color: var(--color-fg-subtle); font-size: 10px; }
+.todo-item-list { max-width: 96px; overflow: hidden; flex-shrink: 0; color: var(--color-accent); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .todo-due.is-overdue { color: var(--color-danger-fg); }
 .todo-priority { min-height: 12px; font-size: 10px; font-weight: 650; }
 .priority-urgent { color: var(--color-danger-fg); }.priority-high { color: var(--color-accent); }.priority-low { color: var(--color-fg-subtle); }

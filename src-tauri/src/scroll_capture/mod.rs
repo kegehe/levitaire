@@ -84,44 +84,6 @@ impl StoredResult {
         pixels
     }
 
-    fn starts_with(&self, data: &[u8]) -> bool {
-        if data.len() > self.bgra_len {
-            return false;
-        }
-        let mut offset = 0;
-        for chunk in &self.bgra_chunks {
-            if offset == data.len() {
-                break;
-            }
-            let take = (data.len() - offset).min(chunk.len());
-            if chunk.get(..take) != data.get(offset..offset + take) {
-                return false;
-            }
-            offset += take;
-        }
-        offset == data.len()
-    }
-
-    fn ends_with(&self, data: &[u8]) -> bool {
-        if data.len() > self.bgra_len {
-            return false;
-        }
-        let mut remaining = data.len();
-        for chunk in self.bgra_chunks.iter().rev() {
-            if remaining == 0 {
-                break;
-            }
-            let take = remaining.min(chunk.len());
-            let chunk_start = chunk.len() - take;
-            let data_start = remaining - take;
-            if chunk.get(chunk_start..) != data.get(data_start..remaining) {
-                return false;
-            }
-            remaining -= take;
-        }
-        remaining == 0
-    }
-
     /// 合并一帧时可以跳过的行数（见 [`reusable_rows`] 的规则）。
     fn reuse_rows(&self, rows: &[u64], direction: i8) -> usize {
         reusable_rows(rows, &self.row_signatures, direction)
@@ -143,9 +105,9 @@ const MIN_REVISIT_ROWS: usize = 3;
 
 /// 合并一帧时，能安全跳过的行数。
 ///
-/// 1. 整段 candidate 正好贴在拼接边上 → 无论多短都跳过（与 HEAD 之前那版
-///    starts_with / ends_with 的行为一致；HEAD 那版对 <3 行返回 0，会把 1、2 行的
-///    微滚动重复追加。贴边重复行本身内容相同，跳过不会丢可见内容）。
+/// 1. 整段 candidate 正好贴在拼接边上 → 无论多短都跳过（早先按像素做
+///    starts_with / ends_with 的那版对 <3 行返回 0，会把 1、2 行的微滚动重复追加。
+///    贴边重复行本身内容相同，跳过不会丢可见内容）。
 /// 2. 整段 candidate 出现在成图别处 → 只有达到 MIN_REVISIT_ROWS 才跳过；
 ///    太短的片段在空白行 / 重复表格行里太容易误命中。
 /// 3. 只匹配到一部分时，只信任贴着拼接边的那一段（向下=成图尾部，向上=成图头部），
@@ -361,10 +323,13 @@ impl LongCaptureState {
         let Ok(active) = self.active.lock() else {
             return;
         };
-        if let Some(active) = active
-            .as_ref()
-            .filter(|active| activity_belongs_to_capture(active, x, y))
-        {
+        // 没有进行中的长截图时直接返回：钩子会把**所有**应用的滚轮事件转发过来，
+        // 在这里打一行日志等于用户每滚一格就同步写一次文件（还要抢全局日志锁）。
+        // 只有在会话进行中，「被拒绝」才是值得记录的信息。
+        let Some(active) = active.as_ref() else {
+            return;
+        };
+        if activity_belongs_to_capture(active, x, y) {
             crate::utils::logger::log(
                 "long-capture",
                 &format!("wheel accepted at ({},{}) delta={}", x, y, delta),
@@ -683,9 +648,18 @@ fn capture_and_merge(
     } else {
         find_overlap(previous, &current, region.width, region.height)
     };
+    let overlap_note = match &overlap {
+        Overlap::Duplicate(score) => format!("duplicate score={score:.2}"),
+        Overlap::Found(rows, score) => format!("overlap={rows} score={score:.2}"),
+        Overlap::NoMatch(score) => format!("no-match best={score:.2}"),
+    };
+    crate::utils::logger::log(
+        "long-capture",
+        &format!("merge dir={} {overlap_note}", direction),
+    );
     match overlap {
-        Overlap::Duplicate => {}
-        Overlap::Found(overlap) => {
+        Overlap::Duplicate(_) => {}
+        Overlap::Found(overlap, _) => {
             let add_rows = region.height.saturating_sub(overlap);
             let mut results_guard = match results.lock() {
                 Ok(guard) => guard,
@@ -746,7 +720,7 @@ fn capture_and_merge(
             result.frame_count += 1;
             previous.clone_from(&current);
         }
-        Overlap::NoMatch => {
+        Overlap::NoMatch(_) => {
             let message = "滚动过快，未能识别相邻画面的重叠区域；请放慢滚动速度";
             set_partial(result_id, results, message.into());
             let _ = app.emit(
@@ -782,74 +756,261 @@ fn set_completed(result_id: u64, results: &Arc<Mutex<HashMap<u64, StoredResult>>
     }
 }
 
+/// 一次重叠识别的结果。带上得分只为诊断：日志里能直接看到「真实重叠 0 分、
+/// 次优 30 分」还是「根本没有可用对齐」，不必再靠猜。
+#[derive(Debug)]
 enum Overlap {
-    Duplicate,
-    Found(u32),
-    NoMatch,
+    Duplicate(f32),
+    Found(u32, f32),
+    NoMatch(f32),
+}
+
+// ── 重叠识别 ─────────────────────────────────────────────────────
+//
+// 判据必须是「整行、只比有内容的行」：旧实现每帧只抽 12 行 × 10 列算亮度差，
+// 网页大片白底时任意偏移都能抽到全白样本，得分 0 —— 于是 35px 的最小候选
+// 赢过真实重叠，整帧被当成新内容追加（重复段落 + 白条）；动画中的帧则反过来
+// 被判失败，看起来就是「滚动不长高」。
+//
+// 现在按行做全宽采样：只有纹理行（行内亮度有明显起伏，即文字/图片所在行）参与
+// 比较，且要求足够多的纹理行才算有效候选；比较时裁掉差异最大的 20%，
+// 让固定表头这种「每一帧都在同一位置」的行不至于把真实对齐顶掉。
+// 实测（Chrome 平滑滚动 + V2EX 真实页面）：真实重叠得分 0.00，次优候选 ≥1.0。
+
+/// 一行被视为「有内容」的最小平均亮度偏差（0..255）。纯白/纯色行约为 0。
+const TEXTURE_MIN: u32 = 3;
+/// 少于这么多纹理行时不做纹理门控（合成色块、纯渐变等场景），改用全部行。
+const MIN_TEXTURED_ROWS: usize = 8;
+/// 贴边连续相同行至少这么长，才当成固定表头/底栏剔除。
+const STICKY_RUN_MIN: usize = 4;
+/// 每行横向采样列数。文字是高频内容，64 列足以让 1px 的纵向错位立刻暴露。
+const SAMPLE_COLUMNS: usize = 64;
+/// 候选重叠的得分上限（平均每像素亮度差）。
+const MATCH_MAX_SCORE: f32 = 10.0;
+/// 整帧得分低于该值且没有任何偏移更优时，判为重复帧。
+const DUPLICATE_MAX_SCORE: f32 = 5.0;
+
+struct SampledFrame {
+    cols: usize,
+    /// 行优先的亮度样本，长度 = rows × cols。
+    luma: Vec<u8>,
+    /// 每行的纹理强度（平均绝对亮度偏差）。
+    texture: Vec<u32>,
+}
+
+impl SampledFrame {
+    fn rows(&self) -> usize {
+        self.texture.len()
+    }
+
+    fn row(&self, y: usize) -> &[u8] {
+        let start = y * self.cols;
+        &self.luma[start..start + self.cols]
+    }
+
+    fn textured_rows(&self) -> usize {
+        self.texture.iter().filter(|&&t| t >= TEXTURE_MIN).count()
+    }
+}
+
+fn sample_frame(frame: &[u8], width: u32, height: u32) -> SampledFrame {
+    let w = width as usize;
+    let row_bytes = w * 4;
+    // 与旧实现一致：忽略左右各 1/12，避免滚动条和固定侧栏干扰。
+    let margin = (w / 12).min(w.saturating_sub(1) / 2);
+    let usable = w.saturating_sub(margin * 2).max(1);
+    let cols = SAMPLE_COLUMNS.min(usable);
+    let xs: Vec<usize> = if cols <= 1 {
+        vec![margin.min(w.saturating_sub(1))]
+    } else {
+        (0..cols)
+            .map(|index| margin + index * (usable - 1) / (cols - 1))
+            .collect()
+    };
+
+    let mut luma = Vec::with_capacity(height as usize * xs.len());
+    let mut texture = Vec::with_capacity(height as usize);
+    if row_bytes == 0 {
+        return SampledFrame { cols: xs.len(), luma, texture };
+    }
+    for row in frame.chunks_exact(row_bytes) {
+        let start = luma.len();
+        for &x in &xs {
+            let index = x * 4;
+            let b = u32::from(row[index]);
+            let g = u32::from(row[index + 1]);
+            let r = u32::from(row[index + 2]);
+            luma.push(((r * 77 + g * 150 + b * 29) >> 8) as u8);
+        }
+        let samples = &luma[start..];
+        let mean = samples.iter().map(|&v| u32::from(v)).sum::<u32>() / samples.len().max(1) as u32;
+        let deviation = samples
+            .iter()
+            .map(|&v| u32::from(v).abs_diff(mean))
+            .sum::<u32>()
+            / samples.len().max(1) as u32;
+        texture.push(deviation);
+    }
+    SampledFrame { cols: xs.len(), luma, texture }
+}
+
+/// 比较「previous 的尾部 overlap 行」与「current 的头部 overlap 行」。
+///
+/// 返回平均每像素亮度差；纹理行不足时返回 None（没有证据，不能算匹配）。
+/// 差异最大的 20% 行会被裁掉：固定表头在每一帧的同位置重复出现，它只会让
+/// 每个候选都变差，裁尾后不影响真实对齐脱颖而出的判据。
+///
+/// `limit` 是当前最优得分（无上限时传 `f32::INFINITY`）。累计均值明显超过它时
+/// 立刻放弃这个候选 —— 真实匹配通常落在 0 附近，而错误偏移的均值在 20 以上，
+/// 这一层剪枝把全量扫描的代价降了一个数量级（debug 构建下尤其明显）。
+fn compare_offset(
+    previous: &SampledFrame,
+    current: &SampledFrame,
+    overlap: usize,
+    use_texture: bool,
+    sticky: &[bool],
+    scratch: &mut Vec<u32>,
+    limit: f32,
+) -> Option<f32> {
+    scratch.clear();
+    let rows = current.rows();
+    if overlap == 0 || overlap > rows || overlap > previous.rows() {
+        return None;
+    }
+    let base = rows - overlap;
+    let needed = if use_texture { MIN_TEXTURED_ROWS } else { 1 };
+    // 留足余量再剪枝：真实对齐的前几行也可能因为固定表头/动画横幅偏大，
+    // 过早放弃会把唯一的正确答案剪掉（宁可慢一点，也不能判错）。
+    let abort_above = limit + 12.0;
+    let mut running: u64 = 0;
+    for y in 0..overlap {
+        if use_texture && (current.texture[y] < TEXTURE_MIN || sticky.get(y).copied().unwrap_or(false))
+        {
+            continue;
+        }
+        let a = previous.row(base + y);
+        let b = current.row(y);
+        let diff: u32 = a
+            .iter()
+            .zip(b)
+            .map(|(&left, &right)| u32::from(left).abs_diff(u32::from(right)))
+            .sum();
+        running += u64::from(diff);
+        scratch.push(diff);
+        // 多攒几行再开始剪枝：固定表头/动画横幅会让前几行偏大，过早放弃会
+        // 把真实对齐也剪掉。
+        if scratch.len() >= needed * 3
+            && running as f32 / (scratch.len() as f32 * current.cols.max(1) as f32) > abort_above
+        {
+            return None;
+        }
+    }
+    if scratch.len() < needed {
+        return None;
+    }
+    scratch.sort_unstable();
+    let keep = (scratch.len() * 4 / 5).max(1);
+    let total: u64 = scratch[..keep].iter().map(|&value| u64::from(value)).sum();
+    Some(total as f32 / (keep as f32 * current.cols.max(1) as f32))
 }
 
 fn find_overlap(previous: &[u8], current: &[u8], width: u32, height: u32) -> Overlap {
-    let max_overlap = height.saturating_sub(1);
-    if max_overlap == 0 {
-        return if overlap_score(previous, current, width, height, height) <= 5 {
-            Overlap::Duplicate
-        } else {
-            Overlap::NoMatch
+    let sampled_previous = sample_frame(previous, width, height);
+    let sampled_current = sample_frame(current, width, height);
+    // 两帧来自同一次抓屏、尺寸必然一致；万一拿到长度不完整的缓冲，直接判失败，
+    // 不要用不同的行数去算 base（会越界）。
+    let rows = sampled_current.rows();
+    if rows == 0 || sampled_previous.rows() != rows {
+        return Overlap::NoMatch(f32::INFINITY);
+    }
+    // 页面几乎全是纯色时没有纹理行可比，退回「全部行」比较（渐变/色块测试与
+    // 纯色桌面都靠这条路径）。
+    let use_texture = sampled_current.textured_rows() >= MIN_TEXTURED_ROWS;
+    // 固定表头 / 固定底栏：紧贴画面上沿或下沿、逐像素相同的连续行。
+    // 只认「边沿的整段」而不是零散相似行 —— 文字页里隔几行就有一行长得差不多，
+    // 逐行判定会把正文全当成粘性行剔掉，真实重叠反而失去证据（表现为「不长高」）。
+    // 空白行天然相同，允许它们留在连续段里，但整段必须至少含一行有内容的行。
+    let same: Vec<bool> = (0..rows)
+        .map(|y| sampled_previous.row(y) == sampled_current.row(y))
+        .collect();
+    let mut sticky = vec![false; rows];
+    let mut top = 0;
+    while top < rows && same[top] {
+        top += 1;
+    }
+    if top >= STICKY_RUN_MIN && (0..top).any(|y| sampled_current.texture[y] >= TEXTURE_MIN) {
+        sticky[..top].fill(true);
+    }
+    let mut bottom = 0;
+    while bottom < rows && same[rows - 1 - bottom] {
+        bottom += 1;
+    }
+    if bottom >= STICKY_RUN_MIN
+        && (rows - bottom..rows).any(|y| sampled_current.texture[y] >= TEXTURE_MIN)
+    {
+        sticky[rows - bottom..].fill(true);
+    }
+
+    // 判重复帧时不能用 sticky：整帧相同的情况下所有行都「粘」，全被剔掉就没证据了。
+    let no_sticky = vec![false; rows];
+    let mut scratch = Vec::with_capacity(rows);
+    let full_score = compare_offset(
+        &sampled_previous,
+        &sampled_current,
+        rows,
+        use_texture,
+        &no_sticky,
+        &mut scratch,
+        f32::INFINITY,
+    );
+
+    if rows <= 1 {
+        return match full_score {
+            Some(score) if score <= DUPLICATE_MAX_SCORE => Overlap::Duplicate(score),
+            Some(score) => Overlap::NoMatch(score),
+            None => Overlap::NoMatch(f32::INFINITY),
         };
     }
+
     // Smooth touchpad/browser scrolling can advance by only one pixel. Keep
     // the search range valid for small but otherwise legal selections too.
-    let min_overlap = (height / 20).max(1).min(max_overlap);
-    let mut best: Option<(u32, u32)> = None;
+    let max_overlap = rows - 1;
+    let min_overlap = (rows / 20).max(1).min(max_overlap);
+    let mut best: Option<(usize, f32)> = None;
     for overlap in min_overlap..=max_overlap {
-        let score = overlap_score(previous, current, width, height, overlap);
+        let Some(score) = compare_offset(
+            &sampled_previous,
+            &sampled_current,
+            overlap,
+            use_texture,
+            &sticky,
+            &mut scratch,
+            best.map(|(_, score)| score).unwrap_or(f32::INFINITY),
+        ) else {
+            continue;
+        };
         if best
-            .map(|(_, best_score)| score < best_score)
+            .map(|(_, best_score)| score < best_score - 0.05)
             .unwrap_or(true)
         {
             best = Some((overlap, score));
         }
     }
-    let full_frame_score = overlap_score(previous, current, width, height, height);
-    match best {
+
+    match (best, full_score) {
         // A static frame may contain minor rendering noise. It is a duplicate
         // only when shifting the candidate does not improve that whole-frame
         // score; otherwise a one-pixel scroll gets incorrectly discarded.
-        Some((_, score)) if full_frame_score <= 5 && score >= full_frame_score => {
-            Overlap::Duplicate
+        (Some((_, score)), Some(full)) if full <= DUPLICATE_MAX_SCORE && score >= full => {
+            Overlap::Duplicate(full)
         }
-        Some((overlap, score)) if score <= 14 => Overlap::Found(overlap),
-        _ => Overlap::NoMatch,
-    }
-}
-
-fn overlap_score(previous: &[u8], current: &[u8], width: u32, height: u32, overlap: u32) -> u32 {
-    // Do not let the ignored side margin consume a narrow capture entirely.
-    // The command accepts any non-zero width, including a one-pixel region.
-    let margin = (width / 12).min(width.saturating_sub(1) / 2);
-    let usable_width = width.saturating_sub(margin * 2).max(1);
-    let mut total = 0u64;
-    let mut count = 0u64;
-    for sample_y in 0..12u32 {
-        let y = sample_y * overlap.saturating_sub(1) / 11;
-        let previous_y = height - overlap + y;
-        for sample_x in 0..10u32 {
-            let x = margin + sample_x * usable_width.saturating_sub(1) / 9;
-            let a = luma(previous, width, previous_y, x);
-            let b = luma(current, width, y, x);
-            total += a.abs_diff(b) as u64;
-            count += 1;
+        (Some((overlap, score)), _) if score <= MATCH_MAX_SCORE => {
+            Overlap::Found(overlap as u32, score)
         }
+        (None, Some(full)) if full <= DUPLICATE_MAX_SCORE => Overlap::Duplicate(full),
+        (_, Some(full)) => Overlap::NoMatch(best.map(|(_, score)| score).unwrap_or(full)),
+        (_, None) => Overlap::NoMatch(best.map(|(_, score)| score).unwrap_or(f32::INFINITY)),
     }
-    (total / count.max(1)) as u32
-}
-
-fn luma(data: &[u8], width: u32, y: u32, x: u32) -> u8 {
-    let index = ((y as usize * width as usize) + x as usize) * 4;
-    let b = data[index] as u16;
-    let g = data[index + 1] as u16;
-    let r = data[index + 2] as u16;
-    ((r * 77 + g * 150 + b * 29) >> 8) as u8
 }
 
 pub(crate) fn encode_png_direct(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -885,13 +1046,103 @@ mod tests {
             .collect()
     }
 
+    /// 一行「网页」内容：每 5 行有一行文字（行内亮度起伏，且每行图案不同），
+    /// 其余行是纯白。用来复现大片白底把稀疏采样带偏的真实场景。
+    fn page_row(width: u32, row: usize) -> Vec<u8> {
+        (0..width)
+            .flat_map(|x| {
+                let value = if row % 5 == 0 {
+                    (((row * 37 + x as usize * 53) % 180) + 20) as u8
+                } else {
+                    250
+                };
+                [value, value, value, 255]
+            })
+            .collect()
+    }
+
+    fn page(width: u32, first: usize, height: usize) -> Vec<u8> {
+        (first..first + height)
+            .flat_map(|row| page_row(width, row))
+            .collect()
+    }
+
+    #[test]
+    fn finds_overlap_on_a_mostly_white_text_page() {
+        let width = 64u32;
+        let height = 60u32;
+        let scroll = 12usize;
+        let previous = page(width, 0, height as usize);
+        let current = page(width, scroll, height as usize);
+        // 旧实现只抽 12×10 个点，最小候选（3px）撞上全白样本就得分 0，
+        // 会误判成 3px 重叠并把整帧当新内容追加。
+        assert!(matches!(
+            find_overlap(&previous, &current, width, height),
+            Overlap::Found(48, _)
+        ));
+    }
+
+    #[test]
+    fn a_whole_scroll_sequence_keeps_every_step() {
+        // 用户报的「滚动后不长高」：只要有一帧判不出来，这段内容就永久丢了。
+        // 这里连续模拟多次不同步长的滚动（含很小的 5px / 7px），要求每一步都
+        // 能识别出来，且累计高度 == 初始视口 + 总滚动距离。
+        let width = 64u32;
+        let height = 120u32;
+        let steps = [7usize, 13, 21, 5, 30, 12];
+        let mut frames = vec![page(width, 0, height as usize)];
+        let mut scroll = 0usize;
+        for step in steps {
+            scroll += step;
+            frames.push(page(width, scroll, height as usize));
+        }
+        let mut total = height as usize;
+        for pair in frames.windows(2) {
+            match find_overlap(&pair[0], &pair[1], width, height) {
+                Overlap::Found(overlap, _) => {
+                    total += height as usize - overlap as usize;
+                }
+                other => panic!("滚动被丢掉: {other:?}"),
+            }
+        }
+        assert_eq!(total, height as usize + scroll);
+    }
+
+    #[test]
+    fn sticky_header_does_not_break_the_real_overlap() {
+        let width = 64u32;
+        let height = 60u32;
+        let header = 8usize;
+        let scroll = 12usize;
+        let mut previous = page(width, 1000, header);
+        previous.extend(page(width, 0, height as usize - header));
+        let mut current = page(width, 1000, header);
+        current.extend(page(width, scroll, height as usize - header));
+        // 固定表头在每一帧的同位置重复，不能把它算进重叠证据。
+        assert!(matches!(
+            find_overlap(&previous, &current, width, height),
+            Overlap::Found(48, _)
+        ));
+    }
+
+    #[test]
+    fn blank_page_scrolled_without_content_is_not_appended() {
+        let width = 64u32;
+        let height = 40u32;
+        let white = frame(width, &vec![255u8; height as usize]);
+        assert!(matches!(
+            find_overlap(&white, &white, width, height),
+            Overlap::Duplicate(_)
+        ));
+    }
+
     #[test]
     fn finds_vertical_overlap() {
         let previous = frame(32, &(0..80).collect::<Vec<_>>());
         let current = frame(32, &(30..110).collect::<Vec<_>>());
         assert!(matches!(
             find_overlap(&previous, &current, 32, 80),
-            Overlap::Found(50)
+            Overlap::Found(50, _)
         ));
     }
 
@@ -903,7 +1154,7 @@ mod tests {
         let previous = frame(32, &(30..110).collect::<Vec<_>>());
         assert!(matches!(
             find_overlap(&current, &previous, 32, 80),
-            Overlap::Found(50)
+            Overlap::Found(50, _)
         ));
     }
 
@@ -912,7 +1163,7 @@ mod tests {
         let image = frame(32, &(0..80).collect::<Vec<_>>());
         assert!(matches!(
             find_overlap(&image, &image, 32, 80),
-            Overlap::Duplicate
+            Overlap::Duplicate(_)
         ));
     }
 
@@ -922,7 +1173,7 @@ mod tests {
         let current = frame(1, &(10..50).collect::<Vec<_>>());
         assert!(matches!(
             find_overlap(&previous, &current, 1, 40),
-            Overlap::Found(30)
+            Overlap::Found(30, _)
         ));
     }
 
@@ -932,7 +1183,7 @@ mod tests {
         let current = frame(32, &(1..81).collect::<Vec<_>>());
         assert!(matches!(
             find_overlap(&previous, &current, 32, 80),
-            Overlap::Found(79)
+            Overlap::Found(79, _)
         ));
     }
 
@@ -942,19 +1193,17 @@ mod tests {
         let current = frame(8, &[1, 2, 3]);
         assert!(matches!(
             find_overlap(&previous, &current, 8, 3),
-            Overlap::Found(2)
+            Overlap::Found(2, _)
         ));
     }
 
     #[test]
-    fn stored_result_chunks_preserve_edges_and_materialize_order() {
+    fn stored_result_chunks_materialize_in_order() {
         let mut result = StoredResult::from_initial(1, 1, vec![1, 2, 3, 4]);
         result.bgra_chunks.push_front(vec![9, 8, 7, 6]);
         result.bgra_chunks.push_back(vec![5, 4, 3, 2]);
         result.bgra_len += 8;
 
-        assert!(result.starts_with(&[9, 8, 7, 6]));
-        assert!(result.ends_with(&[5, 4, 3, 2]));
         assert_eq!(
             result.materialize(),
             vec![9, 8, 7, 6, 1, 2, 3, 4, 5, 4, 3, 2]

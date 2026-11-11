@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   setMockWindow,
@@ -128,6 +128,46 @@ describe("ScreenshotTool 标注流程", () => {
     expect(screen.getByRole("button", { name: "箭头" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "马赛克" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "钉到桌面" })).toBeTruthy();
+  });
+
+  it("暂存架开关切换后实时更新「放入暂存架」按钮", async () => {
+    stubCanvas();
+    render(<ScreenshotTool />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const overlay = document.querySelector(".ss-overlay") as HTMLElement;
+    overlay.getBoundingClientRect = vi.fn(() => ({
+      left: 0,
+      top: 0,
+      width: 1920,
+      height: 1080,
+      right: 1920,
+      bottom: 1080,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    })) as never;
+    fireEvent.pointerDown(overlay, { clientX: 100, clientY: 100, pointerId: 1 });
+    fireEvent.pointerMove(overlay, { clientX: 300, clientY: 200, pointerId: 1 });
+    await act(async () => {
+      fireEvent.pointerUp(overlay, { clientX: 300, clientY: 200, pointerId: 1 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 初始开关为关（mock 的 get_file_shelf_enabled 返回 undefined）
+    expect(screen.queryByRole("button", { name: "放入暂存架" })).toBeNull();
+
+    // 在工具面板里打开 → 按钮出现
+    act(() => emitMockEvent("file-shelf-enabled-changed", true));
+    expect(screen.getByRole("button", { name: "放入暂存架" })).toBeTruthy();
+
+    // 关闭 → 按钮立即消失，无需重启
+    act(() => emitMockEvent("file-shelf-enabled-changed", false));
+    expect(screen.queryByRole("button", { name: "放入暂存架" })).toBeNull();
   });
 
   it("标注态失焦会退出（清除工具栏），save/pin 夺焦期间不退出", async () => {
@@ -376,6 +416,92 @@ describe("ScreenshotTool 标注流程", () => {
     });
     expect(dialog.style.left).toBe("200px");
     expect(dialog.style.top).toBe("160px");
+  });
+
+  it("OCR 结果支持按选中内容搜索与 AI 翻译", async () => {
+    stubCanvas();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_virtual_desktop_bounds") {
+        return Promise.resolve({ originX: 0, originY: 0, width: 1920, height: 1080 });
+      }
+      if (cmd === "capture_region") {
+        return Promise.resolve({ pngBase64: "AAAA", width: 100, height: 50 });
+      }
+      if (cmd === "ocr_region") {
+        return Promise.resolve("Hello world");
+      }
+      if (cmd === "get_search_engine") {
+        return Promise.resolve("google");
+      }
+      if (cmd === "get_ai_config") {
+        return Promise.resolve({ api_key: "test-key" });
+      }
+      return Promise.resolve();
+    });
+
+    render(<ScreenshotTool />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const overlay = document.querySelector(".ss-overlay") as HTMLElement;
+    overlay.getBoundingClientRect = vi.fn(() => ({
+      left: 0,
+      top: 0,
+      width: 1920,
+      height: 1080,
+      right: 1920,
+      bottom: 1080,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    })) as never;
+
+    fireEvent.pointerDown(overlay, { clientX: 100, clientY: 100, pointerId: 1 });
+    fireEvent.pointerMove(overlay, { clientX: 300, clientY: 200, pointerId: 1 });
+    await act(async () => {
+      fireEvent.pointerUp(overlay, { clientX: 300, clientY: 200, pointerId: 1 });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "OCR" }));
+    });
+
+    // 未选中时搜索全部文本，并使用设置里的搜索引擎
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("open_url", {
+      url: "https://www.google.com/search?q=Hello%20world",
+    });
+
+    // 选中后只搜索选中部分
+    const result = screen.getByRole("textbox", { name: "OCR 识别文本" }) as HTMLTextAreaElement;
+    result.setSelectionRange(0, 5);
+    fireEvent.select(result);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("open_url", {
+      url: "https://www.google.com/search?q=Hello",
+    });
+
+    // 翻译走 AI 流式接口
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "翻译" }));
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "call_ai_stream",
+        expect.objectContaining({ prompt: "Hello world" }),
+      );
+    });
+    expect(screen.getByPlaceholderText("翻译中...")).toBeTruthy();
+
+    // 翻译中关闭面板会取消后台请求，避免继续消耗额度
+    fireEvent.click(screen.getByRole("button", { name: "关闭 OCR 结果" }));
+    expect(mockInvoke).toHaveBeenCalledWith("cancel_ai_stream", expect.anything());
   });
 
   it("OCR 返回空文本时显示提示且不清空剪贴板", async () => {

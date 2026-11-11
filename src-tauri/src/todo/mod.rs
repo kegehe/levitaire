@@ -286,10 +286,16 @@ impl TodoStore {
         Ok(result)
     }
 
-    /// 将任务移动到同一清单、同一状态分组中的任意位置。
+    /// 将任务移动到任意清单、同一状态分组中的任意位置。
+    /// `list_id` 指定目标清单（`None` 表示保持在当前清单，空串表示「无清单」）；
     /// `before_id` 指定插入到该任务之前，为空表示移动到组末尾。
-    /// 移动后对该分组的 sort_order 重新紧凑编号，保持分组内相对顺序与前端一致。
-    pub fn move_to(&self, id: &str, before_id: Option<&str>) -> Result<TodoItem, String> {
+    /// 移动后对目标分组的 sort_order 重新紧凑编号，保持分组内相对顺序与前端一致。
+    pub fn move_to(
+        &self,
+        id: &str,
+        before_id: Option<&str>,
+        list_id: Option<&str>,
+    ) -> Result<TodoItem, String> {
         let mut data = self.data.lock().map_err(|e| e.to_string())?;
         let previous = data.clone();
         let index = data
@@ -297,8 +303,14 @@ impl TodoStore {
             .iter()
             .position(|item| item.id == id && item.deleted_at.is_none())
             .ok_or_else(|| "Task does not exist".to_string())?;
-        let target_list_id = data.items[index].list_id.clone();
+        let old_list_id = data.items[index].list_id.clone();
+        let target_list_id = match list_id {
+            Some(value) => normalize_list_ref(value, &data.lists)?,
+            None => old_list_id.clone(),
+        };
         let target_status = data.items[index].status.clone();
+        // 先改归属，再按目标分组重排：peers 的分组判定直接复用 items 上的 list_id。
+        data.items[index].list_id = target_list_id.clone();
         let mut peers: Vec<usize> = data
             .items
             .iter()
@@ -1175,12 +1187,12 @@ mod tests {
             test_item("c", 3),
         ]);
         // 把 a 移到 c 之前
-        store.move_to("a", Some("c")).unwrap();
+        store.move_to("a", Some("c"), None).unwrap();
         let listed = store.list(true, Some("manual")).unwrap();
         let ids: Vec<_> = listed.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "a", "c"]);
         // 把 a 移到组末尾
-        store.move_to("a", None).unwrap();
+        store.move_to("a", None, None).unwrap();
         let listed = store.list(true, Some("manual")).unwrap();
         let ids: Vec<_> = listed.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "c", "a"]);
@@ -1193,12 +1205,38 @@ mod tests {
         deleted.deleted_at = Some("2026-01-02T00:00:00Z".to_string());
         let (store, path) = test_store(vec![deleted, test_item("a", 1), test_item("b", 2)]);
         // before 指向不存在的任务时退化为移动到末尾
-        store.move_to("a", Some("ghost")).unwrap();
+        store.move_to("a", Some("ghost"), None).unwrap();
         let listed = store.list(true, Some("manual")).unwrap();
         let ids: Vec<_> = listed.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "a"]);
         // 已删除任务不能移动
-        assert!(store.move_to("deleted", None).is_err());
+        assert!(store.move_to("deleted", None, None).is_err());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn move_to_moves_a_task_between_lists() {
+        let (store, path) = test_store(Vec::new());
+        let list = store
+            .create_list(CreateTodoListInput {
+                name: "工作".to_string(),
+            })
+            .unwrap();
+        let a = store.create(test_input("a", "")).unwrap();
+        store.create(test_input("b", &list.id)).unwrap();
+        let c = store.create(test_input("c", &list.id)).unwrap();
+        // 未归类 → 新建清单，插到 c 之前
+        let moved = store.move_to(&a.id, Some(&c.id), Some(&list.id)).unwrap();
+        assert_eq!(moved.list_id, list.id);
+        let listed = store.list(true, Some("manual")).unwrap();
+        let titles: Vec<_> = listed.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(titles, vec!["b", "a", "c"]);
+        // 再移回「无清单」：空串是合法目标，不是「保持原清单」
+        let moved = store.move_to(&a.id, None, Some("")).unwrap();
+        assert_eq!(moved.list_id, "");
+        // 目标清单不存在时拒绝，且不能留下半改状态
+        assert!(store.move_to(&a.id, None, Some("list-gone")).is_err());
+        assert_eq!(store.list(true, Some("manual")).unwrap().len(), 3);
         let _ = fs::remove_file(path);
     }
 

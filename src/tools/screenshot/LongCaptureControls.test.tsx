@@ -155,3 +155,24 @@ describe("长截图进行中控制条", () => {
     expect(win.setSize).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("长截图预览的暂存架按钮", () => {
+  it("暂存架开关切换后实时更新按钮", async () => {
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "get_long_capture_preview") return Promise.resolve("AAAA");
+      return Promise.resolve();
+    });
+    render(<LongCaptureControls />);
+    act(() => emitMockEvent("long-capture-completed", { ...STARTED, status: "completed" }));
+    // 预览渲染完成后才有操作栏
+    await screen.findByRole("button", { name: "复制图片" });
+    // 初始开关为关（mock 的 get_file_shelf_enabled 返回 undefined）
+    expect(screen.queryByRole("button", { name: "放入暂存架" })).toBeNull();
+
+    act(() => emitMockEvent("file-shelf-enabled-changed", true));
+    expect(screen.getByRole("button", { name: "放入暂存架" })).toBeTruthy();
+
+    act(() => emitMockEvent("file-shelf-enabled-changed", false));
+    expect(screen.queryByRole("button", { name: "放入暂存架" })).toBeNull();
+  });
+});

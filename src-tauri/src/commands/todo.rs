@@ -98,10 +98,11 @@ pub fn reorder_todos(
 pub fn move_todo(
     id: String,
     before_id: Option<String>,
+    list_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, crate::todo::TodoStore>,
 ) -> Result<crate::todo::TodoItem, String> {
-    let item = state.move_to(&id, before_id.as_deref())?;
+    let item = state.move_to(&id, before_id.as_deref(), list_id.as_deref())?;
     let _ = app.emit("todo-changed", &item);
     Ok(item)
 }
